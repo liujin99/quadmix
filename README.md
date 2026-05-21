@@ -1,7 +1,8 @@
 # QuaDMix — Quality-Diversity Balanced Data Selection
 
-> Clean-room implementation of the QuaDMix algorithm.
->
+> **⚠️ 非官方聲明**: 本倉庫是對 QuaDMix 論文的個人算法復現（clean-room implementation），
+> 非 ByteDance 官方實現。僅供學習和研究參考。
+
 > **Paper**: Fengze Liu, Weidong Zhou, Binbin Liu, et al. (ByteDance, 2025)
 >
 > [arXiv:2504.16511v2](https://arxiv.org/abs/2504.16511)
