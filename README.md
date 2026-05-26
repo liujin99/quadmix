@@ -55,8 +55,8 @@ quadmix/
 │   ├── run_essential_web_v1.py     # Main entry (essential-web-v1)
 │   ├── preprocess_essential_web_v1_sharded.py  # Multi-shard preprocessing
 │   ├── essential_proxy_runner.py   # Shard-aware proxy experiments
-│   ├── prepare_openhermes_10k.py   # Validation set preparation
 │   ├── download_essential_web.py   # Download tool
+│   ├── validation_set/             # Validation set prep script (reference only)
 │   ├── demo_run_quick.sh           # Quick demo (5-15s, CPU)
 │   └── demo_run_full.sh            # Full demo (paper config, GPU)
 ├── result/                     # Final results (one dir per run)
@@ -75,7 +75,7 @@ quadmix/
 # Install
 pip install -e .
 
-# Quick demo (2 experiments, 5s)
+# Quick demo (2 experiments, 5s) — auto-downloads validation set from HF
 bash scripts/demo_run_quick.sh
 
 # Full run (paper config, needs GPU)
@@ -90,12 +90,22 @@ python scripts/run_essential_web_v1.py \
     --output result/my_run
 ```
 
+> **Note**: The validation set (`openhermes_10k_assistant_tokenized.pt`)
+> is automatically downloaded from [HuggingFace](https://huggingface.co/datasets/liujin99/quadmix-openhermes-10k)
+> on first run. No manual data preparation required.
+
 ## Architecture Highlights
 
 ### Multi-Shard Scalability
-- **Metadata in memory**: only domain labels + quality scores (12 GB for 275M docs)
-- **Text on demand**: per-shard parquet, loaded only for selected documents
-- **mmap token cache**: `np.load(path, mmap_mode='r')` — pages loaded lazily, not full file
+|- **Metadata in memory**: only domain labels + quality scores (12 GB for 275M docs)
+|- **Text on demand**: per-shard parquet, loaded only for selected documents
+|- **mmap token cache**: `np.load(path, mmap_mode='r')` — pages loaded lazily, not full file
+
+### Multi-NPU Parallelism
+|- **Dynamic task queue**: Workers fetch tasks on-demand, no batch boundaries
+|- **Auto load-balancing**: Fast workers naturally do more experiments
+|- **CPU-NPU overlap**: Tokenize thread runs independently, ahead of training
+|- **~8x speedup**: 3000 experiments reduced from ~100h to ~15h with 8 NPUs
 
 ### Directory Layout
 | Path | Content | Persistence |
@@ -115,7 +125,7 @@ Preprocessed: 1 shard → 1 parquet (~180 MB each)
 In-memory: domain(275M int64) + quality_scores(275M×5 float64)
   │
   ▼ [EssentitalWebProxyRunner: per-experiment]
-Token Cache: shard_{idx}_bs{bs}.npy (mmap-mode)
+Token Cache: shard_{idx}_bs{bs}.npz (mmap-mode, int32 + row_index)
   │
   ▼ [output]
 Final: optimal_parameters.json + sampled_dataset.parquet

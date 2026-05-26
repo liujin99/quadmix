@@ -5,13 +5,16 @@ outputting one parquet per shard (multi-shard mode).
 
 Usage:
   python scripts/preprocess_essential_web_v1_sharded.py \
-      --input-dir /home/liujin99/data/essential-web-v1 \
-      --output-dir /home/liujin99/quadmix/temp/preprocessed
+      --input-dir data/essential-web-v1 \
+      --output-dir temp/preprocessed
 """
 
 import argparse, json, os, time, glob
 import numpy as np
 import pandas as pd
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_QUADMIX_DIR = os.path.dirname(_SCRIPT_DIR)
 
 FASTTEXT_FIELDS = ["dclm", "fineweb_edu_approx", "english",
                    "eai_general_math", "eai_open_web_math"]
@@ -33,7 +36,6 @@ DOMAIN_MAP = {
 def extract_domain_level_1(eai_taxonomy):
     if isinstance(eai_taxonomy, str):
         try:
-            import json
             eai_taxonomy = json.loads(eai_taxonomy)
         except (json.JSONDecodeError, ValueError):
             return -1
@@ -123,10 +125,11 @@ def process_shard(shard_path: str, shard_idx: int, output_dir: str) -> dict:
 def main():
     p = argparse.ArgumentParser(
         description="Preprocess essential-web-v1 in multi-shard mode")
-    p.add_argument("--input-dir", default="/home/liujin99/data/essential-web-v1",
+    p.add_argument("--input-dir",
+                   default=os.path.join(_QUADMIX_DIR, "data/essential-web-v1"),
                    help="Directory containing raw parquet shards")
     p.add_argument("--output-dir",
-                   default="/home/liujin99/quadmix/temp/preprocessed",
+                   default=os.path.join(_QUADMIX_DIR, "temp/preprocessed"),
                    help="Output directory for preprocessed shards")
     p.add_argument("--limit", type=int, default=None,
                    help="Limit number of shards to process (for testing)")

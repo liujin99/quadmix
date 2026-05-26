@@ -12,8 +12,6 @@ Based on Sections 3.2 and 3.3 of the paper.
 from typing import List, Optional, Dict, Any
 import numpy as np
 import numpy.typing as npt
-import json
-
 from quadmix.core.types import ParameterSet, QuaDMixConfig, ProxyResult
 from quadmix.pipeline.param_sampler import ParameterSampler
 

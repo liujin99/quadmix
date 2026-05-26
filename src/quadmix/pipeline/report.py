@@ -7,7 +7,7 @@ markdown ![](filename.png) syntax — supported by all MD viewers.
 import json
 import os
 import time
-from typing import List, Optional
+from typing import List, Tuple
 
 import numpy as np
 import pandas as pd

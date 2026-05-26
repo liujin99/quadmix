@@ -7,7 +7,7 @@ before merging (Equation 1). Smaller values indicate better quality.
 
 import numpy as np
 import numpy.typing as npt
-from typing import Callable, Optional
+from typing import Callable
 
 
 def zscore_normalize(scores: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:

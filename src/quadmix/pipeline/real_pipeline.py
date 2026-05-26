@@ -19,7 +19,7 @@ Pipeline stages:
   8. Generate comparison report
 """
 
-from typing import Dict, List, Optional, Callable, Any, Tuple
+from typing import Dict, List, Optional, Any
 import json
 import os
 import time
@@ -315,6 +315,8 @@ class QuaDMixPipeline:
         # Display names for output
         domain_names: Optional[List[str]] = None,
         quality_names: Optional[List[str]] = None,
+        # Parallel training across multiple NPU devices
+        parallel_workers: int = 1,
         **load_kwargs,
     ) -> PipelineOutput:
         """
@@ -384,7 +386,19 @@ class QuaDMixPipeline:
         if proxy_runner is None:
             raise ValueError("proxy_runner is required. Pass an EssentialWebProxyRunner instance.")
         print(f"\n[Stage 4] Running {n_exp} proxy experiments...")
-        results = proxy_runner.run_batch(param_sets)
+
+        if parallel_workers > 1 and hasattr(proxy_runner, 'precompute_samples'):
+            # Parallel mode: pre-sample then dispatch across NPU devices
+            print(f"[Stage 4] Using {parallel_workers} parallel workers (dynamic task queue)")
+            all_selected = proxy_runner.precompute_samples(param_sets)
+            results = proxy_runner.run_batch_parallel(
+                param_sets, all_selected,
+                num_workers=parallel_workers,
+                device_type=proxy_runner.device_type,
+            )
+        else:
+            # Sequential (original) mode
+            results = proxy_runner.run_batch(param_sets)
 
         losses = np.array([r.validation_loss for r in results])
         print(f"  Loss stats: mean={losses.mean():.4f}, std={losses.std():.4f}, "
@@ -413,7 +427,6 @@ class QuaDMixPipeline:
         final_ranks = self.compute_quality_ranks(
             quality_scores, domain_labels, optimal_params, token_counts,
         )
-        from quadmix.sampling.batch_sampler import sample_with_optimal_params
         selected_indices, sampling_values, _ = sample_with_optimal_params(
             final_ranks, domain_labels, optimal_params,
         )
@@ -433,7 +446,6 @@ class QuaDMixPipeline:
                 # Scale sampling values (preserves relative proportions)
                 sampling_values = sampling_values * scale
                 # Re-select with scaled values
-                from quadmix.sampling.batch_sampler import _select_documents_vectorized
                 rng = np.random.default_rng()
                 selected_indices, _ = _select_documents_vectorized(sampling_values, rng)
 

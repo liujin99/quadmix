@@ -17,8 +17,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from quadmix.npu.device import DeviceManager
-
 
 class RMSNorm(nn.Module):
     """RMSNorm (used in LLaMA architecture)."""

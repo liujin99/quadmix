@@ -19,7 +19,7 @@ Examples:
 
     # Custom output
     python scripts/download_essential_web.py \
-        --output-dir /home/liujin99/data/essential-web \
+        --output-dir ./data/essential-web \
         --num-files 50
 """
 
@@ -30,8 +30,6 @@ import json
 import urllib.request
 import urllib.error
 import time
-from pathlib import Path
-
 
 # ---------------------------------------------------------------------------
 REPO_ID = "EssentialAI/essential-web-v1.0"

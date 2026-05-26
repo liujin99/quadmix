@@ -16,7 +16,7 @@ import numpy as np
 import numpy.typing as npt
 from typing import Optional
 
-from quadmix.core.types import SamplingConfig, ParameterSet
+from quadmix.core.types import ParameterSet
 
 
 def compute_sampling_values(

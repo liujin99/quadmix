@@ -13,8 +13,6 @@ import numpy as np
 import numpy.typing as npt
 from typing import Optional
 
-from quadmix.core.types import QualityScore
-
 
 def compute_quality_ranks(
     merged_scores: npt.NDArray[np.float64],

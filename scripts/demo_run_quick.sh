@@ -16,7 +16,33 @@ export PATH="$HOME/.local/bin:$PATH"
 export CUDA_VISIBLE_DEVICES=""
 
 PREPROCESSED_DIR="$QUADMIX_DIR/temp/preprocessed"
-RAW_DATA_DIR="/home/liujin99/data/essential-web-v1"
+RAW_DATA_DIR="$QUADMIX_DIR/data/essential-web-v1"
+VAL_FILE="$QUADMIX_DIR/data/openhermes_10k_assistant_tokenized.pt"
+
+# ── 驗證集下載 ──────────────────────────────────
+if [ ! -f "$VAL_FILE" ]; then
+    echo "╔══ 驗證集就緒: 從 HuggingFace 下載 ═══╗"
+    echo ""
+    echo "  驗證集不存在: $VAL_FILE"
+    echo "  從 liujin99/quadmix-openhermes-10k 下載..."
+    mkdir -p "$(dirname "$VAL_FILE")"
+    # Try huggingface_hub first, fallback to direct download
+    if command -v huggingface-cli &>/dev/null; then
+        huggingface-cli download liujin99/quadmix-openhermes-10k \
+            openhermes_10k_assistant_tokenized.pt --local-dir "$(dirname "$VAL_FILE")" 2>/dev/null
+    elif command -v wget &>/dev/null; then
+        wget -q --show-progress \
+            "https://huggingface.co/datasets/liujin99/quadmix-openhermes-10k/resolve/main/openhermes_10k_assistant_tokenized.pt?download=true" \
+            -O "$VAL_FILE"
+    else
+        curl -L -o "$VAL_FILE" \
+            "https://huggingface.co/datasets/liujin99/quadmix-openhermes-10k/resolve/main/openhermes_10k_assistant_tokenized.pt?download=true"
+    fi
+    echo "  ✓ 驗證集下載完成: $(du -h "$VAL_FILE" | cut -f1)"
+    echo ""
+    echo "╚══════════════════════════════════════╝"
+    echo ""
+fi
 
 # ── 数据就绪检查 ──────────────────────────────────
 if [ ! -f "$PREPROCESSED_DIR/shard_index.json" ]; then

@@ -15,18 +15,56 @@ Usage:
 
   # Or use the auto-detected defaults:
   python scripts/run_essential_web_v1.py --quick
+
+The validation set (openhermes_10k_assistant_tokenized.pt) will be
+automatically downloaded from HuggingFace if not found locally.
 """
 
-import argparse, json, os, sys, time
+import argparse, os, sys, time, urllib.request
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import numpy as np
 from quadmix import QuaDMixConfig
 from quadmix.pipeline.real_pipeline import QuaDMixPipeline
 from quadmix.data.metadata_manager import ShardMetadataManager
 
-# Defaults
-DEFAULT_PREPROCESSED_DIR = "/home/liujin99/quadmix/temp/preprocessed"
-DEFAULT_VAL_PATH = "/home/liujin99/data/openhermes_10k_tokenized.pt"
+# ── Defaults ──────────────────────────────────────────────
+QUADMIX_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_PREPROCESSED_DIR = os.path.join(QUADMIX_DIR, "temp/preprocessed")
+DEFAULT_VAL_DIR = os.path.join(QUADMIX_DIR, "data")
+DEFAULT_VAL_PATH = os.path.join(DEFAULT_VAL_DIR, "openhermes_10k_assistant_tokenized.pt")
+
+# HuggingFace dataset for validation set
+HF_DATASET = "liujin99/quadmix-openhermes-10k"
+HF_VAL_FILENAME = "openhermes_10k_assistant_tokenized.pt"
+HF_RESOLVE = "https://huggingface.co/datasets/{repo}/resolve/main/{file}"
+
+
+def ensure_val_data(val_path: str) -> str:
+    """
+    Ensure the validation set exists locally.
+    Downloads from HuggingFace if not found.
+    Returns the path to the file.
+    """
+    if os.path.exists(val_path):
+        return val_path
+
+    # Try downloading
+    os.makedirs(os.path.dirname(val_path), exist_ok=True)
+    url = HF_RESOLVE.format(repo=HF_DATASET, file=HF_VAL_FILENAME)
+    print(f"\n[Setup] Validation set not found at:\n  {val_path}")
+    print(f"[Setup] Downloading from:\n  {url}")
+    try:
+        urllib.request.urlretrieve(url, val_path)
+        size_mb = os.path.getsize(val_path) / 1024**2
+        print(f"[Setup] Downloaded: {val_path} ({size_mb:.0f} MB)")
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to download validation set from {url}.\n"
+            f"  Error: {e}\n"
+            f"  You can manually download from:\n"
+            f"    https://huggingface.co/datasets/{HF_DATASET}\n"
+            f"  Or place the file at: {val_path}"
+        )
+    return val_path
 
 DOMAIN_NAMES = [
     "Industrial arts, Technology, and Engineering",  # 0
@@ -49,8 +87,6 @@ def build_parser():
     p = argparse.ArgumentParser(description="QuaDMix on essential-web-v1 (sharded mode)")
     p.add_argument("--preprocessed-dir", default=DEFAULT_PREPROCESSED_DIR,
                    help="Directory of preprocessed parquet shards")
-    p.add_argument("--val-path", default=DEFAULT_VAL_PATH,
-                   help="Pre-tokenized validation set (.pt)")
     p.add_argument("--quick", action="store_true", help="Quick: 200 exp, 2000 search")
     p.add_argument("--full", action="store_true", help="Full: 3000 exp, 100K search")
     p.add_argument("--output", "-o", default=None)
@@ -64,6 +100,8 @@ def build_parser():
     p.add_argument("--device-type", default="cpu",
                    choices=["cpu", "cuda", "npu"],
                    help="Device type for proxy model training")
+    p.add_argument("--npu-devices", type=int, default=1,
+                   help="Number of NPU devices (1=sequential, 8=8-way parallel)")
 
     # Proxy model config
     p.add_argument("--block-size", type=int, default=64,
@@ -78,6 +116,9 @@ def build_parser():
                    help="Validation docs to evaluate")
     p.add_argument("--rank-ref-size", type=int, default=10000,
                    help="Reference subset size for rank estimation")
+    p.add_argument("--val-path", type=str, default=None,
+                   help="Path to validation .pt file "
+                        "(default: auto-download from liujin99/quadmix-openhermes-10k to project data/)")
     return p
 
 
@@ -86,12 +127,17 @@ def create_proxy_runner(config, args, output_dir, metadata_manager):
     from scripts.essential_proxy_runner import EssentialWebProxyRunner
     proxy_dir = os.path.join(output_dir, "proxy_experiments")
 
+    # Ensure validation data exists (auto-download if needed)
+    val_path = args.val_path or DEFAULT_VAL_PATH
+    val_path = ensure_val_data(val_path)
+
     runner = EssentialWebProxyRunner(
         config=config,
         metadata_manager=metadata_manager,
-        val_data_path=args.val_path,
+        val_data_path=val_path,
         output_dir=proxy_dir,
         device_type=args.device_type,
+        npu_device_id=0,  # Main process uses card 0; workers use their own
         micro_batch_size=args.micro_batch_size,
         global_batch_size=args.global_batch_size,
         tiny_steps=args.tiny_steps,
@@ -99,7 +145,7 @@ def create_proxy_runner(config, args, output_dir, metadata_manager):
         test_block_size=args.block_size,
         rank_ref_size=args.rank_ref_size,
         val_doc_limit=args.val_limit,
-        token_cache_dir="/home/liujin99/quadmix/temp/token_cache",
+        token_cache_dir=os.path.join(QUADMIX_DIR, "temp/token_cache"),
     )
     return runner
 
@@ -116,9 +162,8 @@ def main():
         n_search = args.num_search or 5000
         top_k = args.top_k
 
-    output_dir = args.output or (
-        f"/home/liujin99/quadmix/result/quadmix_"
-        f"{time.strftime('%Y%m%d_%H%M%S')}"
+    output_dir = args.output or os.path.join(
+        QUADMIX_DIR, f"result/quadmix_{time.strftime('%Y%m%d_%H%M%S')}"
     )
 
     # ── Load metadata manager (reads only domain + quality from all shards) ──
@@ -139,7 +184,8 @@ def main():
 
     print(f"\n[Setup] Proxy runner: {n_exp} experiments, "
           f"{args.tiny_steps} steps each, "
-          f"val_limit={args.val_limit} docs")
+          f"val_limit={args.val_limit} docs"
+          f"{', ' + str(args.npu_devices) + ' NPU devices' if args.npu_devices > 1 else ''}")
 
     pipeline.run(
         data_path=args.preprocessed_dir,
@@ -152,6 +198,7 @@ def main():
         domain_names=DOMAIN_NAMES,
         quality_names=QUALITY_NAMES,
         proxy_runner=proxy_runner,
+        parallel_workers=args.npu_devices,
     )
     return 0
 

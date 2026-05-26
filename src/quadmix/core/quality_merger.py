@@ -9,11 +9,10 @@ Where:
     q_n — raw quality score from criterion n (smaller = better)
 """
 
-from typing import Callable, Optional
 import numpy as np
 import numpy.typing as npt
 
-from quadmix.core.types import MergedQualityConfig, QualityScore
+from quadmix.core.types import MergedQualityConfig
 from quadmix.utils.normalization import get_normalizer
 
 

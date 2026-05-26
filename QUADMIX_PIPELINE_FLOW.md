@@ -147,12 +147,15 @@ Step 2 — 加载 token（MMap Cache）:
   _load_tokens_for_experiment(selected_idx):
     按 (shard_idx, local_rows) 分组
     对每个 shard:
-      cache_path = shard_{sid:05d}_bs{block_size}.npy
+      cache_path = shard_{sid:05d}_bs{block_size}.npz
       if cache exists:
-        disk_tokens = np.load(cache_path, mmap_mode='r')  # 页面级延迟加载
-        selected = disk_tokens[local_rows]                  # 只读选中的行
+        data = np.load(cache_path, mmap_mode='r')
+        token_mmap = data['tokens']  # mmap'd, not loaded into RAM
+        row_index = data['rows']
+        positions = [row_to_pos[r] for r in local_rows]
+        selected = token_mmap[positions]  # only accessed pages loaded
       else:
-        读 shard text → tokenize 全 shard → np.save(cache_path)
+        读 shard text → tokenize → np.savez(cache_path, tokens=..., rows=...)
 
 Step 3 — 创建模型:
   ProxyModel(2层, 8头, 256d, 50432vocab, RMSNorm+SwiGLU)
@@ -175,25 +178,30 @@ Step 6 — 保存:
 
 ```python
 # 文件格式：
-# token_cache/shard_{sid:05d}_bs{block_size}.npy
-# dtype=int32, shape=[N_docs_in_shard, block_size]
+# token_cache/shard_{sid:05d}_bs{block_size}.npz
+# 包含两个数组：
+#   tokens: [N_cached, block_size] int32 — mmap-compatible token IDs
+#   rows: [N_cached] int64 — corresponding row_in_shard indices
 
 # 读取（延迟加载）：
-disk_tokens = np.load(cache_path, mmap_mode='r')
-# 没有实际磁盘 I/O 发生
+data = np.load(cache_path, mmap_mode='r')
+token_mmap = data['tokens']  # 没有实际磁盘 I/O 发生
+row_index = data['rows']
 
-selected = disk_tokens[local_rows]
-# 只有 local_rows 对应的 pages 被 OS 从磁盘读取
-# 如果 local_rows 在同一个 page 内，只读 4KB
+# 通过 row_index 找到对应的 cache 位置
+row_to_pos = {r: i for i, r in enumerate(row_index)}
+positions = [row_to_pos[r] for r in local_rows]
+selected = token_mmap[positions]  # 只有 positions 对应的 pages 被读取
 
-del disk_tokens  # 释放 mmap 引用
+del data  # 释放 mmap 引用
 ```
 
-**性能对比**（单个 shard, 340MB npy）：
+**性能对比**（单个 shard, 增量缓存）:
 | 方式 | 读 100 行 | 读 10000 行 |
 |------|-----------|-------------|
-| `np.load`（全文件） | 340MB I/O + 340MB RAM | 340MB I/O + 340MB RAM |
-| `np.load(mmap_mode='r')` | ~80KB I/O + ~80KB RAM | ~8MB I/O + ~8MB RAM |
+| `np.load`（全文件） | 全量 I/O + RAM | 全量 I/O + RAM |
+| `np.load(mmap_mode='r')` | ~80KB I/O + RAM | ~8MB I/O + RAM |
+| **增量 npz** | 只缓存需要的行 | 已缓存行零 I/O |
 
 ---
 
@@ -344,8 +352,8 @@ temp/
 │   ├── preprocessed_00000.parquet  (~180MB × N shards)
 │   ├── preprocessed_00001.parquet
 │   └── shard_index.json
-└── token_cache/                    # 分词缓存 (mmap)
-    └── shard_00000_bs64.npy        (~21MB × N shards)
+└── token_cache/                    # 分词缓存 (增量 npz)
+    └── shard_00000_bs64.npz        (tokens + rows, 增量追加)
 ```
 
 ---
@@ -415,9 +423,10 @@ temp/
               │        │                                       │
               │        ▼   _load_tokens_for_experiment()       │
               │      ┌──────────────────┐                      │
-              │      │ MMap Cache        │                    │
-              │      │ shard_0_bs64.npy   │── hit → np.load    │
-              │      │ shard_1_bs64.npy   │     (mmap_mode=r)  │
+              │      │ MMap Cache (.npz) │                    │
+              │      │ shard_0_bs64.npz  │── hit → np.load    │
+              │      │ shard_1_bs64.npz  │     (mmap_mode=r)  │
+              │      │  tokens + rows    │                    │
               │      └──────────────────┘                      │
               │        │                                       │
               │        ▼                                       │
@@ -461,8 +470,15 @@ temp/
 
 ```
 参数: 3000 experiments, 100000 search, block_size=2048
-时间: 需 GPU (连续 3000 次代理模型训练)
+时间: 需 GPU/NPU (连续 3000 次代理模型训练)
 用途: 论文配置，真实优化
+
+多卡并行 (--npu-devices N):
+  动态任务队列架构：
+    - Worker 完成任务后立即领取下一个，无批次边界
+    - 快的 Worker 自然做更多实验
+    - CPU tokenize 线程独立运行，与 NPU 训练重叠
+  耗时: 单卡 ~100h → 8x NPU ~15h (约 8x 加速)
 ```
 
 两个脚本都会自动：
@@ -477,12 +493,18 @@ temp/
 
 | 项目 | 值 |
 |------|-----|
-| 来源 | openhermes-10k (ChatML) |
-| 文件 | `/home/liujin99/data/openhermes_10k_formatted.parquet` (8MB) |
+| 来源 | OpenHermes-2.5-1M (assistant-only 子集) |
+| 文件 | `data/openhermes_10k_assistant_tokenized.pt` (176MB, PyTorch tensor) |
+| HF 数据集 | `liujin99/quadmix-openhermes-10k` |
 | 文档数 | 10,000 |
-| 预处理脚本 | `scripts/prepare_openhermes_10k.py` |
-| 预分词缓存 | `openhermes_10k_tokenized.pt` (PyTorch tensor) |
-| 验证方式 | assistant-only loss mask |
+| 预处理脚本 | `scripts/validation_set/prepare_openhermes_assistant_10k.py` (僅供參考，不需手動執行) |
+| 预分词缓存 | `openhermes_10k_assistant_tokenized.pt` (自動從 HF 下載) |
+| 验证方式 | assistant-only loss mask (所有非 padding token) |
+
+> **注意**: 使用者不需手動下載 openhermes 原始數據或執行準備腳本。
+> `run_essential_web_v1.py` 和 `demo_run_*.sh` 會在首次運行時自動從
+> [liujin99/quadmix-openhermes-10k](https://huggingface.co/datasets/liujin99/quadmix-openhermes-10k) 下載。
+> 此腳本僅作為數據處理流程的說明文檔保留。
 
 ---
 

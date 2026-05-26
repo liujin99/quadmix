@@ -20,6 +20,7 @@ data/essential-web/
 
 # Large binary artifacts
 *.npy
+*.npz
 *.pt
 
 # OS

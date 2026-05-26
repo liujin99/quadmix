@@ -9,6 +9,13 @@ Shard-aware mode (recommended):
 Legacy mode (single-file):
   Uses data_path → loads all text upfront, tokenizes all.
 
+Multi-NPU Parallelism:
+  Dynamic task queue mode (run_batch_parallel):
+    - Workers fetch tasks from shared queue, no batch boundaries
+    - Fast workers naturally do more experiments
+    - Tokenize thread runs ahead, independent of NPU training
+    - Each worker binds to NPU device by worker_id
+
 Aligned with RegMix:
   - GPT-NeoX-20B BPE tokenizer (same as GPT-NeoX)
   - On-demand tokenization with per-shard disk cache
@@ -17,7 +24,10 @@ Aligned with RegMix:
 """
 
 import os, math, time, json, glob
-from typing import List, Optional, Dict, Any
+import multiprocessing as mp
+from functools import partial
+from typing import List, Optional, Dict, Tuple
+import pandas as pd
 
 import numpy as np
 import torch
@@ -31,7 +41,9 @@ from quadmix.pipeline.proxy_runner import BaseProxyRunner
 
 # Default cache directory for per-shard token cache
 # Override via token_cache_dir param in constructor
-DEFAULT_TOKEN_CACHE_DIR="/home/liujin99/quadmix/temp/token_cache"
+_SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_DIR = os.path.dirname(_SCRIPTS_DIR)
+DEFAULT_TOKEN_CACHE_DIR = os.path.join(_PROJECT_DIR, "temp/token_cache")
 
 
 class EssentialWebProxyRunner(BaseProxyRunner):
@@ -53,6 +65,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         data_path: Optional[str] = None,
         output_dir: str = "./proxy_validation",
         device_type: str = "cpu",
+        npu_device_id: int = 0,  # ← 新增
         # RegMix training params
         model_variant: str = "tinyllama_1M",
         global_batch_size: int = 512,
@@ -77,6 +90,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         self.output_dir = output_dir
         self.model_variant = model_variant
         self.device_type = device_type
+        self.npu_device_id = npu_device_id  # ← 新增：指定 NPU 卡號
         self.tiny_steps = tiny_steps
         self.doc_limit = doc_limit
         self.rank_ref_size = rank_ref_size
@@ -184,16 +198,119 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             all_ids.append(enc["input_ids"])
         return torch.cat(all_ids, dim=0)
 
+    # ═══════════════════════════════════════════════════════════
+    # Incremental token cache (append new rows to existing npz)
+    # ═══════════════════════════════════════════════════════════
+
+    def _get_shard_token_path(self, shard_idx: int) -> str:
+        """Path to disk cache for a shard's selected tokens (npz, mmap-compatible)."""
+        return os.path.join(
+            self.token_cache_dir,
+            f"shard_{shard_idx:05d}_bs{self.block_size}.npz",
+        )
+
+    def _cached_shard_rows(self, sid: int) -> set:
+        """Return set of row_in_shard already cached for this shard."""
+        cache_path = self._get_shard_token_path(sid)
+        if not os.path.exists(cache_path):
+            return set()
+        data = np.load(cache_path, mmap_mode='r')
+        rows = set(int(r) for r in data['rows'])
+        return rows
+
+    def _cache_add_rows(self, sid: int, new_rows: np.ndarray,
+                        new_tokens: torch.Tensor):
+        """Append rows to an existing cache npz (rewrite if needed).
+
+        Reads old cache, merges new rows (sorted by row_in_shard),
+        rewrites single npz. Bound by total unique docs per shard (~25K).
+        """
+        cache_path = self._get_shard_token_path(sid)
+        new_np = new_tokens.numpy().astype(np.int32)  # [M, block_size]
+
+        if os.path.exists(cache_path):
+            old = np.load(cache_path)
+            old_rows: np.ndarray = old['rows']
+            old_tokens: np.ndarray = old['tokens']
+
+            all_rows = np.concatenate([old_rows, new_rows])
+            all_tokens = np.concatenate([old_tokens, new_np])
+            order = np.argsort(all_rows)
+            all_rows = all_rows[order]
+            all_tokens = all_tokens[order]
+            del old
+        else:
+            all_rows = np.sort(new_rows)
+            order = np.argsort(new_rows)
+            all_tokens = new_np[order]
+
+        np.savez(cache_path, tokens=all_tokens, rows=all_rows)
+
+    # ═══════════════════════════════════════════════════════════
+    # Batch-level tokenization (CPU, called from main process)
+    # ═══════════════════════════════════════════════════════════
+
+    def tokenize_batch_delta(
+        self,
+        batch_selected: List[np.ndarray],
+        batch_exp_ids: List[int],
+    ):
+        """Tokenize rows needed by this batch that aren't yet cached.
+
+        Called from main process (CPU) between NPU training rounds.
+        For each shard: compute cache miss rows → tokenize → append to cache.
+        """
+        mgr = self.metadata_manager
+        # Merge all docs needed by this batch
+        batch_union = np.unique(np.concatenate(batch_selected))
+        shard_groups = mgr.global_to_shard_rows(batch_union)
+
+        total_tokenized = 0
+        for sid, (shard_path, all_rows) in shard_groups.items():
+            cached = self._cached_shard_rows(sid)
+            if len(cached) > 0:
+                missing = np.array(
+                    [r for r in all_rows if int(r) not in cached],
+                    dtype=np.int64,
+                )
+            else:
+                missing = all_rows
+
+            if len(missing) == 0:
+                continue
+
+            # Read text + tokenize
+            df = pd.read_parquet(
+                shard_path,
+                columns=["row_in_shard", "text"],
+                filters=[("row_in_shard", "in", missing.tolist())],
+            )
+            df = df.sort_values("row_in_shard")
+            texts = df["text"].astype(str).tolist()
+            parsed_rows = df["row_in_shard"].to_numpy(dtype=np.int64)
+
+            tokens = self._tokenize_texts(texts)
+            self._cache_add_rows(sid, parsed_rows, tokens)
+            total_tokenized += len(texts)
+
+        if total_tokenized > 0:
+            exps_str = ",".join(str(e) for e in batch_exp_ids[:3])
+            if len(batch_exp_ids) > 3:
+                exps_str += f"...+{len(batch_exp_ids)-3}"
+            print(f"  [BatchTokenize] exps [{exps_str}]: "
+                  f"tokenized {total_tokenized:,} docs across "
+                  f"{len(shard_groups)} shards")
+
     def _load_tokens_for_experiment(
         self, selected_idx: np.ndarray
     ) -> torch.Tensor:
-        """
-        Load or tokenize tokens for selected document indices.
+        """Load or tokenize tokens for selected document indices.
 
         In sharded mode:
           1. Use metadata_manager to get (shard_idx, row) per selected index
           2. Group by shard, check disk cache for each shard
-          3. For cache misses: read text from parquet, tokenize, save to cache
+          3. For cache misses: read text from parquet for ONLY selected rows,
+             tokenize only those rows, save to cache (npz with row index)
           4. Concatenate all token tensors
 
         In legacy mode:
@@ -214,36 +331,51 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             cache_path = self._get_shard_token_path(sid)
 
             if os.path.exists(cache_path):
-                # Memory-mapped load: only the pages containing local_rows
-                # are actually read from disk (no full file load)
-                disk_tokens = np.load(cache_path, mmap_mode='r')  # [N, block_size] int32
-                shard_tokens = torch.from_numpy(
-                    disk_tokens[local_rows].astype(np.int64)
+                # Cache hit: load npz, lookup needed rows via row index
+                data = np.load(cache_path, mmap_mode='r')
+                token_mmap = data['tokens']     # [N_selected, block_size] int32, mmap'd
+                row_index = data['rows']         # [N_selected] int64, in memory
+
+                # Build row→position lookup (small dict)
+                row_to_pos = {int(r): i for i, r in enumerate(row_index)}
+                positions = np.array(
+                    [row_to_pos[int(r)] for r in local_rows], dtype=np.int64
                 )
-                # Release mmap by deleting the reference
-                del disk_tokens
+                shard_tokens = torch.from_numpy(
+                    token_mmap[positions].astype(np.int64)
+                )
+                del data, token_mmap  # release mmap
                 self._cache_hits += len(local_rows)
             else:
-                # Cache miss: read text + tokenize entire shard
+                # Cache miss: read text + tokenize for this experiment's rows only
+                # (In batch mode, this should be rare — tokenize_batch_delta runs first)
                 self._cache_misses += len(local_rows)
-                # Read all text from this shard
-                import pandas as pd
-                df_shard = pd.read_parquet(shard_path, columns=["text"])
-                shard_texts = df_shard["text"].astype(str).tolist()
+                df_shard = pd.read_parquet(
+                    shard_path,
+                    columns=["row_in_shard", "text"],
+                    filters=[("row_in_shard", "in", local_rows.tolist())],
+                )
+                df_shard = df_shard.sort_values("row_in_shard")
+                selected_texts = df_shard["text"].astype(str).tolist()
+                parsed_rows = df_shard["row_in_shard"].to_numpy(dtype=np.int64)
 
                 print(f"    [Cache miss] shard {sid}: "
-                      f"tokenizing {len(shard_texts):,} docs "
+                      f"tokenizing {len(selected_texts):,} docs "
                       f"(need {len(local_rows)} for this exp)...")
 
-                # Tokenize ALL docs in this shard
-                shard_all = self._tokenize_texts(shard_texts)  # [N, block_size]
+                tokenized = self._tokenize_texts(selected_texts)
 
-                # Save to disk cache (int32 for safety: vocab may exceed int16 max)
-                np.save(cache_path, shard_all.numpy().astype(np.int32))
-                print(f"    [Cache miss] shard {sid}: cached → {cache_path}")
+                # Append to cache
+                self._cache_add_rows(sid, parsed_rows, tokenized)
 
-                # Select the rows we need
-                shard_tokens = shard_all[local_rows]
+                # Build lookup
+                row_to_pos = {int(r): i for i, r in enumerate(parsed_rows)}
+                positions = np.array(
+                    [row_to_pos[int(r)] for r in local_rows], dtype=np.int64
+                )
+                shard_tokens = torch.from_numpy(
+                    tokenized.numpy().astype(np.int64)[positions]
+                )
 
             all_tokens.append(shard_tokens)
 
@@ -341,9 +473,13 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         return ranks
 
     def run_experiment(
-        self, params: ParameterSet, experiment_id: int = 0
+        self, params: ParameterSet, experiment_id: int = 0,
+        selected_idx: Optional[np.ndarray] = None,  # ← 新增：外部傳入選中文檔索引
     ) -> ProxyResult:
-        """Train one proxy model. Validates on openhermes-10k."""
+        """Train one proxy model. Validates on openhermes-10k.
+
+        If selected_idx is provided, skips Eq.1-3 sampling (pre-computed mode).
+        """
         from quadmix.core.proxy_model import ProxyModel
         from quadmix.npu.device import DeviceManager, DeviceType
 
@@ -351,21 +487,37 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         exp_dir = os.path.join(self.output_dir, f"exp_{experiment_id:04d}")
         os.makedirs(exp_dir, exist_ok=True)
 
-        device_mgr = DeviceManager(device_type=DeviceType(self.device_type))
+        device_mgr = DeviceManager(
+            device_type=DeviceType(self.device_type),
+            npu_device_id=self.npu_device_id,
+        )
         device = device_mgr.get_device()
 
-        # ---- 0. Compute quality ranks (Eq.1+Eq.2) ----
-        quality_ranks = self._compute_ranks_for_params(params, experiment_id)
-        sv = compute_sampling_values(quality_ranks, self._domain_labels, params)
-        train_sv = sv[self._train_idx]
-        probs = np.clip(train_sv, 0, 1)
-        rng = np.random.default_rng(experiment_id + 42)
-        selected = rng.uniform(size=len(self._train_idx)) < probs
-        selected_idx = self._train_idx[selected]
-        if len(selected_idx) < 10:
-            selected_idx = rng.choice(self._train_idx, 100, replace=False)
+        # ---- 0. Compute quality ranks (Eq.1+Eq.2) + sample ----
+        if selected_idx is None:
+            # Original flow: Eq.1-3 + Bernoulli inside run_experiment
+            quality_ranks = self._compute_ranks_for_params(params, experiment_id)
+            sv = compute_sampling_values(quality_ranks, self._domain_labels, params)
+            train_sv = sv[self._train_idx]
+
+            # Proper fractional sampling (copies _select_documents_vectorized logic)
+            int_part = np.floor(train_sv).astype(np.int64)
+            frac_part = train_sv - int_part
+            rng = np.random.default_rng(experiment_id + 42)
+            random_mask = rng.uniform(size=len(train_sv)) < frac_part
+            repeats = int_part + random_mask.astype(np.int64)
+            selected_idx = self._train_idx[
+                np.repeat(np.arange(len(self._train_idx)), repeats)
+            ]
+            if len(selected_idx) < 10:
+                rng2 = np.random.default_rng(experiment_id + 42)
+                selected_idx = rng2.choice(self._train_idx, 100, replace=False)
+        else:
+            # Pre-computed mode: verify correct dtype
+            selected_idx = np.asarray(selected_idx, dtype=np.int64)
+
         print(f"  [Exp {experiment_id:04d}] QuaDMix sampled {len(selected_idx)} docs "
-              f"(from {len(self._train_idx):,}, {probs.mean():.3f} avg prob)")
+              f"(from {len(self._train_idx):,})")
 
         # ---- 1. Load / tokenize training data on demand ----
         train_tokens = self._load_tokens_for_experiment(selected_idx).to(device)
@@ -522,6 +674,360 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             json.dump(summary, f, indent=2)
         print(f"[ProxyRunner] Summary: {path}")
 
+    # ═══════════════════════════════════════════════════════════
+    # Pre-compute sampling (Phase 0) — pure numpy, CPU only
+    # ═══════════════════════════════════════════════════════════
+
+    def precompute_samples(
+        self, all_params: List[ParameterSet]
+    ) -> List[np.ndarray]:
+        """Run Eq.1-3 + fractional sampling for all experiments.
+
+        Returns list of selected_indices (one per experiment).
+        Pure numpy, no tokenization or GPU involved.
+        """
+        all_selected: List[np.ndarray] = []
+        t0 = time.time()
+
+        for i, params in enumerate(all_params):
+            quality_ranks = self._compute_ranks_for_params(params, i)
+            sv = compute_sampling_values(
+                quality_ranks, self._domain_labels, params
+            )
+            train_sv = sv[self._train_idx]
+
+            # Proper fractional sampling (same as _select_documents_vectorized)
+            int_part = np.floor(train_sv).astype(np.int64)
+            frac_part = train_sv - int_part
+            rng = np.random.default_rng(i + 42)
+            random_mask = rng.uniform(size=len(train_sv)) < frac_part
+            repeats = int_part + random_mask.astype(np.int64)
+            selected = self._train_idx[
+                np.repeat(np.arange(len(self._train_idx)), repeats)
+            ]
+            if len(selected) < 10:
+                rng2 = np.random.default_rng(i + 42)
+                selected = rng2.choice(self._train_idx, 100, replace=False)
+
+            all_selected.append(selected)
+
+        elapsed = time.time() - t0
+        total_docs = sum(len(s) for s in all_selected)
+        n = len(all_params)
+        print(f"\n[PreSample] {n} experiments pre-sampled in {elapsed:.1f}s")
+        print(f"[PreSample] Total selected docs: {total_docs:,} "
+              f"(avg {total_docs//max(1,n):,}/exp)")
+
+        # Collect unique docs → per-shard rows (union across all experiments)
+        if self.metadata_manager is not None:
+            all_unique = np.unique(np.concatenate(all_selected))
+            shard_groups = self.metadata_manager.global_to_shard_rows(all_unique)
+            # Store per-shard needed rows for precise cache miss tokenization
+            self._per_shard_needed_rows = {
+                sid: rows for sid, (_, rows) in shard_groups.items()
+            }
+            unique_ratio = len(all_unique) / max(1, self._num_docs) * 100
+            print(f"[PreSample] Unique docs: {len(all_unique):,} "
+                  f"({unique_ratio:.1f}% of pool) "
+                  f"across {len(shard_groups)} shards")
+            avg_per_shard = len(all_unique) // max(1, len(shard_groups))
+            print(f"[PreSample] Avg {avg_per_shard:,} docs/shard to tokenize "
+                  f"(vs {self.metadata_manager._per_shard_info[0]['num_docs']:,} full)")
+
+        return all_selected
+
+    # ═══════════════════════════════════════════════════════════
+    # Parallel run across multiple NPU devices
+    # ═══════════════════════════════════════════════════════════
+
+    def _serialize_config(self) -> dict:
+        """Pickle-safe config for worker processes."""
+        return {
+            "config": self.config,
+            "val_data_path": self.val_data_path,
+            "preprocessed_dir": (
+                self.metadata_manager._dir if self.metadata_manager else None
+            ),
+            "output_dir": self.output_dir,
+            "device_type": self.device_type,
+            "model_variant": self.model_variant,
+            "global_batch_size": self.global_batch_size,
+            "micro_batch_size": self.micro_batch_size,
+            "max_step": self.max_step,
+            "warmup_steps": self.warmup_steps,
+            "learning_rate": self.learning_rate,
+            "weight_decay": self.weight_decay,
+            "grad_clip": self.grad_clip,
+            "tiny_steps": self.tiny_steps,
+            "doc_limit": self.doc_limit,
+            "test_block_size": self.block_size,
+            "rank_ref_size": self.rank_ref_size,
+            "val_doc_limit": self.val_doc_limit,
+            "token_cache_dir": self.token_cache_dir,
+        }
+
+    def run_batch_parallel(
+        self,
+        params_list: List[ParameterSet],
+        all_selected: List[np.ndarray],
+        num_workers: int = 1,
+        device_type: str = "npu",
+        tokenize_lookahead: int = 32,
+    ) -> List:
+        """Run proxy experiments in parallel using dynamic task queue.
+
+        Workers pull tasks on-demand from a shared queue. This ensures:
+          - No batch boundary: fast workers do more experiments
+          - Better load balance: slow experiments don't block others
+          - CPU tokenize thread runs independently
+
+        Args:
+            params_list: Parameter configurations for all experiments.
+            all_selected: Pre-computed selected_indices (from precompute_samples).
+            num_workers: Number of parallel workers (= NPU devices to use).
+            device_type: Device type for training.
+            tokenize_lookahead: How many experiments to pre-tokenize.
+
+        Returns:
+            List of ProxyResult in experiment order.
+        """
+        n_exp = len(params_list)
+        assert len(all_selected) == n_exp, (
+            f"all_selected length {len(all_selected)} != "
+            f"params_list length {n_exp}"
+        )
+
+        if num_workers <= 1:
+            # Sequential fallback
+            results = []
+            for i, (params, sel) in enumerate(zip(params_list, all_selected)):
+                r = self.run_experiment(
+                    params, experiment_id=i, selected_idx=sel
+                )
+                results.append(r)
+            return results
+
+        # ── Dynamic task queue mode ───────────────────────────
+        return self._run_batch_dynamic(
+            params_list, all_selected, num_workers, device_type, tokenize_lookahead
+        )
+
+    # ═══════════════════════════════════════════════════════════
+    # Dynamic task queue implementation
+    # ═══════════════════════════════════════════════════════════
+
+    def _run_batch_dynamic(
+        self,
+        params_list: List[ParameterSet],
+        all_selected: List[np.ndarray],
+        num_workers: int,
+        device_type: str,
+        tokenize_lookahead: int = 32,
+    ) -> List:
+        """Dynamic task queue mode: workers pull tasks on-demand.
+
+        Architecture:
+          Main Process:
+            ├─ Tokenize Thread (CPU) → continuously pre-tokenize
+            ├─ Dispatcher Thread → push ready tasks to queue
+            └─ Collector Thread → receive results
+
+          Worker 0-7 (NPU):
+            └─ pull task → run → push result → pull next task
+
+        Advantages over static batch mode:
+          - No batch boundary: fast workers do more experiments
+          - Better load balance: slow experiments don't block others
+          - No idle waiting: workers immediately start next task
+
+        Args:
+            params_list: All parameter configurations
+            all_selected: Pre-computed selected indices
+            num_workers: Number of NPU workers
+            device_type: Device type (cpu/cuda/npu)
+            tokenize_lookahead: How many experiments to pre-tokenize
+
+        Returns:
+            List of ProxyResult in experiment order
+        """
+        import threading
+        from multiprocessing import Queue
+
+        n_exp = len(params_list)
+        all_results = [None] * n_exp
+        config_ser = self._serialize_config()
+        t_start = time.time()
+
+        print(f"\n[DynamicParallel] {n_exp} experiments, {num_workers} workers")
+        print(f"[DynamicParallel] tokenize_lookahead={tokenize_lookahead}")
+
+        # ── Create queues ───────────────────────────────────────
+        ctx = mp.get_context("spawn")
+        task_queue = ctx.Queue(maxsize=num_workers * 2)  # Limit backlog
+        result_queue = ctx.Queue()
+
+        # Track which experiments are tokenized
+        ready_events: Dict[int, bool] = {}
+        ready_lock = threading.Lock()
+        completed_count = 0
+
+        # ── 1. Tokenize Thread (CPU, continuously run) ───────────
+        def tokenize_thread_func():
+            """Continuously pre-tokenize experiments ahead of workers."""
+            pos = 0
+            while pos < n_exp:
+                # Tokenize a batch of experiments
+                end_pos = min(pos + tokenize_lookahead, n_exp)
+                batch_ids = list(range(pos, end_pos))
+                batch_selected = [all_selected[i] for i in batch_ids]
+
+                try:
+                    self.tokenize_batch_delta(batch_selected, batch_ids)
+                except Exception as e:
+                    print(f"[TokenizeThread] Error: {e}")
+
+                # Mark as ready
+                with ready_lock:
+                    for eid in batch_ids:
+                        ready_events[eid] = True
+
+                pos = end_pos
+                time.sleep(0.05)  # Small pause to let workers catch up
+
+            print(f"[TokenizeThread] All {n_exp} experiments tokenized")
+
+        tokenize_thread = threading.Thread(target=tokenize_thread_func, daemon=True)
+        tokenize_thread.start()
+
+        # ── 2. Dispatcher Thread (push ready tasks) ───────────────
+        def dispatcher_thread_func():
+            """Push tokenized experiments to task queue."""
+            pos = 0
+            while pos < n_exp:
+                with ready_lock:
+                    is_ready = ready_events.get(pos, False)
+
+                if is_ready:
+                    task_queue.put((pos, params_list[pos], all_selected[pos]))
+                    pos += 1
+                else:
+                    time.sleep(0.02)  # Wait for tokenize
+
+            # Send termination signals
+            for _ in range(num_workers):
+                task_queue.put(None)
+
+            print(f"[Dispatcher] All {n_exp} tasks dispatched")
+
+        dispatcher_thread = threading.Thread(target=dispatcher_thread_func, daemon=True)
+        dispatcher_thread.start()
+
+        # ── 3. Collector Thread (receive results) ────────────────
+        def collector_thread_func():
+            """Collect results from result queue."""
+            nonlocal completed_count
+            while completed_count < n_exp:
+                try:
+                    result = result_queue.get(timeout=1.0)
+                    if result is not None:
+                        eid = result.metadata["experiment_id"]
+                        all_results[eid] = result
+                        completed_count += 1
+
+                        elapsed = time.time() - t_start
+                        eta = (n_exp - completed_count) * elapsed / max(1, completed_count)
+                        if completed_count % 50 == 0 or completed_count == n_exp:
+                            print(f"[Collector] {completed_count}/{n_exp} done "
+                                  f"({elapsed:.0f}s, ETA: {eta:.0f}s)")
+                except:
+                    pass  # Timeout, continue waiting
+
+        collector_thread = threading.Thread(target=collector_thread_func, daemon=True)
+        collector_thread.start()
+
+        # ── 4. Launch Worker Processes ───────────────────────────
+        worker_processes = []
+        for wid in range(num_workers):
+            p = ctx.Process(
+                target=_worker_dynamic_loop,
+                args=(
+                    wid,
+                    device_type,
+                    config_ser,
+                    task_queue,
+                    result_queue,
+                ),
+            )
+            p.start()
+            worker_processes.append(p)
+
+        # ── 5. Wait for completion ───────────────────────────────
+        collector_thread.join()
+        dispatcher_thread.join()
+        tokenize_thread.join()
+
+        for p in worker_processes:
+            p.join(timeout=5.0)
+
+        elapsed = time.time() - t_start
+        print(f"\n[DynamicParallel] All {n_exp} experiments complete "
+              f"({elapsed:.0f}s ≈ {elapsed/60:.1f}min)")
+        return all_results
+
+
+def _worker_dynamic_loop(
+    worker_id: int,
+    device_type: str,
+    config_dict: dict,
+    task_queue,
+    result_queue,
+):
+    """Worker loop for dynamic mode: pull task → run → push result → repeat."""
+    from quadmix.data.metadata_manager import ShardMetadataManager
+
+    # Re-create runner in worker process
+    mgr = ShardMetadataManager(config_dict["preprocessed_dir"])
+    runner = EssentialWebProxyRunner(
+        config=config_dict["config"],
+        metadata_manager=mgr,
+        val_data_path=config_dict["val_data_path"],
+        output_dir=config_dict["output_dir"],
+        device_type=device_type,
+        npu_device_id=worker_id,  # Bind to specific NPU card
+        model_variant=config_dict["model_variant"],
+        global_batch_size=config_dict["global_batch_size"],
+        micro_batch_size=config_dict["micro_batch_size"],
+        max_step=config_dict["max_step"],
+        warmup_steps=config_dict["warmup_steps"],
+        learning_rate=config_dict["learning_rate"],
+        weight_decay=config_dict["weight_decay"],
+        grad_clip=config_dict["grad_clip"],
+        tiny_steps=config_dict["tiny_steps"],
+        doc_limit=config_dict["doc_limit"],
+        test_block_size=config_dict["test_block_size"],
+        rank_ref_size=config_dict["rank_ref_size"],
+        val_doc_limit=config_dict["val_doc_limit"],
+        token_cache_dir=config_dict["token_cache_dir"],
+    )
+
+    completed = 0
+    while True:
+        task = task_queue.get()  # Blocking pull
+
+        if task is None:
+            # Termination signal
+            print(f"[Worker {worker_id}] Shutdown, completed {completed} experiments")
+            break
+
+        exp_id, params, selected_idx = task
+        print(f"[Worker {worker_id}] Running exp {exp_id}")
+
+        r = runner.run_experiment(params, experiment_id=exp_id, selected_idx=selected_idx)
+        result_queue.put(r)
+        completed += 1
+
+    result_queue.put(None)  # Signal completion to collector
+
 
 def test_runner_sharded():
     """Quick test: 2 experiments using sharded metadata manager."""
@@ -530,7 +1036,7 @@ def test_runner_sharded():
     from quadmix.data.metadata_manager import ShardMetadataManager
 
     mgr = ShardMetadataManager(
-        "/home/liujin99/quadmix/temp/preprocessed"
+        os.path.join(_PROJECT_DIR, "temp/preprocessed")
     )
 
     config = QuaDMixConfig(
@@ -540,8 +1046,8 @@ def test_runner_sharded():
     runner = EssentialWebProxyRunner(
         config=config,
         metadata_manager=mgr,
-        val_data_path="/home/liujin99/data/openhermes_10k_tokenized.pt",
-        output_dir="/home/liujin99/quadmix/temp/outputs/test_sharded",
+        val_data_path=os.path.join(_PROJECT_DIR, "data/openhermes_10k_assistant_tokenized.pt"),
+        output_dir=os.path.join(_PROJECT_DIR, "temp/outputs/test_sharded"),
         device_type="cpu",
         micro_batch_size=2,
         global_batch_size=8,

@@ -59,8 +59,10 @@ class DeviceManager:
         device = manager.get_device()
     """
 
-    def __init__(self, device_type: DeviceType = DeviceType.CPU):
+    def __init__(self, device_type: DeviceType = DeviceType.CPU,
+                 npu_device_id: int = 0):
         self.device_type = device_type
+        self.npu_device_id = npu_device_id
         self._device = self._init_device()
 
     def _init_device(self) -> Any:
@@ -88,7 +90,11 @@ class DeviceManager:
                 import torch_npu  # type: ignore[import-untyped]
                 npu_count = torch.npu.device_count()
                 if npu_count > 0:
-                    return torch.device("npu:0")
+                    dev_id = min(self.npu_device_id, npu_count - 1)
+                    if dev_id != self.npu_device_id and dev_id > 0:
+                        print(f"[DeviceManager] npu_device_id={self.npu_device_id} "
+                              f"adjusted to {dev_id} (only {npu_count} devices)")
+                    return torch.device(f"npu:{dev_id}")
                 else:
                     print("[WARN] NPU requested but no devices found. Falling back to CPU.")
                     self.device_type = DeviceType.CPU
