@@ -331,21 +331,81 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             cache_path = self._get_shard_token_path(sid)
 
             if os.path.exists(cache_path):
-                # Cache hit: load npz, lookup needed rows via row index
+                # Cache hit: load npz, check which rows are cached
                 data = np.load(cache_path, mmap_mode='r')
                 token_mmap = data['tokens']     # [N_selected, block_size] int32, mmap'd
                 row_index = data['rows']         # [N_selected] int64, in memory
 
                 # Build row→position lookup (small dict)
                 row_to_pos = {int(r): i for i, r in enumerate(row_index)}
-                positions = np.array(
-                    [row_to_pos[int(r)] for r in local_rows], dtype=np.int64
-                )
-                shard_tokens = torch.from_numpy(
-                    token_mmap[positions].astype(np.int64)
-                )
+
+                # Split into hit and miss rows
+                hit_rows = [r for r in local_rows if int(r) in row_to_pos]
+                miss_rows = [r for r in local_rows if int(r) not in row_to_pos]
+
+                hit_tokens = None
+                miss_tokens = None
+
+                if hit_rows:
+                    # Hit: read from cache
+                    positions = np.array(
+                        [row_to_pos[int(r)] for r in hit_rows], dtype=np.int64
+                    )
+                    hit_tokens = torch.from_numpy(
+                        token_mmap[positions].astype(np.int64)
+                    )
+                    self._cache_hits += len(hit_rows)
+
                 del data, token_mmap  # release mmap
-                self._cache_hits += len(local_rows)
+
+                if miss_rows:
+                    # Miss: tokenize and append to cache
+                    self._cache_misses += len(miss_rows)
+                    miss_rows_arr = np.array(miss_rows, dtype=np.int64)
+
+                    df_shard = pd.read_parquet(
+                        shard_path,
+                        columns=["row_in_shard", "text"],
+                        filters=[("row_in_shard", "in", miss_rows_arr.tolist())],
+                    )
+                    df_shard = df_shard.sort_values("row_in_shard")
+                    selected_texts = df_shard["text"].astype(str).tolist()
+                    parsed_rows = df_shard["row_in_shard"].to_numpy(dtype=np.int64)
+
+                    print(f"    [Partial miss] shard {sid}: "
+                          f"tokenizing {len(miss_rows):,} docs "
+                          f"(hit {len(hit_rows):,} from cache)...")
+
+                    miss_tokens_full = self._tokenize_texts(selected_texts)
+
+                    # Append to cache
+                    self._cache_add_rows(sid, parsed_rows, miss_tokens_full)
+
+                    # Extract requested rows
+                    row_to_pos_new = {int(r): i for i, r in enumerate(parsed_rows)}
+                    positions = np.array(
+                        [row_to_pos_new[int(r)] for r in miss_rows], dtype=np.int64
+                    )
+                    miss_tokens = torch.from_numpy(
+                        miss_tokens_full.numpy().astype(np.int64)[positions]
+                    )
+
+                # Merge hit and miss tokens, preserving original order
+                if miss_rows:
+                    # Build merged result in original local_rows order
+                    row_to_token = {}
+                    if hit_tokens is not None:
+                        for i, r in enumerate(hit_rows):
+                            row_to_token[int(r)] = hit_tokens[i]
+                    if miss_tokens is not None:
+                        for i, r in enumerate(miss_rows):
+                            row_to_token[int(r)] = miss_tokens[i]
+                    shard_tokens = torch.stack([
+                        row_to_token[int(r)] for r in local_rows
+                    ])
+                else:
+                    # All hit: hit_tokens is already in correct order
+                    shard_tokens = hit_tokens
             else:
                 # Cache miss: read text + tokenize for this experiment's rows only
                 # (In batch mode, this should be rare — tokenize_batch_delta runs first)
