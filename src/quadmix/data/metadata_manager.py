@@ -135,6 +135,27 @@ class ShardMetadataManager:
     def shard_info(self) -> List[dict]:
         return list(self._per_shard_info)
 
+    # ── Token estimation ──
+
+    def get_total_chars(self) -> int:
+        """Total character count across all documents."""
+        return int(np.sum(self._doc_char_counts))
+
+    def get_total_tokens_estimate(self, chars_per_token: float = 4.0) -> int:
+        """
+        Estimate total tokens from character count.
+        
+        For English text, typical ratio is ~4 chars per token (GPT-NeoX tokenizer).
+        
+        Args:
+            chars_per_token: Ratio for estimation. Default 4.0 for English.
+        
+        Returns:
+            Estimated total tokens.
+        """
+        total_chars = self.get_total_chars()
+        return int(total_chars / chars_per_token)
+
     # ── Index resolution ──
 
     def global_to_shard_rows(

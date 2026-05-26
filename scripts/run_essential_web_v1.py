@@ -175,6 +175,41 @@ def main():
     print(f"[Setup] {metadata_manager.num_docs:,} docs across "
           f"{metadata_manager.num_shards} shards")
 
+    # ── Dataset size estimation ──
+    total_tokens_est = metadata_manager.get_total_tokens_estimate()
+    total_chars = metadata_manager.get_total_chars()
+    print(f"\n════════════════════════════════════════════════════════")
+    print(f"  数据集信息:")
+    print(f"    总文档数:         {metadata_manager.num_docs:,}")
+    print(f"    总字符数:         {total_chars:,}")
+    print(f"    估算 token 数:    {total_tokens_est:,} ({total_tokens_est/1e9:.1f}B)")
+    print(f"    (按 4 chars/token 估算，GPT-NeoX tokenizer)")
+    print(f"════════════════════════════════════════════════════════")
+
+    # ── omega range guidance ──
+    # Paper: ω sampled from [0,1] → rescaled to [0, 0.1]
+    # Simplified: sampling_ratio ≈ omega
+    omega_min, omega_max = 0.0, 0.1  # Paper default range (after rescaling)
+    tokens_min = int(total_tokens_est * omega_min)
+    tokens_max = int(total_tokens_est * omega_max)
+
+    print(f"\n  omega (ω) 参数与数据量估算:")
+    print(f"    论文默认范围:     [{omega_min:.2f}, {omega_max:.2f}]")
+    print(f"    预计数据量范围:   {tokens_min/1e9:.1f}B - {tokens_max/1e9:.1f}B tokens")
+    print(f"    (简化估算: sampling_ratio ≈ ω，忽略 sigmoid 形态)")
+
+    if args.target_tokens > 0:
+        target_b = args.target_tokens
+        print(f"\n  你的 target:       {target_b:.1f}B tokens")
+        # Rough estimate: omega ≈ target / total
+        target_omega = target_b * 1e9 / total_tokens_est
+        if target_omega < 0.1:
+            print(f"    建议 omega 范围:  [{max(0, target_omega-0.02):.3f}, {min(0.1, target_omega+0.02):.3f}]")
+        else:
+            print(f"    [注意] target {target_b:.1f}B 需要 ω > 0.1，超出论文范围")
+            print(f"    论文 Table 2: 30B > 90B > 180B (more tokens not always good)")
+    print(f"════════════════════════════════════════════════════════")
+
     config = QuaDMixConfig(
         num_domains=10, num_quality_criteria=5,
         num_proxy_experiments=n_exp, num_search_points=n_search,

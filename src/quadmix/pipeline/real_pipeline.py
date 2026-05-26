@@ -422,6 +422,44 @@ class QuaDMixPipeline:
         top_indices = np.argsort(predicted_losses)[:k]
         top_k_avg_loss = float(predicted_losses[top_indices].mean())
 
+        # ── Predict dataset size from optimal params ──────────
+        # ω ≈ sampling ratio (rough estimate, ignoring sigmoid shape details)
+        # For each domain: omega controls quality threshold → ~omega fraction sampled
+        omega_values = [sc.omega for sc in optimal_params.sampling_configs]
+        avg_omega = float(np.mean(omega_values))
+        max_omega = float(np.max(omega_values))
+        min_omega = float(np.min(omega_values))
+
+        # Estimate sampling ratio: sigmoid gives ~1 for top omega fraction, epsilon for rest
+        # Simplified: sampling_ratio ≈ omega (ignoring epsilon ~0.001 and sigmoid shape)
+        estimated_ratio = avg_omega
+
+        # Get total tokens estimate (from metadata_manager if available)
+        total_tokens_est = None
+        if metadata_manager is not None:
+            total_tokens_est = metadata_manager.get_total_tokens_estimate()
+        elif token_counts is not None:
+            total_tokens_est = int(np.sum(token_counts))
+
+        if total_tokens_est is not None:
+            estimated_tokens = int(total_tokens_est * estimated_ratio)
+            print(f"\n  ── θ* 数据量预测 ────────────────────────")
+            print(f"    数据集总大小:     {total_tokens_est/1e9:.1f}B tokens")
+            print(f"    ω 范围:          [{min_omega:.3f}, {max_omega:.3f}] (平均 {avg_omega:.3f})")
+            print(f"    预计数据量:       ~{estimated_tokens/1e9:.2f}B tokens")
+
+            if self.config.target_tokens > 0:
+                target_b = self.config.target_tokens / 1e9
+                if estimated_tokens < self.config.target_tokens * 0.8:
+                    print(f"    [提示] 预计 {estimated_tokens/1e9:.2f}B < target {target_b:.1f}B")
+                    print(f"    论文: 'More tokens not always good' (30B > 90B > 180B)")
+                    print(f"    选项: A) 接受更少数据（loss 可能更好）")
+                    print(f"          B) 调整 omega 参数重新实验")
+                elif estimated_tokens > self.config.target_tokens * 1.2:
+                    discard_pct = (estimated_tokens - self.config.target_tokens) / estimated_tokens * 100
+                    print(f"    [提示] 预计 {estimated_tokens/1e9:.2f}B > target {target_b:.1f}B")
+                    print(f"    将随机丢弃约 {discard_pct:.1f}% 保持分布")
+
         # ── Stage 7: Final Sampling ─────────────────────────
         print(f"\n[Stage 7] Applying optimal parameters for final sampling...")
         final_ranks = self.compute_quality_ranks(
