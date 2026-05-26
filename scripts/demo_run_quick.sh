@@ -85,11 +85,10 @@ cat << PARAMS
   ┌────────────────────────────┬──────────┐
   │ 参数                       │  值      │
   ├────────────────────────────┼──────────┤
-  │ 实验数                     │       2  │
+  │ 实验数                     │      20  │
   │ 搜索点                     │     200  │
   │ Top-K 平均                 │       2  │
   │ seq_len (block_size)       │      64  │
-  │ 文档数 (doc_limit)         │     500  │
   │ 训练步数 (tiny_steps)      │       3  │
   │ 全局 batch size            │       8  │
   │ 微批大小                   │       2  │
@@ -97,15 +96,14 @@ cat << PARAMS
   │ 排名参考集大小             │     200  │
   └────────────────────────────┴──────────┘
 
-  ⚡ 预计耗时: ~15秒
+  ⚡ 预计耗时: ~1-2分钟
 PARAMS
 
 python3 "$QUADMIX_DIR/scripts/run_essential_web_v1.py" \
     --preprocessed-dir "$PREPROCESSED_DIR" \
-    --num-experiments 2 \
+    --num-experiments 20 \
     --num-search 200 \
     --top-k 2 \
-    --doc-limit 500 \
     --block-size 64 \
     --tiny-steps 3 \
     --micro-batch-size 2 \

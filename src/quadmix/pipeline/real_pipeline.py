@@ -40,7 +40,7 @@ from quadmix.pipeline.param_sampler import ParameterSampler
 from quadmix.pipeline.optimizer import QuaDMixOptimizer
 from quadmix.data.base import BaseDataAdapter, UnifiedData
 from quadmix.data.registry import get_adapter
-from quadmix.sampling.batch_sampler import save_sampled_dataset
+from quadmix.sampling.batch_sampler import save_sampled_dataset, sample_with_optimal_params
 from quadmix.pipeline.report import generate_report, save_report
 
 
@@ -431,28 +431,33 @@ class QuaDMixPipeline:
             final_ranks, domain_labels, optimal_params,
         )
 
-        # ── Target token scaling ─────────────────────────────
-        # User wants e.g. 10B tokens, but θ* naturally produces e.g. 30B.
-        # Scale per-doc expected copies proportionally to hit the target.
+        # ── Target token post-processing ───────────────────────
+        # θ* produces optimal distribution; we only discard uniformly if needed.
+        # Never scale sampling values (distorts relative distribution at integer boundaries).
         if self.config.target_tokens > 0 and token_counts is not None:
-            expected_tokens = float(np.sum(sampling_values * token_counts))
-            if expected_tokens > 0:
-                scale = self.config.target_tokens / expected_tokens
-                print(f"\n  Target token scaling:")
-                print(f"    Expected from θ*: {expected_tokens:,.0f} tokens ({expected_tokens/1e9:.2f}B)")
-                print(f"    Target:            {self.config.target_tokens:,.0f} tokens ({self.config.target_tokens/1e9:.1f}B)")
-                print(f"    Scale factor:      {scale:.6f}x")
+            actual_tokens = float(np.sum(token_counts[selected_indices]))
+            print(f"\n  Target token adjustment:")
+            print(f"    θ* produces:       {actual_tokens:,.0f} tokens ({actual_tokens/1e9:.2f}B)")
+            print(f"    Target:            {self.config.target_tokens:,.0f} tokens ({self.config.target_tokens/1e9:.1f}B)")
 
-                # Scale sampling values (preserves relative proportions)
-                sampling_values = sampling_values * scale
-                # Re-select with scaled values
+            if actual_tokens > self.config.target_tokens:
+                # Uniform random discard (preserves relative distribution)
+                # Each copy has equal probability of being discarded
+                keep_prob = self.config.target_tokens / actual_tokens
                 rng = np.random.default_rng()
-                selected_indices, _ = _select_documents_vectorized(sampling_values, rng)
-
-                actual_expected = float(np.sum(sampling_values * token_counts))
-                print(f"    After scaling:     {actual_expected:,.0f} tokens ({actual_expected/1e9:.2f}B), target {self.config.target_tokens/1e9:.1f}B")
+                keep_mask = rng.random(len(selected_indices)) < keep_prob
+                selected_indices = selected_indices[keep_mask]
+                final_tokens = float(np.sum(token_counts[selected_indices]))
+                print(f"    Action:            Uniform discard (keep_prob={keep_prob:.4f})")
+                print(f"    Final:             {final_tokens:,.0f} tokens ({final_tokens/1e9:.2f}B)")
+            elif actual_tokens < self.config.target_tokens * 0.95:  # < 95% of target
+                # Don't copy (breaks optimal distribution's "rarity" design)
+                # Paper: "More tokens not always good" (Table 2: 30B > 90B > 180B)
+                print(f"    Action:            [WARN] θ* produces less than target")
+                print(f"    [建议] 调整 ω 参数放宽质量阈值，或降低 target_tokens")
             else:
-                print(f"  [Warn] Expected tokens = 0, skipping target scaling")
+                # Within 5% tolerance, accept θ* result
+                print(f"    Action:            Accept θ* result (within tolerance)")
         else:
             scale_info = None
 

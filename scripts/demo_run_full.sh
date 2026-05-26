@@ -13,11 +13,11 @@
 # 8 张 NPU 并行（需要 NPU 环境 + --npu-devices 参数）：
 #   bash scripts/demo_run_full.sh --device-type npu --npu-devices 8
 #
-# 如需限制文档数以便在 CPU 上试跑：
-#   bash scripts/demo_run_full.sh --doc-limit 5000
-#
 # 如需控制下载数据量（默认为 2000 shards，~158B tokens）：
 #   NUM_SHARDS=100 bash scripts/demo_run_full.sh
+#
+# 最终输出数据集大小（target_tokens，单位 B）：
+#   bash scripts/demo_run_full.sh --target-tokens 10  # 输出 ~10B tokens
 # ──────────────────────────────────────────────────────────────
 
 set -euo pipefail
@@ -134,9 +134,7 @@ if [ -z "$CUDA_VISIBLE_DEVICES" ]; then
         echo "  ⚠ 当前为 CPU 模式，预计耗时 >4 小时！"
         echo "     建议: CUDA_VISIBLE_DEVICES=0 bash scripts/demo_run_full.sh"
         echo ""
-        echo "     CPU 试跑: bash scripts/demo_run_full.sh --doc-limit 5000 \\"
-        echo "                                    --block-size 256 \\"
-        echo "                                    --tiny-steps 10"
+        echo "     CPU 试跑: bash scripts/demo_run_quick.sh  # 快速验证流程"
         echo ""
     fi
 else

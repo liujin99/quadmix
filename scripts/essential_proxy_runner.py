@@ -159,14 +159,6 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         self._num_docs = mgr.num_docs
         self._train_idx = np.arange(self._num_docs)
 
-        # Apply doc_limit (truncate metadata + training indices)
-        if self.doc_limit and self.doc_limit < self._num_docs:
-            self._domain_labels = self._domain_labels[:self.doc_limit]
-            self._quality_scores = self._quality_scores[:self.doc_limit]
-            self._num_docs = self.doc_limit
-            self._train_idx = np.arange(self._num_docs)
-            print(f"[ProxyRunner] Limited to {self.doc_limit} docs")
-
         print(f"[ProxyRunner] Sharded mode: {self._num_docs:,} docs "
               f"(metadata only, {mgr.num_shards} shards) ({time.time()-t0:.0f}s)")
 
