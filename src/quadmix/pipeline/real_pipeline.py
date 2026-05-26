@@ -453,12 +453,11 @@ class QuaDMixPipeline:
                 if estimated_tokens < self.config.target_tokens * 0.8:
                     print(f"    [提示] 预计 {estimated_tokens/1e9:.2f}B < target {target_b:.1f}B")
                     print(f"    论文: 'More tokens not always good' (30B > 90B > 180B)")
-                    print(f"    选项: A) 接受更少数据（loss 可能更好）")
-                    print(f"          B) 调整 omega 参数重新实验")
+                    print(f"    θ* 产生更少数据但 loss 更优，代码将继续执行")
                 elif estimated_tokens > self.config.target_tokens * 1.2:
                     discard_pct = (estimated_tokens - self.config.target_tokens) / estimated_tokens * 100
                     print(f"    [提示] 预计 {estimated_tokens/1e9:.2f}B > target {target_b:.1f}B")
-                    print(f"    将随机丢弃约 {discard_pct:.1f}% 保持分布")
+                    print(f"    将随机丢弃约 {discard_pct:.1f}%（保持相对分布）")
 
         # ── Stage 7: Final Sampling ─────────────────────────
         print(f"\n[Stage 7] Applying optimal parameters for final sampling...")

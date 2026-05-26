@@ -200,14 +200,13 @@ def main():
 
     if args.target_tokens > 0:
         target_b = args.target_tokens
-        print(f"\n  你的 target:       {target_b:.1f}B tokens")
-        # Rough estimate: omega ≈ target / total
-        target_omega = target_b * 1e9 / total_tokens_est
-        if target_omega < 0.1:
-            print(f"    建议 omega 范围:  [{max(0, target_omega-0.02):.3f}, {min(0.1, target_omega+0.02):.3f}]")
-        else:
-            print(f"    [注意] target {target_b:.1f}B 需要 ω > 0.1，超出论文范围")
-            print(f"    论文 Table 2: 30B > 90B > 180B (more tokens not always good)")
+        print(f"\n  你设置的 target:   {target_b:.1f}B tokens")
+        # Rough estimate: omega ≈ target / total (for reference only)
+        target_omega_est = target_b * 1e9 / total_tokens_est
+        print(f"    参考信息: 若 ω ≈ {target_omega_est:.3f}，可能产生约 {target_b:.1f}B 数据")
+        print(f"    注意: 系统会全范围搜索最优参数，不限制 omega 范围")
+        if target_omega_est > 0.1:
+            print(f"    [提示] target {target_b:.1f}B 对应 ω > 0.1，可能超出论文推荐范围")
     print(f"════════════════════════════════════════════════════════")
 
     config = QuaDMixConfig(
