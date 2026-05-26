@@ -78,7 +78,7 @@ if [ ! -f "$PREPROCESSED_DIR/shard_index.json" ]; then
         mkdir -p "$RAW_DATA_DIR"
         python3 "$QUADMIX_DIR/scripts/download_essential_web.py" \
             --num-files "$NUM_SHARDS" --output-dir "$RAW_DATA_DIR" \
-            --workers "${DOWNLOAD_WORKERS:-4}"
+            --workers "${DOWNLOAD_WORKERS:-8}"
         echo "  ✓ 下载完成"
     else
         echo "  原始数据已存在，跳过下载"

@@ -37,7 +37,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 REPO_ID = "EssentialAI/essential-web-v1.0"
 DEFAULT_CRAWL = "CC-MAIN-2024-38"
 DEFAULT_NUM_FILES = 50
-DEFAULT_WORKERS = 4
+DEFAULT_WORKERS = 8
 DEFAULT_OUTPUT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                               "data", "essential-web")
 
