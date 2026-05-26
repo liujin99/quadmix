@@ -119,8 +119,53 @@ bash scripts/demo_run_full.sh  # 自动触发下载
 ```bash
 python scripts/download_essential_web.py \
     --num-files 2000 \
-    --output-dir data/essential-web-v1
+    --output-dir data/essential-web-v1 \
+    --workers 8  # 并行下载线程数
 ```
+
+### 2.1 下载加速方法
+
+**方法 1：并行下载（推荐）**
+
+下载脚本支持多线程并行下载，通过 `--workers` 参数控制：
+```bash
+# 8 线程并行下载（推荐）
+python scripts/download_essential_web.py --num-files 2000 --workers 8
+
+# 或在 demo_run_full.sh 中设置环境变量
+DOWNLOAD_WORKERS=8 bash scripts/demo_run_full.sh
+```
+
+**方法 2：使用 HF 镜像（国内用户推荐）**
+
+设置 `HF_ENDPOINT` 环境变量使用国内镜像：
+```bash
+# 使用 hf-mirror.com（国内常用镜像）
+HF_ENDPOINT=https://hf-mirror.com python scripts/download_essential_web.py --num-files 2000 --workers 8
+
+# 或在 demo_run_full.sh 中
+HF_ENDPOINT=https://hf-mirror.com bash scripts/demo_run_full.sh
+```
+
+**方法 3：使用 hf_transfer（最快，需额外安装）**
+
+hf_transfer 是 HuggingFace 官方的多线程下载库，速度可达普通下载的 3-5 倍：
+```bash
+pip install hf-transfer
+export HF_HUB_ENABLE_HF_TRANSFER=1
+
+python scripts/download_essential_web.py --num-files 2000 --use-hf-transfer
+```
+
+**速度对比（以 2000 shards ~493 GB 为例）：**
+
+| 方法 | 预计耗时 | 适用场景 |
+|------|----------|----------|
+| 单线程（默认） | 4-8 小时 | 网络不稳定 |
+| 4 线程并行 | 1-2 小时 | 一般网络 |
+| 8 线程并行 | 30-60 分钟 | 良好网络 |
+| HF 镜像 + 8 线程 | 20-40 分钟 | 国内网络 |
+| hf_transfer | 15-30 分钟 | 最佳条件 |
 
 **速度预期：** 每个 shard ~246 MB，2000 shards 在网络良好的情况下约需 2-4 小时。
 

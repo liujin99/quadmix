@@ -74,7 +74,8 @@ if [ ! -f "$PREPROCESSED_DIR/shard_index.json" ]; then
         echo "  原始数据不存在，下载 $NUM_SHARDS 个 shard... ($((NUM_SHARDS * 246 / 1024)) GB 预计)"
         mkdir -p "$RAW_DATA_DIR"
         python3 "$QUADMIX_DIR/scripts/download_essential_web.py" \
-            --num-files "$NUM_SHARDS" --output-dir "$RAW_DATA_DIR"
+            --num-files "$NUM_SHARDS" --output-dir "$RAW_DATA_DIR" \
+            --workers "${DOWNLOAD_WORKERS:-4}"
         echo "  ✓ 下载完成"
     else
         echo "  原始数据已存在，跳过下载"
