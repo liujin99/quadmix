@@ -1,7 +1,7 @@
 # QuaDMix — Quality-Diversity Balanced Data Selection
 
-> **⚠️ 非官方聲明**: 本倉庫是對 QuaDMix 論文的個人算法復現（clean-room implementation），
-> 非 ByteDance 官方實現。僅供學習和研究參考。
+> **⚠️ Disclaimer**: This repository is a personal clean-room implementation of the QuaDMix paper,
+> not an official ByteDance release. For educational and research purposes only.
 
 > **Paper**: Fengze Liu, Weidong Zhou, Binbin Liu, et al. (ByteDance, 2025)
 >
