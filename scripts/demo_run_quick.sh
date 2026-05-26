@@ -25,18 +25,20 @@ if [ ! -f "$VAL_FILE" ]; then
     echo ""
     echo "  驗證集不存在: $VAL_FILE"
     echo "  從 liujin99/quadmix-openhermes-10k 下載..."
+    
+    # Support HF mirror via environment variable
+    HF_ENDPOINT="${HF_ENDPOINT:-https://huggingface.co}"
+    if [ "$HF_ENDPOINT" != "https://huggingface.co" ]; then
+        echo "  使用 HF 镜像: $HF_ENDPOINT"
+    fi
+    
+    VAL_URL="$HF_ENDPOINT/datasets/liujin99/quadmix-openhermes-10k/resolve/main/openhermes_10k_assistant_tokenized.pt?download=true"
+    
     mkdir -p "$(dirname "$VAL_FILE")"
-    # Try huggingface_hub first, fallback to direct download
-    if command -v huggingface-cli &>/dev/null; then
-        huggingface-cli download liujin99/quadmix-openhermes-10k \
-            openhermes_10k_assistant_tokenized.pt --local-dir "$(dirname "$VAL_FILE")" 2>/dev/null
-    elif command -v wget &>/dev/null; then
-        wget -q --show-progress \
-            "https://huggingface.co/datasets/liujin99/quadmix-openhermes-10k/resolve/main/openhermes_10k_assistant_tokenized.pt?download=true" \
-            -O "$VAL_FILE"
+    if command -v wget &>/dev/null; then
+        wget -q --show-progress "$VAL_URL" -O "$VAL_FILE"
     else
-        curl -L -o "$VAL_FILE" \
-            "https://huggingface.co/datasets/liujin99/quadmix-openhermes-10k/resolve/main/openhermes_10k_assistant_tokenized.pt?download=true"
+        curl -L -o "$VAL_FILE" "$VAL_URL"
     fi
     echo "  ✓ 驗證集下載完成: $(du -h "$VAL_FILE" | cut -f1)"
     echo ""

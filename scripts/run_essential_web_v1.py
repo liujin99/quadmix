@@ -35,7 +35,8 @@ DEFAULT_VAL_PATH = os.path.join(DEFAULT_VAL_DIR, "openhermes_10k_assistant_token
 # HuggingFace dataset for validation set
 HF_DATASET = "liujin99/quadmix-openhermes-10k"
 HF_VAL_FILENAME = "openhermes_10k_assistant_tokenized.pt"
-HF_RESOLVE = "https://huggingface.co/datasets/{repo}/resolve/main/{file}"
+HF_ENDPOINT = os.environ.get("HF_ENDPOINT", "https://huggingface.co")
+HF_RESOLVE = f"{HF_ENDPOINT}/datasets/{{repo}}/resolve/main/{{file}}"
 
 
 def ensure_val_data(val_path: str) -> str:
@@ -51,6 +52,8 @@ def ensure_val_data(val_path: str) -> str:
     os.makedirs(os.path.dirname(val_path), exist_ok=True)
     url = HF_RESOLVE.format(repo=HF_DATASET, file=HF_VAL_FILENAME)
     print(f"\n[Setup] Validation set not found at:\n  {val_path}")
+    if HF_ENDPOINT != "https://huggingface.co":
+        print(f"[Setup] Using HF mirror: {HF_ENDPOINT}")
     print(f"[Setup] Downloading from:\n  {url}")
     try:
         urllib.request.urlretrieve(url, val_path)
