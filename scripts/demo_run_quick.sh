@@ -35,12 +35,7 @@ if [ ! -f "$VAL_FILE" ]; then
     VAL_URL="$HF_ENDPOINT/datasets/liujin99/quadmix-openhermes-10k/resolve/main/openhermes_10k_assistant_tokenized.pt?download=true"
     
     mkdir -p "$(dirname "$VAL_FILE")"
-    
-    # Try aria2c first (multi-threaded, fastest), then wget, then curl
-    if command -v aria2c &>/dev/null; then
-        echo "  使用 aria2c 多线程下载..."
-        aria2c -x 8 -s 8 -k 1M --console-log-level=warn -d "$(dirname "$VAL_FILE")" -o "$(basename "$VAL_FILE")" "$VAL_URL"
-    elif command -v wget &>/dev/null; then
+    if command -v wget &>/dev/null; then
         wget -q --show-progress "$VAL_URL" -O "$VAL_FILE"
     else
         curl -L -o "$VAL_FILE" "$VAL_URL"

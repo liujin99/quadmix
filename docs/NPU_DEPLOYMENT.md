@@ -147,18 +147,7 @@ HF_ENDPOINT=https://hf-mirror.com python scripts/download_essential_web.py --num
 HF_ENDPOINT=https://hf-mirror.com bash scripts/demo_run_full.sh
 ```
 
-**方法 3：使用 aria2c（单文件加速，适用于验证集）**
-
-验证集（176MB）自动检测 aria2c，如果已安装会使用 8 线程并行下载：
-```bash
-# 安装 aria2c
-apt install aria2  # 或 yum install aria2
-
-# 然后运行脚本，会自动使用 aria2c
-HF_ENDPOINT=https://hf-mirror.com bash scripts/demo_run_full.sh
-```
-
-**方法 4：使用 hf_transfer（最快，需额外安装）**
+**方法 3：使用 hf_transfer（最快，需额外安装）**
 
 hf_transfer 是 HuggingFace 官方的多线程下载库，速度可达普通下载的 3-5 倍：
 ```bash
@@ -178,8 +167,7 @@ python scripts/download_essential_web.py --num-files 2000 --use-hf-transfer
 | | HF 镜像 + 8 线程 | 20-40 分钟 | 国内网络 |
 | | hf_transfer | 15-30 分钟 | 最佳条件 |
 | OpenHermes-10k (176MB) | wget/curl | 1-5 分钟 | 一般网络 |
-| | aria2c (8线程) | 10-30 秒 | 良好网络 |
-| | HF 镜像 + aria2c | 5-15 秒 | 国内网络 |
+| | HF 镜像 | 10-30 秒 | 国内网络 |
 
 **速度预期：** 每个 shard ~246 MB，2000 shards 在网络良好的情况下约需 2-4 小时。
 
