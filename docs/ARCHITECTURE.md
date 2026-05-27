@@ -164,6 +164,31 @@ else:
     np.savez(cache_path, tokens=new_tokens_np, rows=new_rows)
 ```
 
+#### Concurrent Access (Temporary File Isolation)
+
+**Problem**: In NPU parallel mode, Tokenize Thread writes to shard cache while Workers read from it. All experiments access all shards, causing read-write conflicts.
+
+**Solution**: Temporary file isolation per experiment.
+
+```
+Tokenize Thread                 Worker 0..N-1
+      │                              │
+      ▼                              ▼
+shard_cache.npz (shared)      exp_{id}_tokens.pt (temp)
+      │                              │
+      │  ← Tokenize writes here      │  ← Worker reads from temp file
+      │                              │
+      │                              │  ← Worker deletes temp file after use
+```
+
+**Flow**:
+1. Tokenize Thread writes to `shard_cache.npz` (persistent)
+2. For each exp, pack needed tokens into `exp_{id}_tokens.pt` (temporary)
+3. Workers read from temp file, delete after use
+4. Shard cache persists for subsequent runs
+
+**Disk usage**: Peak = N_experiments × ~500MB (deleted after each exp finishes)
+
 ## Pipeline Stages
 
 ### Stage 0: Load Data (precomputed mode via ShardMetadataManager)
@@ -179,22 +204,53 @@ else:
 - `precompute_samples(all_params)` → all_selected_indices[]
 - CPU only, pure numpy
 
-### Stage 4: Proxy Experiments (Dynamic Task Queue)
-**Sequential mode** (--npu-devices 1):
-- `proxy_runner.run_batch(params)` → sequential experiments
+### Stage 4: Proxy Experiments (Three Modes)
 
-**Parallel mode** (--npu-devices N):
-- `proxy_runner.run_batch_parallel(params, selected, N)` — dynamic task queue:
-  ```
-  Main Process
-  ├─ Tokenize Thread (CPU) — continuously pre-tokenize (lookahead=32)
-  ├─ Dispatcher Thread — push ready tasks to task_queue
-  ├─ Collector Thread — receive from result_queue
-  └─ Worker 0..N-1 (NPU) — loop: get task → run → push result → repeat
-  ```
-- No batch boundaries — workers fetch tasks on-demand
-- Fast workers naturally do more experiments, slow ones only affect themselves
-- CPU tokenize thread independent of NPU training (overlap)
+#### Mode 1: CPU Sequential (`parallel_workers <= 1`)
+**Use case**: Development, debugging, demo, CI testing
+
+```
+precompute_samples(param_sets) → all_selected_indices[]
+      ↓
+tokenize_all_needed(all_selected)  # One-shot tokenize union
+      ↓
+for each (params, selected) in zip(param_sets, all_selected):
+    run_experiment(params, selected)  # All cache hits, no IO
+```
+
+**Key insight**: Union of all needed docs → tokenize once → all exps get cache hits.
+
+#### Mode 2: NPU Parallel (`parallel_workers > 1`)
+**Use case**: Production, 8x NPU training
+
+```
+Main Process
+├─ precompute_samples(param_sets) → all_selected_indices[]
+├─ Tokenize Thread (CPU) — continuously pre-tokenize (lookahead=num_workers)
+│   └─ Writes to shard_cache.npz, packs exp_{id}_tokens.pt for workers
+├─ Dispatcher Thread — push ready tasks to task_queue
+├─ Collector Thread — receive from result_queue
+└─ Worker 0..N-1 (NPU) — loop:
+        get task → read exp_{id}_tokens.pt → run → delete temp → push result
+```
+
+**Key insight**: Tokenize Thread prepares tokens while Workers train. No NPU idle time.
+
+#### Mode 3: Legacy Fallback
+**Use case**: Backward compatibility
+
+```
+run_batch(params)  # Original sequential mode, no precompute
+```
+
+#### Mode Comparison
+
+| Aspect | CPU Sequential | NPU Parallel |
+|--------|----------------|--------------|
+| Tokenize timing | All upfront | On-demand (lookahead) |
+| Cache behavior | 100% hit after first | Progressive fill |
+| IO overhead | One-time union | Per-exp on-demand |
+| Best for | Debug, CI, demo | Production 8x NPU |
 
 ### Stage 5: LightGBM Regression
 - Train regressor R(θ) → predicted val_loss
@@ -204,9 +260,30 @@ else:
 
 ### Stage 7: Final Sampling
 - Apply θ* to entire data pool → Eq.1+Eq.2+Eq.3 → final dataset
-- Optional target token post-processing:
-  - If θ* produces > target: uniform random discard (preserves distribution)
-  - If θ* produces < target: warn, no copy (paper: "more tokens not always good")
+- **Target tokens post-processing** (if `target_tokens` specified):
+
+**Problem**: Pre-scaling sampling parameters distorts distribution (floor+random mechanism crosses integer boundaries).
+
+**Solution**: Post-hoc uniform discard (preserves relative distribution).
+
+```python
+# Step 1: Sample with θ* (no target_tokens adjustment)
+selected_indices = sample_with_params(theta_star)
+
+# Step 2: If exceeds target, uniformly discard
+if len(selected_indices) > target_tokens:
+    keep_ratio = target_tokens / len(selected_indices)
+    rng = np.random.default_rng(seed=42)
+    keep_mask = rng.random(len(selected_indices)) < keep_ratio
+    selected_indices = selected_indices[keep_mask]
+
+# Step 3: If below target, warn (paper: "more tokens not always good")
+if len(selected_indices) < target_tokens:
+    logger.warning(f"Got {len(selected_indices)} < target {target_tokens}")
+    # No artificial copy — paper shows 30B > 90B > 180B
+```
+
+**Why not copy when below target?** Paper Table 2: 30B tokens outperforms 90B and 180B. Quality > quantity.
 
 ### Stage 8: Save Outputs
 - optimal_parameters.json, pipeline_summary.json, sampled_dataset.parquet
@@ -234,14 +311,14 @@ _worker_dynamic_loop(worker_id, device_type, config_dict, task_queue, result_que
         result_queue.put(result)
 ```
 
-### Dynamic Task Queue Flow
+### Dynamic Task Queue Flow (NPU Parallel Mode)
 
 ```
-T+0s     Tokenize Thread: pre-tokenize exp 0-31 (lookahead=32)
+T+0s     Tokenize Thread: pre-tokenize exp 0-7 (lookahead=num_workers)
          Worker 0-7: waiting for tasks
 T+10s    Dispatcher: push exp 0-7 to task_queue
          Worker 0-7: start exp 0-7 training
-         Tokenize Thread: continue exp 8-31
+         Tokenize Thread: continue exp 8-15
 T+180s   Worker 3: exp 3 done → result_queue → push exp 8 to Worker 3
          Worker 0-2,4-7: still training (different exp sizes)
 T+200s   Worker 3: exp 8 done → fetch exp 9
@@ -254,8 +331,50 @@ Queue overhead ≈ 1ms, negligible vs ~2-5min training time
 ### Token Cache Sharing
 - All workers share `temp/token_cache/` on the same filesystem
 - `.npz` writes are atomic (temp file + rename on POSIX)
-- No file locking needed: different workers almost never miss the same shard simultaneously
+- **Concurrent access via temp file isolation** (see Phase 3)
 - `_cache_add_rows` handles both first write and subsequent appends
+
+## Data Download & Resume
+
+### Incremental Download
+Each shard checked individually before download:
+```python
+for shard_idx in needed_shards:
+    shard_path = f"preprocessed/shard_{shard_idx}.parquet"
+    if shard_path.exists() and verify_size(shard_path):
+        continue  # Skip already downloaded
+    download_shard(shard_idx)
+```
+
+### Resume Support (HTTP Range)
+```python
+def download_with_resume(url, local_path):
+    # Check existing file size via HEAD request
+    head_resp = requests.head(url)
+    total_size = int(head_resp.headers.get('content-length', 0))
+
+    if local_path.exists():
+        local_size = local_path.stat().st_size
+        if local_size == total_size:
+            return  # Already complete
+        if local_size < total_size:
+            # Resume from where we left off
+            headers = {'Range': f'bytes={local_size}-'}
+            with open(local_path, 'ab') as f:
+                response = requests.get(url, headers=headers, stream=True)
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+    else:
+        # Fresh download
+        with open(local_path, 'wb') as f:
+            for chunk in requests.get(url, stream=True).iter_content(chunk_size=8192):
+                f.write(chunk)
+```
+
+### HuggingFace Mirror (Optional)
+```bash
+export HF_ENDPOINT=https://hf-mirror.com  # For users in China
+```
 
 ## CLI Usage
 
