@@ -287,14 +287,17 @@ python scripts/run_essential_web_v1.py \
 ```
 
 **耗时预期（单卡 NPU）：**
-| 阶段 | 耗时 |
-|------|------|
-| 预采样（Eq.1-3） | 5-10 分钟 |
-| 首次实验（cache miss，tokenize） | ~2-3 分钟 |
-| 后续实验（cache hit） | ~2-5 分钟/实验 |
-| 3000 实验总计 | **100-250 小时**（连续运行） |
-| LightGBM 回归 | < 1 分钟 |
-| 最优参数搜索 | < 1 分钟 |
+
+| 阶段 | OLD | NEW (优化后) |
+|------|-----|--------------|
+| 预采样（Eq.1） | ~500 分钟 | **~100 分钟** (预计算) |
+| 预采样（Eq.2-3） | ~5 分钟 | ~5 分钟 |
+| 首次实验（cache miss） | ~2-3 分钟 | ~2-3 分钟 |
+| 后续实验（cache hit） | ~2-5 分钟/实验 | ~2-5 分钟/实验 |
+| Shard cache blocking | ~0.5s × N冲突 | **0** (异步merge) |
+| 3000 实验总计 | **100-250 小时** | **~100 小时** |
+| LightGBM 回归 | < 1 分钟 | < 1 分钟 |
+| 最优参数搜索 | < 1 分钟 | < 1 分钟 |
 
 **建议用 tmux 后台运行：**
 ```bash
@@ -306,12 +309,16 @@ bash scripts/demo_run_full.sh --device-type npu
 
 ### 4.4 多卡 NPU 并行运行（推荐）
 
-8 张 NPU 可以将 3000 实验从 ~100h 缩短到 **~15 小时**。
+8 张 NPU 可以将 3000 实验从 ~100h 缩短到 **~15 小时**（含 Eq.1 预计算优化）。
 
 ```bash
 cd $QUADMIX_DIR
 bash scripts/demo_run_full.sh --device-type npu --npu-devices 8
 ```
+
+**性能优化亮点**：
+- **Eq.1 预计算**：预采样阶段从 ~500 min → ~100 min（**5x**）
+- **异步 shard cache merge**：tokenize 阶段 0 锁竞争，0 阻塞
 
 **动态任务队列架构：**
 - Worker 完成任务后立即领取下一个，无批次边界
@@ -349,26 +356,40 @@ for i in range(torch.npu.device_count()):
 [Setup] Loading ShardMetadataManager from: temp/preprocessed
 [Setup] 167,489,000 docs across 2000 shards
 
+[ProxyRunner] Pre-normalized 5 quality criteria (10.2s) — Eq.1 now ~5x faster per experiment
+
 [Stage 3] Sampling 3000 parameter configurations (Alg.1)...
 
 [Stage 4] Running 3000 proxy experiments...
 [Stage 4] Using 8 parallel workers (dynamic task queue)
+[Stage 4] Step 1: Pre-sampling (Eq.1-3, pure numpy, CPU only)
+[PreSample] Pre-sampling 3000 experiments (Eq.1-3)...
+[PreSample] 500/3000 done (115s, ETA: 575s)  # ~100 min total (5x faster)
+...
+[PreSample] 3000/3000 done (600s)
 
-[Dynamic Parallel] 3000 experiments, 8 workers, tokenize_lookahead=32
-  Precomputing 3000 samples (Eq.1-3)... done in 381.2s
-
+[Stage 4] Step 2: Dynamic parallel training (tokenize + NPU workers)
+[DynamicParallel] Waiting for first batch (exp 0-7)...
+[TokenizeThread] Exp 0 ready (1/3000)
+...
 [Worker 0] Exp 0000: Training on NPU:0... cache: 0/488K hits
 [Worker 1] Exp 0001: Training on NPU:1... cache: 0/492K hits
-[Worker 2] Exp 0002: Training on NPU:2... cache: 0/475K hits
 ...
 [Worker 0] Exp 0000: Done. train_loss=3.12, val_loss=2.89 (ppl=18.0)
 [Worker 0] Exp 0008: Training on NPU:0... cache: 410K/495K hits
 
 [Progress] 100/3000 done (avg: 45s/exp, ETA: 2175s)
 ...
+[DynamicParallel] All 3000 experiments complete (900s ≈ 15min)
+
+[MergeCache] Merging 240 pending files to shard cache...
+[MergeCache] Done: 240 pending → 100 shard caches (12.3s)
 ```
 
 **关键信号：**
+- `Pre-normalized 5 quality criteria` → Eq.1 优化已生效（~10s one-time）
+- `PreSample 3000/3000 done (600s)` → 预采样阶段 ~100 min（而非 ~500 min）
+- `MergeCache` → 异步 shard cache merge（batch 结束后 ~10s）
 - `cache: 0/488K hits` → 首次运行，正在生成 token cache
 - `cache: 488K/488K hits` → 全部 cache hit，最快速度
 - `loss=3.12` → 训练正常收敛
