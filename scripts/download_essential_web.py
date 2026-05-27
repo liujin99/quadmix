@@ -87,6 +87,23 @@ def format_size(mb: float) -> str:
     return f"{mb / 1024:.1f} GB"
 
 
+def get_file_info(url: str) -> tuple[bool, int]:
+    """Get file info via HEAD request. Returns (supports_range, real_size)."""
+    import urllib.request
+    import urllib.error
+    
+    try:
+        req = urllib.request.Request(url, method="HEAD")
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            accept_ranges = resp.headers.get("Accept-Ranges", "")
+            content_length = resp.headers.get("Content-Length", "0")
+            supports_range = "bytes" in accept_ranges.lower()
+            real_size = int(content_length) if content_length.isdigit() else 0
+            return supports_range, real_size
+    except Exception:
+        return False, 0
+
+
 def download_file(url: str, dest: str, index: int, total: int, size_mb: float,
                   expected_size: int = None, show_progress: bool = True) -> tuple[bool, str]:
     """Download a single file with resume support. Returns (success, filename)."""
@@ -95,27 +112,46 @@ def download_file(url: str, dest: str, index: int, total: int, size_mb: float,
     import shutil
     
     basename = os.path.basename(dest)
-    existing_size = 0
     
-    # Check for partial download (resume support)
-    if os.path.exists(dest) and expected_size is not None:
+    # Get real file info via HEAD request
+    supports_range, real_size = get_file_info(url)
+    
+    # Check local file against real size from server
+    existing_size = 0
+    if os.path.exists(dest):
         existing_size = os.path.getsize(dest)
-        if existing_size > 0 and existing_size < expected_size:
-            # Partial file exists, resume from existing_size
-            if show_progress:
-                print(f"  [{index+1}/{total}] {basename} (resume from {existing_size/(1024*1024):.0f}MB/{size_mb:.0f}MB) ... ", end="", flush=True)
-        elif existing_size >= expected_size:
-            # File already complete
-            if show_progress:
-                print(f"  [{index+1}/{total}] {basename} (already complete, skip)")
-            return True, basename
+        
+        if real_size > 0:
+            if existing_size == real_size:
+                # File is complete (verified against server)
+                if show_progress:
+                    print(f"  [{index+1}/{total}] {basename} (complete, verified {existing_size/(1024*1024):.0f}MB)")
+                return True, basename
+            elif existing_size > real_size:
+                # Local file larger than server (corrupted?), re-download
+                if show_progress:
+                    print(f"  [{index+1}/{total}] {basename} (size mismatch: {existing_size} > {real_size}, re-download) ... ", end="", flush=True)
+                existing_size = 0  # Force full download
+            elif existing_size > 0 and supports_range:
+                # Partial file, server supports resume
+                if show_progress:
+                    print(f"  [{index+1}/{total}] {basename} (resume from {existing_size/(1024*1024):.0f}MB/{real_size/(1024*1024):.0f}MB) ... ", end="", flush=True)
+                # Will use Range header
+            elif existing_size > 0:
+                # Partial file, server does NOT support resume
+                if show_progress:
+                    print(f"  [{index+1}/{total}] {basename} ({size_mb:.0f}MB, server no Range, re-download) ... ", end="", flush=True)
+                existing_size = 0  # Force full download
+            else:
+                if show_progress:
+                    print(f"  [{index+1}/{total}] {basename} ({size_mb:.0f}MB) ... ", end="", flush=True)
         else:
-            # File exists but expected_size unknown, re-download
+            # Could not get real size, proceed with download
             if show_progress:
-                print(f"  [{index+1}/{total}] {basename} ({size_mb:.0f} MB) ... ", end="", flush=True)
+                print(f"  [{index+1}/{total}] {basename} ({size_mb:.0f}MB) ... ", end="", flush=True)
     else:
         if show_progress:
-            print(f"  [{index+1}/{total}] {basename} ({size_mb:.0f} MB) ... ", end="", flush=True)
+            print(f"  [{index+1}/{total}] {basename} ({size_mb:.0f}MB) ... ", end="", flush=True)
     
     try:
         # Open file in append mode if resuming
@@ -141,20 +177,24 @@ def download_file(url: str, dest: str, index: int, total: int, size_mb: float,
             if existing_size > 0:
                 print(f"resumed (+{actual - existing_size/(1024*1024):.0f}MB → {actual:.0f}MB)")
             else:
-                print(f"done ({actual:.0f} MB)")
+                print(f"done ({actual:.0f}MB)")
         return True, basename
+        
     except urllib.error.HTTPError as e:
-        if e.code == 416:  # Range Not Satisfiable - file may already be complete
+        if e.code == 416:  # Range Not Satisfiable
+            # Verify with HEAD request
+            _, head_size = get_file_info(url)
             actual_size = os.path.getsize(dest) if os.path.exists(dest) else 0
-            if expected_size and actual_size >= expected_size * 0.99:
-                # File is essentially complete, treat as success
+            
+            if head_size > 0 and actual_size == head_size:
+                # File is actually complete
                 if show_progress:
-                    print(f"done (416 but file complete, {actual_size/(1024*1024):.0f}MB)")
+                    print(f"done (416 but verified complete, {actual_size/(1024*1024):.0f}MB)")
                 return True, basename
             else:
-                # Re-download to temp file, then replace (don't delete original)
+                # Re-download to temp file
                 if show_progress:
-                    print(f"416 error, re-downloading...")
+                    print(f"416, re-downloading...")
                 temp_dest = dest + ".tmp"
                 try:
                     req = urllib.request.Request(url)
@@ -169,7 +209,7 @@ def download_file(url: str, dest: str, index: int, total: int, size_mb: float,
                     shutil.move(temp_dest, dest)
                     actual = os.path.getsize(dest) / (1024 * 1024)
                     if show_progress:
-                        print(f"done ({actual:.0f} MB)")
+                        print(f"done ({actual:.0f}MB)")
                     return True, basename
                 except Exception as e2:
                     if show_progress:
@@ -181,6 +221,7 @@ def download_file(url: str, dest: str, index: int, total: int, size_mb: float,
             if show_progress:
                 print(f"FAILED: {e}")
             return False, basename
+            
     except (urllib.error.URLError, OSError) as e:
         if show_progress:
             print(f"FAILED: {e}")
