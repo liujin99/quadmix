@@ -242,68 +242,128 @@ class EssentialWebProxyRunner(BaseProxyRunner):
     # Batch-level tokenization (CPU, called from main process)
     # ═══════════════════════════════════════════════════════════
 
+    def _get_exp_token_path(self, exp_id: int) -> str:
+        """Path to temporary token file for a single experiment."""
+        return os.path.join(
+            self.token_cache_dir,
+            f"exp_{exp_id:04d}_tokens.pt"
+        )
+
+    def _pack_exp_tokens(
+        self,
+        exp_id: int,
+        selected_idx: np.ndarray,
+    ) -> str:
+        """Pack tokens for a single experiment into a temporary file.
+
+        Process:
+          1. For each shard needed by this exp:
+             - Check shard cache for existing rows
+             - Tokenize missing rows → write to shard cache
+          2. Collect all tokens for this exp
+          3. Save to temporary file (exp_{id}_tokens.pt)
+
+        Returns:
+            Path to the temporary token file.
+        """
+        mgr = self.metadata_manager
+        shard_groups = mgr.global_to_shard_rows(selected_idx)
+
+        all_tokens = []
+        total_tokenized = 0
+        t0 = time.time()
+
+        for sid, (shard_path, local_rows) in shard_groups.items():
+            cache_path = self._get_shard_token_path(sid)
+            cached_rows = self._cached_shard_rows(sid)
+
+            # Split into hit and miss
+            hit_rows = [r for r in local_rows if int(r) in cached_rows]
+            miss_rows = [r for r in local_rows if int(r) not in cached_rows]
+
+            hit_tokens = None
+            miss_tokens = None
+
+            # Hit: read from cache
+            if hit_rows:
+                data = np.load(cache_path, mmap_mode='r')
+                token_mmap = data['tokens']
+                row_index = data['rows']
+                row_to_pos = {int(r): i for i, r in enumerate(row_index)}
+                positions = np.array([row_to_pos[int(r)] for r in hit_rows], dtype=np.int64)
+                hit_tokens = torch.from_numpy(token_mmap[positions].astype(np.int64))
+                del data
+
+            # Miss: tokenize and add to cache
+            if miss_rows:
+                miss_rows_arr = np.array(miss_rows, dtype=np.int64)
+                df_shard = pd.read_parquet(
+                    shard_path,
+                    columns=["row_in_shard", "text"],
+                    filters=[("row_in_shard", "in", miss_rows_arr.tolist())],
+                )
+                df_shard = df_shard.sort_values("row_in_shard")
+                texts = df_shard["text"].astype(str).tolist()
+                parsed_rows = df_shard["row_in_shard"].to_numpy(dtype=np.int64)
+
+                miss_tokens_full = self._tokenize_texts(texts)
+                self._cache_add_rows(sid, parsed_rows, miss_tokens_full)
+                total_tokenized += len(texts)
+
+                # Extract requested rows
+                row_to_pos_new = {int(r): i for i, r in enumerate(parsed_rows)}
+                positions = np.array([row_to_pos_new[int(r)] for r in miss_rows], dtype=np.int64)
+                miss_tokens = torch.from_numpy(miss_tokens_full.numpy().astype(np.int64)[positions])
+
+            # Merge hit and miss in original order
+            if miss_rows:
+                row_to_token = {}
+                if hit_tokens is not None:
+                    for i, r in enumerate(hit_rows):
+                        row_to_token[int(r)] = hit_tokens[i]
+                if miss_tokens is not None:
+                    for i, r in enumerate(miss_rows):
+                        row_to_token[int(r)] = miss_tokens[i]
+                shard_tokens = torch.stack([row_to_token[int(r)] for r in local_rows])
+            else:
+                shard_tokens = hit_tokens
+
+            all_tokens.append(shard_tokens)
+
+        # Pack into temporary file
+        result = torch.cat(all_tokens, dim=0)
+        exp_token_path = self._get_exp_token_path(exp_id)
+        torch.save(result, exp_token_path)
+
+        elapsed = time.time() - t0
+        print(f"  [PackExp {exp_id:04d}] {len(result):,} docs, "
+              f"tokenized {total_tokenized:,} new, "
+              f"{len(shard_groups)} shards ({elapsed:.1f}s)")
+
+        return exp_token_path
+
     def tokenize_batch_delta(
         self,
         batch_selected: List[np.ndarray],
         batch_exp_ids: List[int],
     ):
-        """Tokenize rows needed by this batch that aren't yet cached.
+        """Tokenize and pack tokens for each experiment in the batch.
 
-        Called from main process (CPU) between NPU training rounds.
-        For each shard: compute cache miss rows → tokenize → append to cache.
+        For each exp:
+          1. Check shard cache, tokenize missing rows
+          2. Pack into temporary file (exp_{id}_tokens.pt)
         """
-        mgr = self.metadata_manager
-        # Merge all docs needed by this batch
-        batch_union = np.unique(np.concatenate(batch_selected))
-        shard_groups = mgr.global_to_shard_rows(batch_union)
-
-        total_tokenized = 0
-        for sid, (shard_path, all_rows) in shard_groups.items():
-            cached = self._cached_shard_rows(sid)
-            if len(cached) > 0:
-                missing = np.array(
-                    [r for r in all_rows if int(r) not in cached],
-                    dtype=np.int64,
-                )
-            else:
-                missing = all_rows
-
-            if len(missing) == 0:
-                continue
-
-            # Read text + tokenize
-            df = pd.read_parquet(
-                shard_path,
-                columns=["row_in_shard", "text"],
-                filters=[("row_in_shard", "in", missing.tolist())],
-            )
-            df = df.sort_values("row_in_shard")
-            texts = df["text"].astype(str).tolist()
-            parsed_rows = df["row_in_shard"].to_numpy(dtype=np.int64)
-
-            tokens = self._tokenize_texts(texts)
-            self._cache_add_rows(sid, parsed_rows, tokens)
-            total_tokenized += len(texts)
-
-        if total_tokenized > 0:
-            exps_str = ",".join(str(e) for e in batch_exp_ids[:3])
-            if len(batch_exp_ids) > 3:
-                exps_str += f"...+{len(batch_exp_ids)-3}"
-            print(f"  [BatchTokenize] exps [{exps_str}]: "
-                  f"tokenized {total_tokenized:,} docs across "
-                  f"{len(shard_groups)} shards")
+        for exp_id, selected_idx in zip(batch_exp_ids, batch_selected):
+            self._pack_exp_tokens(exp_id, selected_idx)
 
     def _load_tokens_for_experiment(
-        self, selected_idx: np.ndarray
+        self, selected_idx: np.ndarray, exp_id: int = None
     ) -> torch.Tensor:
-        """Load or tokenize tokens for selected document indices.
+        """Load tokens for selected document indices.
 
-        In sharded mode:
-          1. Use metadata_manager to get (shard_idx, row) per selected index
-          2. Group by shard, check disk cache for each shard
-          3. For cache misses: read text from parquet for ONLY selected rows,
-             tokenize only those rows, save to cache (npz with row index)
-          4. Concatenate all token tensors
+        In sharded mode (parallel):
+          1. If exp_id provided and temporary file exists → load from temp file
+          2. Otherwise fallback to shard cache logic
 
         In legacy mode:
           Directly index into self._token_ids (already loaded)
@@ -311,11 +371,17 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         if self._mode == "legacy":
             return self._token_ids[selected_idx]
 
-        # Sharded mode
+        # Parallel mode: check for temporary file
+        if exp_id is not None:
+            exp_token_path = self._get_exp_token_path(exp_id)
+            if os.path.exists(exp_token_path):
+                result = torch.load(exp_token_path, map_location="cpu", weights_only=True)
+                print(f"  [TokenLoad] exp {exp_id:04d}: {len(result):,} docs from temp file")
+                return result
+
+        # Fallback: load from shard cache (used in sequential mode)
         t0 = time.time()
         mgr = self.metadata_manager
-
-        # Get per-shard groups
         shard_groups = mgr.global_to_shard_rows(selected_idx)
 
         all_tokens = []
@@ -323,15 +389,11 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             cache_path = self._get_shard_token_path(sid)
 
             if os.path.exists(cache_path):
-                # Cache hit: load npz, check which rows are cached
                 data = np.load(cache_path, mmap_mode='r')
-                token_mmap = data['tokens']     # [N_selected, block_size] int32, mmap'd
-                row_index = data['rows']         # [N_selected] int64, in memory
-
-                # Build row→position lookup (small dict)
+                token_mmap = data['tokens']
+                row_index = data['rows']
                 row_to_pos = {int(r): i for i, r in enumerate(row_index)}
 
-                # Split into hit and miss rows
                 hit_rows = [r for r in local_rows if int(r) in row_to_pos]
                 miss_rows = [r for r in local_rows if int(r) not in row_to_pos]
 
@@ -339,7 +401,6 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 miss_tokens = None
 
                 if hit_rows:
-                    # Hit: read from cache
                     positions = np.array(
                         [row_to_pos[int(r)] for r in hit_rows], dtype=np.int64
                     )
@@ -348,10 +409,9 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                     )
                     self._cache_hits += len(hit_rows)
 
-                del data, token_mmap  # release mmap
+                del data, token_mmap
 
                 if miss_rows:
-                    # Miss: tokenize and append to cache
                     self._cache_misses += len(miss_rows)
                     miss_rows_arr = np.array(miss_rows, dtype=np.int64)
 
@@ -369,11 +429,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                           f"(hit {len(hit_rows):,} from cache)...")
 
                     miss_tokens_full = self._tokenize_texts(selected_texts)
-
-                    # Append to cache
                     self._cache_add_rows(sid, parsed_rows, miss_tokens_full)
 
-                    # Extract requested rows
                     row_to_pos_new = {int(r): i for i, r in enumerate(parsed_rows)}
                     positions = np.array(
                         [row_to_pos_new[int(r)] for r in miss_rows], dtype=np.int64
@@ -382,9 +439,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                         miss_tokens_full.numpy().astype(np.int64)[positions]
                     )
 
-                # Merge hit and miss tokens, preserving original order
                 if miss_rows:
-                    # Build merged result in original local_rows order
                     row_to_token = {}
                     if hit_tokens is not None:
                         for i, r in enumerate(hit_rows):
@@ -396,11 +451,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                         row_to_token[int(r)] for r in local_rows
                     ])
                 else:
-                    # All hit: hit_tokens is already in correct order
                     shard_tokens = hit_tokens
             else:
-                # Cache miss: read text + tokenize for this experiment's rows only
-                # (In batch mode, this should be rare — tokenize_batch_delta runs first)
                 self._cache_misses += len(local_rows)
                 df_shard = pd.read_parquet(
                     shard_path,
@@ -412,15 +464,11 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 parsed_rows = df_shard["row_in_shard"].to_numpy(dtype=np.int64)
 
                 print(f"    [Cache miss] shard {sid}: "
-                      f"tokenizing {len(selected_texts):,} docs "
-                      f"(need {len(local_rows)} for this exp)...")
+                      f"tokenizing {len(selected_texts):,} docs...")
 
                 tokenized = self._tokenize_texts(selected_texts)
-
-                # Append to cache
                 self._cache_add_rows(sid, parsed_rows, tokenized)
 
-                # Build lookup
                 row_to_pos = {int(r): i for i, r in enumerate(parsed_rows)}
                 positions = np.array(
                     [row_to_pos[int(r)] for r in local_rows], dtype=np.int64
@@ -572,7 +620,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
               f"(from {len(self._train_idx):,})")
 
         # ---- 1. Load / tokenize training data on demand ----
-        train_tokens = self._load_tokens_for_experiment(selected_idx).to(device)
+        train_tokens = self._load_tokens_for_experiment(selected_idx, exp_id=experiment_id).to(device)
 
         # ---- 2. Create model ----
         model = ProxyModel(config=self.model_config).to(device)
@@ -1096,6 +1144,12 @@ def _worker_dynamic_loop(
         r = runner.run_experiment(params, experiment_id=exp_id, selected_idx=selected_idx)
         result_queue.put(r)
         completed += 1
+
+        # Clean up temporary token file
+        exp_token_path = runner._get_exp_token_path(exp_id)
+        if os.path.exists(exp_token_path):
+            os.remove(exp_token_path)
+            print(f"[Worker {worker_id}] Cleaned temp file for exp {exp_id}")
 
     result_queue.put(None)  # Signal completion to collector
 
