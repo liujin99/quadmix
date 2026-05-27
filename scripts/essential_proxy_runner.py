@@ -810,7 +810,10 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         """
         all_selected: List[np.ndarray] = []
         t0 = time.time()
+        n = len(all_params)
 
+        print(f"[PreSample] Pre-sampling {n} experiments (Eq.1-3)...")
+        
         for i, params in enumerate(all_params):
             quality_ranks = self._compute_ranks_for_params(params, i)
             sv = compute_sampling_values(
@@ -832,11 +835,16 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 selected = rng2.choice(self._train_idx, 100, replace=False)
 
             all_selected.append(selected)
+            
+            # Progress: every 5 experiments or last one
+            if (i + 1) % 5 == 0 or (i + 1) == n:
+                elapsed = time.time() - t0
+                eta = elapsed / (i + 1) * (n - i - 1)
+                print(f"[PreSample] {i+1}/{n} done ({elapsed:.1f}s, ETA: {eta:.0f}s)")
 
         elapsed = time.time() - t0
         total_docs = sum(len(s) for s in all_selected)
-        n = len(all_params)
-        print(f"\n[PreSample] {n} experiments pre-sampled in {elapsed:.1f}s")
+        print(f"[PreSample] {n} experiments pre-sampled in {elapsed:.1f}s")
         print(f"[PreSample] Total selected docs: {total_docs:,} "
               f"(avg {total_docs//max(1,n):,}/exp)")
 

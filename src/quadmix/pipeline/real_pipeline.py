@@ -391,7 +391,9 @@ class QuaDMixPipeline:
             # Parallel mode: pre-sample then dispatch across NPU devices
             # Tokenize Thread runs ahead, Workers pull tasks dynamically
             print(f"[Stage 4] Using {parallel_workers} parallel workers (dynamic task queue)")
+            print(f"[Stage 4] Step 1: Pre-sampling (Eq.1-3, pure numpy, CPU only)")
             all_selected = proxy_runner.precompute_samples(param_sets)
+            print(f"[Stage 4] Step 2: Dynamic parallel training (tokenize + NPU workers)")
             results = proxy_runner.run_batch_parallel(
                 param_sets, all_selected,
                 num_workers=parallel_workers,
