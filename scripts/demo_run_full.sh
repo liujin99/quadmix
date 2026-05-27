@@ -67,22 +67,39 @@ TOKEN_ESTIMATE_B=$(echo "scale=1; $TOKEN_ESTIMATE / 1000000000" | bc 2>/dev/null
 echo "  [配置] 将使用 ~$NUM_SHARDS shards（~$TOKEN_ESTIMATE_B B tokens）"
 echo "  [提示] 设 NUM_SHARDS=3291 用满全部数据，NUM_SHARDS=2 快速测试"
 
-# ── 数据就绪检查 ──────────────────────────────────
-if [ ! -f "$PREPROCESSED_DIR/shard_index.json" ]; then
-    echo "╔══ 数据就绪: 下载 + 预处理 ═══╗"
-    echo ""
-    echo "  预处理数据不存在: $PREPROCESSED_DIR/"
-    RAW_FILES=$(ls "$RAW_DATA_DIR"/*.parquet 2>/dev/null || true)
-    if [ -z "$RAW_FILES" ]; then
-        echo "  原始数据不存在，下载 $NUM_SHARDS 个 shard... ($((NUM_SHARDS * 246 / 1024)) GB 预计)"
-        mkdir -p "$RAW_DATA_DIR"
-        python3 "$QUADMIX_DIR/scripts/download_essential_web.py" \
-            --num-files "$NUM_SHARDS" --output-dir "$RAW_DATA_DIR" \
-            --workers "${DOWNLOAD_WORKERS:-16}"
-        echo "  ✓ 下载完成"
-    else
-        echo "  原始数据已存在，跳过下载"
+# ── 数据就绪检查（逐个 shard 检查，补充下载）──────────────────
+NEED_DOWNLOAD=0
+MISSING_SHARDS=()
+
+mkdir -p "$RAW_DATA_DIR"
+
+for i in $(seq 0 $((NUM_SHARDS - 1))); do
+    SHARD_FILE="$RAW_DATA_DIR/shard_$(printf '%05d' $i).parquet"
+    if [ ! -f "$SHARD_FILE" ]; then
+        MISSING_SHARDS+=($i)
+        NEED_DOWNLOAD=1
     fi
+done
+
+if [ $NEED_DOWNLOAD -eq 1 ]; then
+    echo "╔══ 数据就绪: 下载缺失 shard ═══╗"
+    echo ""
+    EXISTING=$(ls "$RAW_DATA_DIR"/*.parquet 2>/dev/null | wc -l || echo 0)
+    echo "  已有 shard: $EXISTING, 需要: $NUM_SHARDS"
+    echo "  缺失 ${#MISSING_SHARDS[@]} 个 shard，补充下载..."
+    python3 "$QUADMIX_DIR/scripts/download_essential_web.py" \
+        --num-files "$NUM_SHARDS" --output-dir "$RAW_DATA_DIR" \
+        --workers "${DOWNLOAD_WORKERS:-16}"
+    echo "  ✓ 下载完成"
+    echo ""
+    echo "╚══════════════════════════════════════╝"
+    echo ""
+fi
+
+# 检查是否需要预处理（shard 数量变化或首次运行）
+if [ $NEED_DOWNLOAD -eq 1 ] || [ ! -f "$PREPROCESSED_DIR/shard_index.json" ]; then
+    echo "╔══ 预处理数据 ═══╗"
+    echo ""
     echo "  运行多 shard 预处理脚本..."
     python3 "$QUADMIX_DIR/scripts/preprocess_essential_web_v1_sharded.py" \
         --input-dir "$RAW_DATA_DIR" \
