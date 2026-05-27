@@ -824,7 +824,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         all_selected: List[np.ndarray],
         num_workers: int = 1,
         device_type: str = "npu",
-        tokenize_lookahead: int = 32,
+        tokenize_lookahead: int = None,
     ) -> List:
         """Run proxy experiments in parallel using dynamic task queue.
 
@@ -838,7 +838,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             all_selected: Pre-computed selected_indices (from precompute_samples).
             num_workers: Number of parallel workers (= NPU devices to use).
             device_type: Device type for training.
-            tokenize_lookahead: How many experiments to pre-tokenize.
+            tokenize_lookahead: How many experiments to pre-tokenize per batch.
+                                Default: same as num_workers (cache batch = NPU batch).
 
         Returns:
             List of ProxyResult in experiment order.
@@ -848,6 +849,10 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             f"all_selected length {len(all_selected)} != "
             f"params_list length {n_exp}"
         )
+
+        # Default: tokenize batch size = NPU count (cache完一批正好NPU开跑)
+        if tokenize_lookahead is None:
+            tokenize_lookahead = num_workers
 
         if num_workers <= 1:
             # Sequential fallback
@@ -874,7 +879,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         all_selected: List[np.ndarray],
         num_workers: int,
         device_type: str,
-        tokenize_lookahead: int = 32,
+        tokenize_lookahead: int = None,
     ) -> List:
         """Dynamic task queue mode: workers pull tasks on-demand.
 
@@ -887,23 +892,25 @@ class EssentialWebProxyRunner(BaseProxyRunner):
           Worker 0-7 (NPU):
             └─ pull task → run → push result → pull next task
 
-        Advantages over static batch mode:
-          - No batch boundary: fast workers do more experiments
-          - Better load balance: slow experiments don't block others
-          - No idle waiting: workers immediately start next task
+        Key: Wait for first batch to be tokenized before starting workers.
+             This ensures workers get cache hits instead of re-tokenizing.
 
         Args:
             params_list: All parameter configurations
             all_selected: Pre-computed selected indices
             num_workers: Number of NPU workers
             device_type: Device type (cpu/cuda/npu)
-            tokenize_lookahead: How many experiments to pre-tokenize
+            tokenize_lookahead: How many experiments to pre-tokenize per batch
 
         Returns:
             List of ProxyResult in experiment order
         """
         import threading
         from multiprocessing import Queue
+
+        # Default: tokenize batch size = NPU count
+        if tokenize_lookahead is None:
+            tokenize_lookahead = num_workers
 
         n_exp = len(params_list)
         all_results = [None] * n_exp
@@ -950,6 +957,18 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         tokenize_thread = threading.Thread(target=tokenize_thread_func, daemon=True)
         tokenize_thread.start()
+
+        # ── Wait for first batch to be tokenized ────────────────
+        # Key fix: Workers must wait for cache to be ready
+        first_batch_end = min(tokenize_lookahead, n_exp)
+        print(f"[DynamicParallel] Waiting for first batch (exp 0-{first_batch_end-1}) to be tokenized...")
+        while True:
+            with ready_lock:
+                first_ready = ready_events.get(first_batch_end - 1, False)
+            if first_ready:
+                break
+            time.sleep(0.5)
+        print(f"[DynamicParallel] First batch tokenized, starting workers")
 
         # ── 2. Dispatcher Thread (push ready tasks) ───────────────
         def dispatcher_thread_func():
