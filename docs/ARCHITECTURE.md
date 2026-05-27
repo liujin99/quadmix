@@ -401,11 +401,11 @@ python scripts/run_essential_web_v1.py \
 
 ### Demo Scripts Comparison
 
-| Script | Shards | Experiments | Device | Time | Use Case |
-|--------|--------|-------------|--------|------|----------|
-| `demo_run_quick.sh` | 2 | 20 | CPU | ~1-2min | CI, smoke test |
-| `demo_run_npu.sh` | 100 | 200 | 8x NPU | ~15-30min | NPU validation |
-| `demo_run_full.sh` | 2000 | 3000 | GPU/NPU | ~15h (8x) | Production |
+| Script | Shards | Experiments | Device | Steps | Time | Use Case |
+|--------|--------|-------------|--------|-------|------|----------|
+| `demo_run_quick.sh` | 2 | 20 | CPU | 3 (tiny) | ~1-2min | CI, smoke test |
+| `demo_run_npu.sh` | 100 | 20 | 8x NPU | 25000 (full) | ~10-20min | NPU validation, 论文配置 |
+| `demo_run_full.sh` | 2000 | 3000 | GPU/NPU | 25000 (full) | ~15h (8x) | Production |
 
 ## Key Dependencies
 

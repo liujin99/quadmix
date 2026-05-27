@@ -235,20 +235,23 @@ bash scripts/demo_run_quick.sh
 
 成功标志：控制台打印 `All 20 experiments complete` 并在 `result/` 下生成结果目录。
 
-### 4.2 中等规模测试（200 实验，8x NPU，~15-30分钟）
+### 4.2 正式配置测试（20 实验，8x NPU，完整训练）
 
-验证 NPU 多卡并行调度：
+验证 NPU 多卡并行 + 论文训练配置：
 
 ```bash
 cd $QUADMIX_DIR
 bash scripts/demo_run_npu.sh
 ```
 
-默认配置：
+**论文训练配置**：
 - 100 shards (~7.9B tokens)
-- 8 NPU 设备并行
-- 200 实验，5000 搜索点
-- block_size=1024，tiny_steps=1000
+- 20 实验，1000 搜索点
+- block_size=2048，**tiny_steps=0**（完整 25000 步训练）
+- global_batch_size=512，micro_batch_size=4
+- val_limit=1000，rank_ref_size=10000
+
+**耗时预期**：每实验 ~3-5 分钟（完整训练），总计 ~10-20 分钟。
 
 可自定义：
 ```bash
@@ -451,7 +454,7 @@ result/quadmix_20250525_143022/
 | `scripts/preprocess_essential_web_v1_sharded.py` | 数据预处理 |
 | `scripts/download_essential_web.py` | 原始数据下载 |
 | `scripts/demo_run_quick.sh` | 快速验证脚本（2 exp） |
-| `scripts/demo_run_npu.sh` | 中等规模 NPU 测试（100 shards, 8x NPU） |
+| `scripts/demo_run_npu.sh` | 正式配置测试（20 exp, 25000 steps, 论文值） |
 | `scripts/demo_run_full.sh` | 完整论文配置脚本（3000 exp） |
 | `src/quadmix/npu/device.py` | NPU 设备抽象层（try-import torch_npu） |
 | `src/quadmix/data/metadata_manager.py` | Shard 元数据管理（~15GB 常驻内存） |

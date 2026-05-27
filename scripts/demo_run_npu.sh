@@ -119,7 +119,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-$QUADMIX_DIR/result/demo_8xnpu_$(date +%Y%m%d_%H%M%S)}
 
 echo "═══════════════════════════════════════════"
 echo "  QuaDMix Demo — 8x NPU"
-echo "  中等规模测试 (100 shards, 8 NPU)"
+echo "  正式训练配置验证 (100 shards, 8 NPU)"
 echo "═══════════════════════════════════════════"
 cat << PARAMS
 
@@ -130,19 +130,20 @@ cat << PARAMS
   ├────────────────────────────┼──────────────┤
   │ Shards                     │        $NUM_SHARDS  │
   │ NPU 设备                   │         $NPU_DEVICES  │
-  │ 实验数                     │         200  │
-  │ 搜索点                     │       5,000  │
-  │ Top-K 平均                 │           5  │
-  │ seq_len (block_size)       │       1,024  │
-  │ 训练步数                   │       1,000  │
-  │ 全局 batch size            │         128  │
-  │ 微批大小                   │           4  │
-  │ 验证集文档数               │         200  │
-  │ 排名参考集大小             │       2,000  │
+  │ 实验数                     │          20  │
+  │ 搜索点                     │       1,000  │
+  │ Top-K 平均                 │           3  │
+  │ seq_len (block_size)       │       2,048  │ ← 论文值
+  │ 训练步数                   │      25,000  │ ← 论文值 (完整训练)
+  │ 全局 batch size            │         512  │ ← 论文值
+  │ 微批大小                   │           4  │ ← 论文值
+  │ 验证集文档数               │       1,000  │ ← 论文值
+  │ 排名参考集大小             │      10,000  │ ← 论文值
   │ 代理模型                   │  tinyllama_1M│
   └────────────────────────────┴──────────────┘
 
-  ⏱ 预计耗时: ~15-30 分钟 (8 NPU 并行)
+  ⏱ 预计耗时: ~10-20 分钟 (20 exp × ~3-5min/exp on NPU)
+  ⚠ 注意: 使用完整训练配置 (25000 steps)，非 tiny 模式
 PARAMS
 
 # 检查 NPU 环境
@@ -150,6 +151,7 @@ if ! command -v npu-smi &> /dev/null; then
     echo ""
     echo "  ⚠ 未检测到 NPU 环境 (npu-smi 不存在)"
     echo "     将尝试使用 CUDA 或降级 CPU..."
+    echo "     ⚠ CPU 模式下完整训练会极慢！建议使用 GPU/NPU"
     echo ""
     DEVICE_ARG=""
 else
@@ -160,15 +162,15 @@ fi
 
 python3 "$QUADMIX_DIR/scripts/run_essential_web_v1.py" \
     --preprocessed-dir "$PREPROCESSED_DIR" \
-    --num-experiments 200 \
-    --num-search 5000 \
-    --top-k 5 \
-    --block-size 1024 \
-    --tiny-steps 1000 \
+    --num-experiments 20 \
+    --num-search 1000 \
+    --top-k 3 \
+    --block-size 2048 \
+    --tiny-steps 0 \
     --micro-batch-size 4 \
-    --global-batch-size 128 \
-    --val-limit 200 \
-    --rank-ref-size 2000 \
+    --global-batch-size 512 \
+    --val-limit 1000 \
+    --rank-ref-size 10000 \
     --output "$OUTPUT_DIR" \
     $DEVICE_ARG \
     "$@" || exit $?
