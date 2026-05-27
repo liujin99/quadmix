@@ -176,6 +176,17 @@ def main():
     if existing_preprocessed and not args.force:
         print(f"  Already preprocessed: {len(existing_preprocessed)} shards")
 
+    # ── Detect missing shards (deleted mid-shards) ──
+    needed_shard_indices = set()
+    for sp in shard_paths:
+        shard_idx = parse_shard_idx_from_path(sp)
+        if shard_idx >= 0:
+            needed_shard_indices.add(shard_idx)
+
+    missing_shards = needed_shard_indices - existing_preprocessed
+    if missing_shards and not args.force:
+        print(f"  Missing {len(missing_shards)} shards (will reprocess): {sorted(missing_shards)[:5]}{'...' if len(missing_shards) > 5 else ''}")
+
     # Process each shard with ORIGINAL shard_idx (from filename)
     t_start = time.time()
     shard_index = []
@@ -187,8 +198,22 @@ def main():
             shard_idx = len(shard_index)
 
         # Skip if already processed (incremental mode)
-        if shard_idx in existing_preprocessed and not args.force:
+        if shard_idx in existing_preprocessed and shard_idx not in missing_shards and not args.force:
             skipped += 1
+            # Still add to shard_index (read stats from existing file)
+            out_name = f"preprocessed_{shard_idx:05d}.parquet"
+            out_path = os.path.join(args.output_dir, out_name)
+            df = pd.read_parquet(out_path, columns=["domain"])
+            n = len(df)
+            valid_domains = (df["domain"] >= 0).sum()
+            shard_index.append({
+                "shard_idx": shard_idx,
+                "file": out_name,
+                "path": out_path,
+                "num_docs": n,
+                "valid_domains": int(valid_domains),
+                "elapsed_seconds": 0.0,  # skipped
+            })
             continue
 
         stats = process_shard(sp, shard_idx, args.output_dir)
