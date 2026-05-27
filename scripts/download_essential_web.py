@@ -88,46 +88,95 @@ def format_size(mb: float) -> str:
 
 
 def download_file(url: str, dest: str, index: int, total: int, size_mb: float,
-                  show_progress: bool = True) -> tuple[bool, str]:
-    """Download a single file. Returns (success, filename)."""
+                  expected_size: int = None, show_progress: bool = True) -> tuple[bool, str]:
+    """Download a single file with resume support. Returns (success, filename)."""
     import urllib.request
     import urllib.error
     
     basename = os.path.basename(dest)
-    try:
+    existing_size = 0
+    
+    # Check for partial download (resume support)
+    if os.path.exists(dest) and expected_size is not None:
+        existing_size = os.path.getsize(dest)
+        if existing_size > 0 and existing_size < expected_size:
+            # Partial file exists, resume from existing_size
+            if show_progress:
+                print(f"  [{index+1}/{total}] {basename} (resume from {existing_size/(1024*1024):.0f}MB/{size_mb:.0f}MB) ... ", end="", flush=True)
+        elif existing_size >= expected_size:
+            # File already complete
+            if show_progress:
+                print(f"  [{index+1}/{total}] {basename} (already complete, skip)")
+            return True, basename
+        else:
+            # File exists but expected_size unknown, re-download
+            if show_progress:
+                print(f"  [{index+1}/{total}] {basename} ({size_mb:.0f} MB) ... ", end="", flush=True)
+    else:
         if show_progress:
             print(f"  [{index+1}/{total}] {basename} ({size_mb:.0f} MB) ... ", end="", flush=True)
-
-        urllib.request.urlretrieve(url, dest)
-
+    
+    try:
+        # Open file in append mode if resuming
+        mode = "ab" if existing_size > 0 else "wb"
+        
+        # Build request with Range header for resume
+        req = urllib.request.Request(url)
+        if existing_size > 0:
+            req.add_header("Range", f"bytes={existing_size}-")
+        
+        with open(dest, mode) as f:
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                # Read in chunks to avoid memory issues
+                chunk_size = 8 * 1024 * 1024  # 8MB chunks
+                while True:
+                    chunk = resp.read(chunk_size)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+        
         actual = os.path.getsize(dest) / (1024 * 1024)
         if show_progress:
-            print(f"done ({actual:.0f} MB)")
+            if existing_size > 0:
+                print(f"resumed (+{actual - existing_size/(1024*1024):.0f}MB → {actual:.0f}MB)")
+            else:
+                print(f"done ({actual:.0f} MB)")
         return True, basename
     except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
         if show_progress:
             print(f"FAILED: {e}")
-        if os.path.exists(dest):
+        # Don't delete partial file on failure (keep for next resume)
+        if existing_size == 0 and os.path.exists(dest):
             os.remove(dest)
         return False, basename
 
 
 def download_file_hf_transfer(url: str, dest: str, index: int, total: int, size_mb: float,
-                               show_progress: bool = True) -> tuple[bool, str]:
-    """Download using hf_transfer (fast multithreaded download)."""
+                               expected_size: int = None, show_progress: bool = True) -> tuple[bool, str]:
+    """Download using hf_transfer. Note: doesn't support resume, falls back to download_file."""
+    import urllib.request
+    import urllib.error
+    
+    basename = os.path.basename(dest)
+    
+    # Check for partial file - hf_transfer doesn't support resume, fall back to regular download
+    if os.path.exists(dest) and expected_size is not None:
+        existing_size = os.path.getsize(dest)
+        if existing_size > 0 and existing_size < expected_size:
+            # Partial file exists, use regular download for resume support
+            return download_file(url, dest, index, total, size_mb, 
+                                 expected_size=expected_size, show_progress=show_progress)
+    
     try:
         import hf_transfer
-        import urllib.request
-        import urllib.error
         
-        basename = os.path.basename(dest)
         if show_progress:
             print(f"  [{index+1}/{total}] {basename} ({size_mb:.0f} MB) [hf_transfer] ... ", end="", flush=True)
 
         # Read the file
         with urllib.request.urlopen(url) as response:
             data = response.read()
-        
+
         with open(dest, "wb") as f:
             f.write(data)
 
@@ -136,8 +185,9 @@ def download_file_hf_transfer(url: str, dest: str, index: int, total: int, size_
             print(f"done ({actual:.0f} MB)")
         return True, basename
     except ImportError:
-        # Fall back to regular download
-        return download_file(url, dest, index, total, size_mb, show_progress)
+        # Fall back to regular download (with resume support)
+        return download_file(url, dest, index, total, size_mb, 
+                             expected_size=expected_size, show_progress=show_progress)
     except Exception as e:
         basename = os.path.basename(dest)
         if show_progress:
@@ -201,8 +251,7 @@ def main():
         fname = os.path.basename(f["path"])
         expected_sizes[fname] = f["size"]
     
-    existing = set()
-    incomplete = set()
+    complete = set()
     if os.path.isdir(output_dir):
         for fname in os.listdir(output_dir):
             if fname.endswith(".parquet"):
@@ -211,36 +260,36 @@ def main():
                 expected = expected_sizes.get(fname, None)
                 
                 if expected is None:
-                    # File not in remote list (shouldn't happen)
-                    existing.add(fname)
-                elif local_size == expected:
-                    # File is complete
-                    existing.add(fname)
-                elif local_size < expected * 0.99:  # Allow 1% tolerance
-                    # File is incomplete (download interrupted)
-                    incomplete.add(fname)
-                    if not args.quiet:
-                        print(f"  [Incomplete] {fname}: {local_size/(1024*1024):.0f}MB < {expected/(1024*1024):.0f}MB (will re-download)")
-                else:
-                    # File is larger than expected (unlikely)
-                    existing.add(fname)
+                    # File not in remote list (keep but don't count)
+                    pass
+                elif local_size >= expected * 0.99:  # Allow 1% tolerance
+                    # File is complete (or nearly complete)
+                    complete.add(fname)
     
-    # Need to download: missing + incomplete
-    need = [f for f in files 
-            if os.path.basename(f["path"]) not in existing 
-            or os.path.basename(f["path"]) in incomplete]
-    have = total_remote - len(need)
+    # Need to download: missing + incomplete (download_file will resume)
+    need = [f for f in files if os.path.basename(f["path"]) not in complete]
+    have = len(complete)
     
-    if have >= args.num_files and len(incomplete) == 0:
+    if have >= args.num_files:
         print(f"  Already have {have} complete files (>= {args.num_files} requested). Nothing to do.")
         sys.exit(0)
     
-    # Filter to requested number (accounting for re-downloads)
-    need = need[:args.num_files - (have - len(incomplete))]
+    # Filter to requested number
+    need = need[:args.num_files - have]
     size_need_mb = sum(f["size"] for f in need) / (1024 * 1024)
     
-    if incomplete:
-        print(f"  Complete: {have - len(incomplete)} | Incomplete (will re-download): {len(incomplete)}")
+    # Check for partial files that will be resumed
+    partial_count = 0
+    for f in need:
+        fname = os.path.basename(f["path"])
+        local_path = os.path.join(output_dir, fname)
+        if os.path.exists(local_path):
+            partial_count += 1
+    
+    if partial_count > 0:
+        print(f"  Complete: {have} | Partial (will resume): {partial_count}")
+    else:
+        print(f"  Complete: {have}")
     print(f"  Need to download: {len(need)} ({format_size(size_need_mb)})")
     print(f"  Output: {output_dir}")
     print(f"  Workers: {args.workers}")
@@ -260,7 +309,9 @@ def main():
             url = HF_RESOLVE.format(repo=REPO_ID, path=f["path"])
             dest = os.path.join(output_dir, os.path.basename(f["path"]))
             size_mb = f["size"] / (1024 * 1024)
-            future = executor.submit(download_func, url, dest, i, len(need), size_mb, 
+            expected_size = f["size"]  # Pass for resume support
+            future = executor.submit(download_func, url, dest, i, len(need), size_mb,
+                                     expected_size=expected_size, 
                                      show_progress=not args.quiet)
             futures[future] = os.path.basename(f["path"])
         
