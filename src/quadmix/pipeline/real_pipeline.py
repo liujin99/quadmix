@@ -389,6 +389,7 @@ class QuaDMixPipeline:
 
         if parallel_workers > 1 and hasattr(proxy_runner, 'precompute_samples'):
             # Parallel mode: pre-sample then dispatch across NPU devices
+            # Tokenize Thread runs ahead, Workers pull tasks dynamically
             print(f"[Stage 4] Using {parallel_workers} parallel workers (dynamic task queue)")
             all_selected = proxy_runner.precompute_samples(param_sets)
             results = proxy_runner.run_batch_parallel(
@@ -396,8 +397,18 @@ class QuaDMixPipeline:
                 num_workers=parallel_workers,
                 device_type=proxy_runner.device_type,
             )
+        elif hasattr(proxy_runner, 'precompute_samples'):
+            # CPU/Sequential mode: precompute → tokenize all → run sequentially
+            # One-shot tokenize ensures all exps get cache hits (no repeated IO)
+            print(f"[Stage 4] CPU mode: precompute → tokenize union → sequential run")
+            all_selected = proxy_runner.precompute_samples(param_sets)
+            proxy_runner.tokenize_all_needed(all_selected)
+            results = []
+            for i, (params, sel) in enumerate(zip(param_sets, all_selected)):
+                r = proxy_runner.run_experiment(params, experiment_id=i, selected_idx=sel)
+                results.append(r)
         else:
-            # Sequential (original) mode
+            # Fallback: original run_batch (legacy mode)
             results = proxy_runner.run_batch(param_sets)
 
         losses = np.array([r.validation_loss for r in results])

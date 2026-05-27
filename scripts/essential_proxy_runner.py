@@ -858,6 +858,72 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         return all_selected
 
+    def tokenize_all_needed(self, all_selected: List[np.ndarray]):
+        """Tokenize all documents needed by all experiments (union).
+
+        For CPU/sequential mode: one-shot tokenize → all subsequent exps get cache hits.
+
+        Process:
+          1. Collect union of all needed docs across all experiments
+          2. Group by shard
+          3. For each shard:
+             - Check existing cache
+             - Tokenize missing rows
+             - Write to shard cache
+          4. No temporary files (exps read directly from shard cache)
+
+        Args:
+            all_selected: List of selected_indices from precompute_samples()
+        """
+        if self._mode != "sharded":
+            # Legacy mode: already tokenized upfront
+            print("[TokenizeAll] Legacy mode: tokens already loaded")
+            return
+
+        mgr = self.metadata_manager
+        t0 = time.time()
+
+        # Collect union of all needed docs
+        all_unique = np.unique(np.concatenate(all_selected))
+        shard_groups = mgr.global_to_shard_rows(all_unique)
+
+        total_tokenized = 0
+        total_cached = 0
+
+        print(f"\n[TokenizeAll] Union: {len(all_unique):,} unique docs across {len(shard_groups)} shards")
+
+        for sid, (shard_path, local_rows) in shard_groups.items():
+            cache_path = self._get_shard_token_path(sid)
+            cached_rows = self._cached_shard_rows(sid)
+
+            # Split into hit and miss
+            hit_rows = [r for r in local_rows if int(r) in cached_rows]
+            miss_rows = [r for r in local_rows if int(r) not in cached_rows]
+
+            total_cached += len(hit_rows)
+
+            if miss_rows:
+                miss_rows_arr = np.array(miss_rows, dtype=np.int64)
+                df_shard = pd.read_parquet(
+                    shard_path,
+                    columns=["row_in_shard", "text"],
+                    filters=[("row_in_shard", "in", miss_rows_arr.tolist())],
+                )
+                df_shard = df_shard.sort_values("row_in_shard")
+                texts = df_shard["text"].astype(str).tolist()
+                parsed_rows = df_shard["row_in_shard"].to_numpy(dtype=np.int64)
+
+                miss_tokens = self._tokenize_texts(texts)
+                self._cache_add_rows(sid, parsed_rows, miss_tokens)
+                total_tokenized += len(texts)
+
+                print(f"  [Shard {sid}] tokenized {len(texts):,} docs, hit {len(hit_rows):,} from cache")
+
+        elapsed = time.time() - t0
+        print(f"[TokenizeAll] Done: {total_tokenized:,} new docs tokenized, "
+              f"{total_cached:,} from cache ({elapsed:.1f}s)")
+        print(f"[TokenizeAll] All {len(all_selected)} experiments ready (0 cache miss expected)")
+
     # ═══════════════════════════════════════════════════════════
     # Parallel run across multiple NPU devices
     # ═══════════════════════════════════════════════════════════
