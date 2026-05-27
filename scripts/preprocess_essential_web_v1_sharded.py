@@ -122,6 +122,17 @@ def process_shard(shard_path: str, shard_idx: int, output_dir: str) -> dict:
     }
 
 
+def parse_shard_idx_from_path(shard_path: str) -> int:
+    """Extract shard index from filename like 'shard_00000.parquet'."""
+    basename = os.path.basename(shard_path)
+    # Handle both 'shard_00000.parquet' and 'shard_00000' patterns
+    name = basename.replace(".parquet", "")
+    if name.startswith("shard_"):
+        return int(name.replace("shard_", ""))
+    # Fallback: use enumeration index
+    return -1
+
+
 def main():
     p = argparse.ArgumentParser(
         description="Preprocess essential-web-v1 in multi-shard mode")
@@ -133,6 +144,8 @@ def main():
                    help="Output directory for preprocessed shards")
     p.add_argument("--limit", type=int, default=None,
                    help="Limit number of shards to process (for testing)")
+    p.add_argument("--force", action="store_true",
+                   help="Force reprocess even if output already exists")
     args = p.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -148,12 +161,41 @@ def main():
 
     print(f"Found {len(shard_paths)} shards in {args.input_dir}")
 
-    # Process each shard independently
+    # ── Incremental: check existing preprocessed files ──
+    existing_preprocessed = set()
+    if not args.force:
+        for fname in os.listdir(args.output_dir):
+            if fname.startswith("preprocessed_") and fname.endswith(".parquet"):
+                # Parse shard_idx from preprocessed_00000.parquet
+                idx_str = fname.replace("preprocessed_", "").replace(".parquet", "")
+                try:
+                    existing_preprocessed.add(int(idx_str))
+                except ValueError:
+                    pass
+
+    if existing_preprocessed and not args.force:
+        print(f"  Already preprocessed: {len(existing_preprocessed)} shards")
+
+    # Process each shard with ORIGINAL shard_idx (from filename)
     t_start = time.time()
     shard_index = []
-    for idx, sp in enumerate(shard_paths):
-        stats = process_shard(sp, idx, args.output_dir)
+    skipped = 0
+    for sp in shard_paths:
+        shard_idx = parse_shard_idx_from_path(sp)
+        if shard_idx < 0:
+            # Fallback to enumeration if filename doesn't match pattern
+            shard_idx = len(shard_index)
+
+        # Skip if already processed (incremental mode)
+        if shard_idx in existing_preprocessed and not args.force:
+            skipped += 1
+            continue
+
+        stats = process_shard(sp, shard_idx, args.output_dir)
         shard_index.append(stats)
+
+    if skipped > 0:
+        print(f"  Skipped {skipped} already-preprocessed shards")
 
     # Save shard index
     index_path = os.path.join(args.output_dir, "shard_index.json")

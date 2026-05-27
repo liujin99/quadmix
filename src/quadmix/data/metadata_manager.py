@@ -52,7 +52,7 @@ class ShardMetadataManager:
                 f"No preprocessed_*.parquet files found in {preprocessed_dir}"
             )
 
-        # Load index if available
+        # Load index for validation
         self._shard_index: Optional[dict] = None
         if index_file is None:
             index_candidate = os.path.join(preprocessed_dir, "shard_index.json")
@@ -61,6 +61,15 @@ class ShardMetadataManager:
         if index_file:
             with open(index_file) as f:
                 self._shard_index = json.load(f)
+
+        # Validate: check if shard_index matches discovered files
+        if self._shard_index:
+            expected_shards = self._shard_index.get("num_shards", 0)
+            actual_shards = len(self._shard_files)
+            if expected_shards != actual_shards:
+                print(f"[ShardMetadataManager] WARNING: shard_index.json says {expected_shards} shards, "
+                      f"but found {actual_shards} files. "
+                      f"May need to re-run preprocessing.")
 
         print(f"[ShardMetadataManager] Discovered {len(self._shard_files)} shards")
 
