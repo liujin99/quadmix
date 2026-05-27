@@ -39,6 +39,7 @@ quadmix/
 │   ├── download_essential_web.py   # Download tool
 │   ├── validation_set/             # Reference scripts for validation set prep
 │   ├── demo_run_quick.sh           # Quick demo (~1-2min, CPU)
+│   ├── demo_run_npu.sh             # Medium demo (~15-30min, 8x NPU, 100 shards)
 │   └── demo_run_full.sh            # Full demo (paper config, GPU/NPU)
 ├── result/                     # Final results (one dir per run)
 │   └── quadmix_YYYYMMDD_HHMMSS/
@@ -379,18 +380,32 @@ export HF_ENDPOINT=https://hf-mirror.com  # For users in China
 ## CLI Usage
 
 ```bash
-# Single device (backward compatible)
-bash scripts/demo_run_full.sh
+# Quick test (20 experiments, CPU, ~1-2min)
+bash scripts/demo_run_quick.sh
 
-# 8 NPU cards parallel
+# Medium test (200 experiments, 8x NPU, ~15-30min)
+bash scripts/demo_run_npu.sh
+
+# Full run (3000 experiments, paper config, ~15h on 8x NPU)
 bash scripts/demo_run_full.sh --device-type npu --npu-devices 8
 
-# 4 CUDA GPUs parallel
-bash scripts/demo_run_full.sh --device-type cuda --npu-devices 4
-
-# Quick test (20 experiments, CPU)
-bash scripts/demo_run_quick.sh
+# Custom parameters
+python scripts/run_essential_web_v1.py \
+    --preprocessed-dir temp/preprocessed \
+    --num-experiments 500 \
+    --num-search 10000 \
+    --block-size 2048 \
+    --device-type npu --npu-devices 4 \
+    --output result/my_run
 ```
+
+### Demo Scripts Comparison
+
+| Script | Shards | Experiments | Device | Time | Use Case |
+|--------|--------|-------------|--------|------|----------|
+| `demo_run_quick.sh` | 2 | 20 | CPU | ~1-2min | CI, smoke test |
+| `demo_run_npu.sh` | 100 | 200 | 8x NPU | ~15-30min | NPU validation |
+| `demo_run_full.sh` | 2000 | 3000 | GPU/NPU | ~15h (8x) | Production |
 
 ## Key Dependencies
 
@@ -413,3 +428,42 @@ bash scripts/demo_run_quick.sh
 3. **Non-official**: This is a clean-room implementation of QuaDMix (ByteDance, 2025). Not an official release.
 
 4. **NPU deployment**: See `docs/NPU_DEPLOYMENT.md` for detailed NPU setup instructions.
+
+## Design Philosophy
+
+### Why Two Execution Modes?
+
+**CPU Sequential** exists because:
+- Development/debugging needs reproducible, step-by-step execution
+- CI testing needs deterministic runs without NPU dependency
+- Small experiments (20-50) benefit from upfront tokenize-all approach
+
+**NPU Parallel** exists because:
+- Production scale (3000 experiments) cannot wait for all tokenize upfront
+- NPU time is expensive (~$10/hr), must maximize utilization
+- Dynamic task queue allows natural load balancing
+
+### Why Temporary File Isolation?
+
+File locking is expensive (~100s blocking). Temporary files:
+- Zero blocking: Workers read from pre-packed `exp_{id}_tokens.pt`
+- Automatic cleanup: Workers delete temp files after use
+- Shard cache persists: Subsequent runs benefit from accumulated cache
+
+### Why Post-Hoc target_tokens?
+
+Pre-scaling parameters distorts distribution:
+- `floor(sampling_values * scale)` crosses integer boundaries
+- Relative proportions change unpredictably
+
+Post-hoc uniform discard:
+- Preserves relative distribution exactly
+- Paper insight: 30B > 90B > 180B (quality > quantity)
+- If below target, warn but don't artificially copy
+
+### Why On-Demand Text Loading?
+
+Metadata (~15 GB) fits in RAM, but text (~800 GB) does not.
+- Load domain + quality upfront: needed for all experiments
+- Load text only for selected docs: ~550K per experiment
+- Parquet filter pushdown: reads only needed rows, not full shard

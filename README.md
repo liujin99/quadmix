@@ -58,6 +58,7 @@ quadmix/
 │   ├── download_essential_web.py   # Download tool
 │   ├── validation_set/             # Validation set prep script (reference only)
 │   ├── demo_run_quick.sh           # Quick demo (~1-2min, CPU)
+│   ├── demo_run_npu.sh             # Medium demo (~15-30min, 8x NPU)
 │   └── demo_run_full.sh            # Full demo (paper config, GPU)
 ├── result/                     # Final results (one dir per run)
 ├── temp/                       # Intermediate data (deletable)
@@ -75,10 +76,13 @@ quadmix/
 # Install
 pip install -e .
 
-# Quick demo (20 experiments, ~1-2min) — auto-downloads validation set from HF
+# Quick demo (20 experiments, ~1-2min, CPU) — auto-downloads validation set
 bash scripts/demo_run_quick.sh
 
-# Full run (paper config, needs GPU)
+# NPU demo (200 experiments, ~15-30min, 8x NPU)
+bash scripts/demo_run_npu.sh
+
+# Full run (paper config, needs GPU/NPU)
 bash scripts/demo_run_full.sh
 
 # Custom run
