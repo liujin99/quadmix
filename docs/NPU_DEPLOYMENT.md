@@ -123,6 +123,10 @@ python scripts/download_essential_web.py \
     --workers 8  # 并行下载线程数
 ```
 
+> **增量下载支持**：下载脚本会自动检测已有文件，只下载缺失的 shard。
+> 例如：第一次下载 2 shard → 第二次下载 100 shard，只会补充下载 98 个新 shard。
+> 适用于逐步扩大数据规模的场景。
+
 ### 2.1 下载加速方法
 
 **方法 1：并行下载（推荐）**
@@ -187,6 +191,12 @@ python scripts/preprocess_essential_web_v1_sharded.py \
     --output-dir temp/preprocessed
 ```
 
+> **增量预处理支持**：
+> - 自动检测已有 `preprocessed_*.parquet`，跳过已处理的 shard
+> - 自动检测缺失的 shard（如用户误删中间文件），补充处理
+> - 使用 `--force` 强制重新处理所有 shard
+> - `shard_index.json` 包含所有 shard（包括跳过的），保持完整索引
+
 **耗时：** 每个 shard ~0.3-0.5s，2000 shards ≈ 10-15 分钟，3291 shards ≈ 20 分钟。
 
 **验证：**
@@ -214,7 +224,7 @@ print(f'Domains:{len(mgr.unique_domains)}')
 
 ## 4. 运行流水线
 
-### 4.1 快速验证（2 实验，CPU，~15 秒）
+### 4.1 快速验证（20 实验，CPU，~1-2分钟）
 
 验证环境配置正确、数据路径正常：
 
@@ -223,7 +233,7 @@ cd $QUADMIX_DIR
 bash scripts/demo_run_quick.sh
 ```
 
-成功标志：控制台打印 `All 2 experiments complete` 并在 `result/` 下生成结果目录。
+成功标志：控制台打印 `All 20 experiments complete` 并在 `result/` 下生成结果目录。
 
 ### 4.2 单卡 NPU 完整运行（3000 实验）
 

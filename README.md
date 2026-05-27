@@ -57,7 +57,7 @@ quadmix/
 │   ├── essential_proxy_runner.py   # Shard-aware proxy experiments
 │   ├── download_essential_web.py   # Download tool
 │   ├── validation_set/             # Validation set prep script (reference only)
-│   ├── demo_run_quick.sh           # Quick demo (5-15s, CPU)
+│   ├── demo_run_quick.sh           # Quick demo (~1-2min, CPU)
 │   └── demo_run_full.sh            # Full demo (paper config, GPU)
 ├── result/                     # Final results (one dir per run)
 ├── temp/                       # Intermediate data (deletable)
@@ -75,7 +75,7 @@ quadmix/
 # Install
 pip install -e .
 
-# Quick demo (2 experiments, 5s) — auto-downloads validation set from HF
+# Quick demo (20 experiments, ~1-2min) — auto-downloads validation set from HF
 bash scripts/demo_run_quick.sh
 
 # Full run (paper config, needs GPU)

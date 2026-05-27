@@ -38,7 +38,7 @@ quadmix/
 │   ├── essential_proxy_runner.py   # Proxy runner: precompute + batch loop + cache
 │   ├── download_essential_web.py   # Download tool
 │   ├── validation_set/             # Reference scripts for validation set prep
-│   ├── demo_run_quick.sh           # Quick demo (5-15s, CPU)
+│   ├── demo_run_quick.sh           # Quick demo (~1-2min, CPU)
 │   └── demo_run_full.sh            # Full demo (paper config, GPU/NPU)
 ├── result/                     # Final results (one dir per run)
 │   └── quadmix_YYYYMMDD_HHMMSS/
@@ -269,7 +269,7 @@ bash scripts/demo_run_full.sh --device-type npu --npu-devices 8
 # 4 CUDA GPUs parallel
 bash scripts/demo_run_full.sh --device-type cuda --npu-devices 4
 
-# Quick test (2 experiments, CPU)
+# Quick test (20 experiments, CPU)
 bash scripts/demo_run_quick.sh
 ```
 
