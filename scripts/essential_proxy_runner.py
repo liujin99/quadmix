@@ -1070,6 +1070,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         def tokenize_thread_func():
             """Continuously pre-tokenize experiments ahead of workers."""
             pos = 0
+            tokenize_done_count = 0
             while pos < n_exp:
                 # Tokenize a batch of experiments
                 end_pos = min(pos + tokenize_lookahead, n_exp)
@@ -1080,6 +1081,10 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 for exp_id, selected_idx in zip(batch_ids, batch_selected):
                     try:
                         self._pack_exp_tokens(exp_id, selected_idx)
+                        tokenize_done_count += 1
+                        # Progress: show every exp during first batch, then every 10
+                        if tokenize_done_count <= tokenize_lookahead or tokenize_done_count % 10 == 0:
+                            print(f"[TokenizeThread] Exp {exp_id} ready ({tokenize_done_count}/{n_exp})")
                         # Only mark as ready if successful
                         with ready_lock:
                             ready_events[exp_id] = True
@@ -1094,7 +1099,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 pos = end_pos
                 time.sleep(0.05)  # Small pause to let workers catch up
 
-            print(f"[TokenizeThread] All {n_exp} experiments processed")
+            print(f"[TokenizeThread] All {n_exp} experiments tokenized ({time.time()-t_start:.1f}s)")
 
         tokenize_thread = threading.Thread(target=tokenize_thread_func, daemon=True)
         tokenize_thread.start()
@@ -1103,13 +1108,18 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         # Key fix: Workers must wait for cache to be ready
         first_batch_end = min(tokenize_lookahead, n_exp)
         print(f"[DynamicParallel] Waiting for first batch (exp 0-{first_batch_end-1}) to be tokenized...")
+        wait_start = time.time()
         while True:
             with ready_lock:
-                first_ready = ready_events.get(first_batch_end - 1, False)
-            if first_ready:
+                ready_count = sum(1 for i in range(first_batch_end) if ready_events.get(i, False))
+            # Show progress every 2s
+            if time.time() - wait_start > 2:
+                print(f"[DynamicParallel] Tokenizing... {ready_count}/{first_batch_end} ready")
+                wait_start = time.time()
+            if ready_count == first_batch_end:
                 break
             time.sleep(0.5)
-        print(f"[DynamicParallel] First batch tokenized, starting workers")
+        print(f"[DynamicParallel] First batch tokenized ({first_batch_end} exps), starting workers")
 
         # ── 2. Dispatcher Thread (push ready tasks) ───────────────
         def dispatcher_thread_func():
