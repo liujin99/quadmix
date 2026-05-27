@@ -192,23 +192,56 @@ def main():
     total_size_mb = sum(f["size"] for f in files) / (1024 * 1024)
     print(f"  Found {total_remote} files ({format_size(total_size_mb)}) in crawl '{args.crawl}'")
 
-    # ── Step 2: Check what's already downloaded ──
+    # ── Step 2: Check what's already downloaded (verify file size) ──
     print(f"[2/3] Checking existing files in {output_dir}...")
+    
+    # Build expected size map from remote file list
+    expected_sizes = {}
+    for f in files:
+        fname = os.path.basename(f["path"])
+        expected_sizes[fname] = f["size"]
+    
     existing = set()
+    incomplete = set()
     if os.path.isdir(output_dir):
         for fname in os.listdir(output_dir):
             if fname.endswith(".parquet"):
-                existing.add(fname)
-    need = [f for f in files if os.path.basename(f["path"]) not in existing]
+                local_path = os.path.join(output_dir, fname)
+                local_size = os.path.getsize(local_path)
+                expected = expected_sizes.get(fname, None)
+                
+                if expected is None:
+                    # File not in remote list (shouldn't happen)
+                    existing.add(fname)
+                elif local_size == expected:
+                    # File is complete
+                    existing.add(fname)
+                elif local_size < expected * 0.99:  # Allow 1% tolerance
+                    # File is incomplete (download interrupted)
+                    incomplete.add(fname)
+                    if not args.quiet:
+                        print(f"  [Incomplete] {fname}: {local_size/(1024*1024):.0f}MB < {expected/(1024*1024):.0f}MB (will re-download)")
+                else:
+                    # File is larger than expected (unlikely)
+                    existing.add(fname)
+    
+    # Need to download: missing + incomplete
+    need = [f for f in files 
+            if os.path.basename(f["path"]) not in existing 
+            or os.path.basename(f["path"]) in incomplete]
     have = total_remote - len(need)
-
-    if have >= args.num_files:
-        print(f"  Already have {have} files (>= {args.num_files} requested). Nothing to do.")
+    
+    if have >= args.num_files and len(incomplete) == 0:
+        print(f"  Already have {have} complete files (>= {args.num_files} requested). Nothing to do.")
         sys.exit(0)
-
-    need = need[:args.num_files - have]
+    
+    # Filter to requested number (accounting for re-downloads)
+    need = need[:args.num_files - (have - len(incomplete))]
     size_need_mb = sum(f["size"] for f in need) / (1024 * 1024)
-    print(f"  Already have: {have} | Need to download: {len(need)} ({format_size(size_need_mb)})")
+    
+    if incomplete:
+        print(f"  Complete: {have - len(incomplete)} | Incomplete (will re-download): {len(incomplete)}")
+    print(f"  Need to download: {len(need)} ({format_size(size_need_mb)})")
     print(f"  Output: {output_dir}")
     print(f"  Workers: {args.workers}")
 
