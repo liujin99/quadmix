@@ -95,11 +95,14 @@ def build_parser():
     p.add_argument("--output", "-o", default=None)
     p.add_argument("--num-experiments", type=int, default=None)
     p.add_argument("--num-search", type=int, default=None)
-    p.add_argument("--doc-limit", type=int, default=None)
+    # Note: --doc-limit removed. Proxy experiments should use full data pool.
+    # Use --target-tokens to control final output size instead.
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--top-k", type=int, default=10)
     p.add_argument("--target-tokens", type=float, default=0.0,
-                   help="Desired total tokens in output dataset (in B, e.g. 10 = 10B tokens)")
+                   help="Desired max tokens in output (in B). θ* may produce less; "
+                        "if more, uniformly discard to preserve distribution. "
+                        "Paper: 'more tokens not always good' (30B > 90B > 180B)")
     p.add_argument("--device-type", default="cpu",
                    choices=["cpu", "cuda", "npu"],
                    help="Device type for proxy model training")
@@ -144,7 +147,7 @@ def create_proxy_runner(config, args, output_dir, metadata_manager):
         micro_batch_size=args.micro_batch_size,
         global_batch_size=args.global_batch_size,
         tiny_steps=args.tiny_steps,
-        doc_limit=args.doc_limit,
+        doc_limit=None,  # Always use full data pool for proxy experiments
         test_block_size=args.block_size,
         rank_ref_size=args.rank_ref_size,
         val_doc_limit=args.val_limit,
@@ -231,7 +234,7 @@ def main():
         # load_precomputed_sharded will be triggered by passing metadata_manager
         # via **load_kwargs:
         metadata_manager=metadata_manager,
-        doc_limit=args.doc_limit,
+        doc_limit=None,  # Always use full data pool
         domain_names=DOMAIN_NAMES,
         quality_names=QUALITY_NAMES,
         proxy_runner=proxy_runner,

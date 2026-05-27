@@ -204,7 +204,9 @@ else:
 
 ### Stage 7: Final Sampling
 - Apply θ* to entire data pool → Eq.1+Eq.2+Eq.3 → final dataset
-- Optional target token scaling (e.g., --target-tokens 10 → 10B)
+- Optional target token post-processing:
+  - If θ* produces > target: uniform random discard (preserves distribution)
+  - If θ* produces < target: warn, no copy (paper: "more tokens not always good")
 
 ### Stage 8: Save Outputs
 - optimal_parameters.json, pipeline_summary.json, sampled_dataset.parquet

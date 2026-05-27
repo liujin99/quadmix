@@ -284,6 +284,30 @@ selected_indices, sampling_values, _ = sample_with_optimal_params(
 )
 ```
 
+**Target Token 事后处理**：
+
+如果设置了 `--target-tokens`：
+
+```python
+# θ* 产生最优分布，只均匀丢弃，不 scale（避免整数边界扭曲分布）
+actual_tokens = np.sum(token_counts[selected_indices])
+
+if actual_tokens > target_tokens:
+    # 均匀随机丢弃（每个 copy 丢弃概率相同，保持相对分布）
+    keep_prob = target_tokens / actual_tokens
+    keep_mask = np.random.random(len(selected_indices)) < keep_prob
+    selected_indices = selected_indices[keep_mask]
+elif actual_tokens < target_tokens * 0.95:
+    # 不复制（论文: "more tokens not always good"）
+    # θ* 产生更少数据但 loss 更优
+    print("[WARN] θ* produces less than target")
+```
+
+**原理**：
+- 论文 Table 2: 30B > 90B > 180B（数据量少反而 loss 更好）
+- 复制会破坏最优分布的"稀有度"设计
+- `scale = target/expected` 在 `floor + random` 采样时会在整数边界非线性扭曲分布
+
 ### Stage 8: 保存输出
 
 sharded 模式：
@@ -461,9 +485,10 @@ temp/
 ### demo_run_quick.sh
 
 ```
-参数: 2 experiments, 5 search, doc_limit=500, block_size=64
-时间: ~15s (CPU)
+参数: 20 experiments, 200 search, block_size=64 (num-experiments 改为 20，LightGBM 需要足够样本)
+时间: ~1-2分钟 (CPU)
 用途: 快速验证架构是否正确
+注: 无 doc_limit，proxy experiments 使用完整数据池
 ```
 
 ### demo_run_full.sh
