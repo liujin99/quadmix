@@ -92,6 +92,7 @@ def download_file(url: str, dest: str, index: int, total: int, size_mb: float,
     """Download a single file with resume support. Returns (success, filename)."""
     import urllib.request
     import urllib.error
+    import shutil
     
     basename = os.path.basename(dest)
     existing_size = 0
@@ -142,12 +143,47 @@ def download_file(url: str, dest: str, index: int, total: int, size_mb: float,
             else:
                 print(f"done ({actual:.0f} MB)")
         return True, basename
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+    except urllib.error.HTTPError as e:
+        if e.code == 416:  # Range Not Satisfiable - file may already be complete
+            actual_size = os.path.getsize(dest) if os.path.exists(dest) else 0
+            if expected_size and actual_size >= expected_size * 0.99:
+                # File is essentially complete, treat as success
+                if show_progress:
+                    print(f"done (416 but file complete, {actual_size/(1024*1024):.0f}MB)")
+                return True, basename
+            else:
+                # Re-download to temp file, then replace (don't delete original)
+                if show_progress:
+                    print(f"416 error, re-downloading...")
+                temp_dest = dest + ".tmp"
+                try:
+                    req = urllib.request.Request(url)
+                    with open(temp_dest, "wb") as f:
+                        with urllib.request.urlopen(req, timeout=300) as resp:
+                            chunk_size = 8 * 1024 * 1024
+                            while True:
+                                chunk = resp.read(chunk_size)
+                                if not chunk:
+                                    break
+                                f.write(chunk)
+                    shutil.move(temp_dest, dest)
+                    actual = os.path.getsize(dest) / (1024 * 1024)
+                    if show_progress:
+                        print(f"done ({actual:.0f} MB)")
+                    return True, basename
+                except Exception as e2:
+                    if show_progress:
+                        print(f"FAILED: {e2}")
+                    if os.path.exists(temp_dest):
+                        os.remove(temp_dest)
+                    return False, basename
+        else:
+            if show_progress:
+                print(f"FAILED: {e}")
+            return False, basename
+    except (urllib.error.URLError, OSError) as e:
         if show_progress:
             print(f"FAILED: {e}")
-        # Don't delete partial file on failure (keep for next resume)
-        if existing_size == 0 and os.path.exists(dest):
-            os.remove(dest)
         return False, basename
 
 
@@ -189,11 +225,8 @@ def download_file_hf_transfer(url: str, dest: str, index: int, total: int, size_
         return download_file(url, dest, index, total, size_mb, 
                              expected_size=expected_size, show_progress=show_progress)
     except Exception as e:
-        basename = os.path.basename(dest)
         if show_progress:
             print(f"FAILED: {e}")
-        if os.path.exists(dest):
-            os.remove(dest)
         return False, basename
 
 
