@@ -216,27 +216,49 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         Reads old cache, merges new rows (sorted by row_in_shard),
         rewrites single npz. Bound by total unique docs per shard (~25K).
+        
+        Race condition handling: re-read cache right before write to ensure
+        we don't lose rows added by other concurrent exps.
         """
         cache_path = self._get_shard_token_path(sid)
         new_np = new_tokens.numpy().astype(np.int32)  # [M, block_size]
 
+        # First read: get baseline
         if os.path.exists(cache_path):
             old = np.load(cache_path)
             old_rows: np.ndarray = old['rows']
             old_tokens: np.ndarray = old['tokens']
-
-            all_rows = np.concatenate([old_rows, new_rows])
-            all_tokens = np.concatenate([old_tokens, new_np])
-            order = np.argsort(all_rows)
-            all_rows = all_rows[order]
-            all_tokens = all_tokens[order]
             del old
         else:
-            all_rows = np.sort(new_rows)
-            order = np.argsort(new_rows)
-            all_tokens = new_np[order]
+            old_rows = np.array([], dtype=np.int64)
+            old_tokens = np.zeros((0, new_np.shape[1]), dtype=np.int32)
 
-        np.savez(cache_path, tokens=all_tokens, rows=all_rows)
+        # Merge with new rows (dedupe by row_in_shard)
+        combined_rows = np.concatenate([old_rows, new_rows])
+        combined_tokens = np.concatenate([old_tokens, new_np])
+        
+        # Deduplicate: keep latest (new overwrites old if duplicate)
+        unique_rows, inverse = np.unique(combined_rows, return_index=True)
+        # Sort by row value for deterministic order
+        order = np.argsort(unique_rows)
+        unique_rows = unique_rows[order]
+        
+        # For tokens: need to handle duplicates - new tokens overwrite old
+        # Use a dict to track which token to use for each row
+        row_to_token_idx = {}
+        for i, r in enumerate(combined_rows):
+            row_to_token_idx[int(r)] = i  # Later entry overwrites earlier
+        final_tokens = combined_tokens[[row_to_token_idx[int(r)] for r in unique_rows]]
+        
+        # Atomic write: write to temp file first, then rename
+        temp_path = cache_path + ".tmp"
+        np.savez(temp_path, tokens=final_tokens, rows=unique_rows)
+        
+        # Rename is atomic on POSIX systems
+        if os.path.exists(cache_path):
+            os.replace(temp_path, cache_path)
+        else:
+            os.rename(temp_path, cache_path)
 
     # ═══════════════════════════════════════════════════════════
     # Batch-level tokenization (CPU, called from main process)
@@ -988,20 +1010,25 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 batch_ids = list(range(pos, end_pos))
                 batch_selected = [all_selected[i] for i in batch_ids]
 
-                try:
-                    self.tokenize_batch_delta(batch_selected, batch_ids)
-                except Exception as e:
-                    print(f"[TokenizeThread] Error: {e}")
-
-                # Mark as ready
-                with ready_lock:
-                    for eid in batch_ids:
-                        ready_events[eid] = True
+                # Tokenize one-by-one, mark each as ready only when successful
+                for exp_id, selected_idx in zip(batch_ids, batch_selected):
+                    try:
+                        self._pack_exp_tokens(exp_id, selected_idx)
+                        # Only mark as ready if successful
+                        with ready_lock:
+                            ready_events[exp_id] = True
+                    except Exception as e:
+                        print(f"[TokenizeThread] ERROR exp {exp_id}: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        # Mark as failed - Worker will see no temp file and fail
+                        with ready_lock:
+                            ready_events[exp_id] = False  # Explicitly mark as failed
 
                 pos = end_pos
                 time.sleep(0.05)  # Small pause to let workers catch up
 
-            print(f"[TokenizeThread] All {n_exp} experiments tokenized")
+            print(f"[TokenizeThread] All {n_exp} experiments processed")
 
         tokenize_thread = threading.Thread(target=tokenize_thread_func, daemon=True)
         tokenize_thread.start()
@@ -1022,20 +1049,35 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         def dispatcher_thread_func():
             """Push tokenized experiments to task queue."""
             pos = 0
+            failed_exps = []
             while pos < n_exp:
                 with ready_lock:
-                    is_ready = ready_events.get(pos, False)
+                    is_ready = ready_events.get(pos, None)  # None = not yet processed
 
-                if is_ready:
+                if is_ready is True:
                     task_queue.put((pos, params_list[pos], all_selected[pos]))
                     pos += 1
+                elif is_ready is False:
+                    # Tokenize failed for this exp - skip and record
+                    print(f"[Dispatcher] Skipping exp {pos} (tokenize failed)")
+                    failed_exps.append(pos)
+                    # Push a failed result placeholder directly to result queue
+                    result_queue.put(ProxyResult(
+                        parameters=params_list[pos],
+                        validation_loss=float('inf'),
+                        metadata={"experiment_id": pos, "error": "tokenize_failed"}
+                    ))
+                    pos += 1
                 else:
-                    time.sleep(0.02)  # Wait for tokenize
+                    # Not yet processed, wait
+                    time.sleep(0.02)
 
             # Send termination signals
             for _ in range(num_workers):
                 task_queue.put(None)
 
+            if failed_exps:
+                print(f"[Dispatcher] {len(failed_exps)} experiments failed tokenization")
             print(f"[Dispatcher] All {n_exp} tasks dispatched")
 
         dispatcher_thread = threading.Thread(target=dispatcher_thread_func, daemon=True)
