@@ -242,6 +242,12 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         import fcntl
         
         cache_path = self._get_shard_token_path(sid)
+        
+        # Ensure directory exists before writing
+        cache_dir = os.path.dirname(cache_path)
+        if not os.path.exists(cache_dir):
+            os.makedirs(cache_dir, exist_ok=True)
+        
         new_np = new_tokens.numpy().astype(np.int32)  # [M, block_size]
         
         # Use unique temp file per call
@@ -250,6 +256,11 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         
         # Lock file for this shard
         lock_path = cache_path + ".lock"
+        
+        # Ensure lock file directory exists
+        lock_dir = os.path.dirname(lock_path)
+        if not os.path.exists(lock_dir):
+            os.makedirs(lock_dir, exist_ok=True)
         
         with open(lock_path, 'w') as lock_file:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
@@ -281,11 +292,16 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 
                 # Atomic write (unique temp file prevents collision)
                 np.savez(temp_path, tokens=final_tokens, rows=unique_rows)
+                
+                # Verify temp file was created
+                if not os.path.exists(temp_path):
+                    raise IOError(f"np.savez failed to create {temp_path}")
+                
                 os.replace(temp_path, cache_path)
                 
             finally:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-                # Clean up temp file if something went wrong
+                # Clean up temp file if something went wrong (file not moved)
                 if os.path.exists(temp_path):
                     try:
                         os.remove(temp_path)
