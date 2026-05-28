@@ -267,17 +267,17 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             requested_rows: List of row_in_shard to query
 
         Returns:
-            (tokens, hit_rows, miss_rows)
-            - tokens: Array of tokens for hit rows (empty if no hit)
-            - hit_rows: List of rows found in cache
-            - miss_rows: List of rows not in cache
+            (tokens, sorted_hit_rows, miss_rows)
+            - tokens: Array of tokens for hit rows, sorted by sorted_hit_rows
+            - sorted_hit_rows: List of hit rows in SORTED order (matches tokens order)
+            - miss_rows: List of rows not in cache (in requested_rows order)
         """
         cached_rows = self._memory_cache_get_rows(sid)
-        hit_rows = [r for r in requested_rows if int(r) in cached_rows]
+        hit_rows_set = [r for r in requested_rows if int(r) in cached_rows]
         miss_rows = [r for r in requested_rows if int(r) not in cached_rows]
 
-        if not hit_rows:
-            return np.zeros((0, self.block_size), dtype=np.int32), hit_rows, miss_rows
+        if not hit_rows_set:
+            return np.zeros((0, self.block_size), dtype=np.int32), [], miss_rows
 
         # Use np.searchsorted for efficient batch query
         cache_data = self._memory_cache[sid]
@@ -285,7 +285,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         cache_tokens = cache_data["tokens"]
 
         # Sort hit_rows to match cache_rows order (cache_rows is sorted)
-        sorted_hit_rows = sorted(hit_rows)
+        sorted_hit_rows = sorted(hit_rows_set)
         positions = np.searchsorted(cache_rows, sorted_hit_rows)
 
         # Verify all positions are valid (searchsorted returns len if not found)
@@ -294,7 +294,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         tokens = cache_tokens[positions]
 
-        return tokens, hit_rows, miss_rows
+        # Return sorted_hit_rows so caller knows tokens order
+        return tokens, sorted_hit_rows, miss_rows
 
     # ═══════════════════════════════════════════════════════════
     # Incremental token cache (append new rows to existing npz)
@@ -689,7 +690,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             for sid, (shard_path, local_rows) in shard_groups.items():
                 # Query memory_cache for all needed rows (should be 100% hit now)
                 requested_rows = [int(r) for r in local_rows]
-                tokens, hit_rows, miss_rows = self._memory_cache_query(sid, requested_rows)
+                tokens, sorted_hit_rows, miss_rows = self._memory_cache_query(sid, requested_rows)
 
                 if miss_rows:
                     print(f"  WARNING: exp {exp_id} shard {sid} has {len(miss_rows)} miss rows after batch tokenize!")
@@ -706,10 +707,11 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                                 pass  # TODO: handle this edge case
                         del data
 
-                # Reorder tokens to match local_rows order
-                # memory_cache_query returns tokens in sorted order, need to reorder
-                row_to_idx = {int(r): i for i, r in enumerate(hit_rows)}
-                positions = np.array([row_to_idx[int(r)] for r in requested_rows], dtype=np.int64)
+                # Reorder tokens to match requested_rows order
+                # tokens[i] corresponds to sorted_hit_rows[i]
+                # Create mapping: row -> position in tokens array
+                row_to_token_pos = {int(r): i for i, r in enumerate(sorted_hit_rows)}
+                positions = np.array([row_to_token_pos[int(r)] for r in requested_rows], dtype=np.int64)
                 shard_tokens = torch.from_numpy(tokens[positions].astype(np.int64))
                 all_tokens.append(shard_tokens)
 

@@ -711,19 +711,38 @@ memory_cache: Dict[int, dict] = {
 def get_tokens_from_memory(sid, rows_needed):
     shard_cache = memory_cache.get(sid)
     if not shard_cache:
-        return None
-    positions = np.searchsorted(shard_cache['rows'], rows_needed)
-    return shard_cache['tokens'][positions]
+        return np.zeros((0, block_size)), [], rows_needed  # (tokens, sorted_hit_rows, miss_rows)
+    
+    cached_rows_set = set(shard_cache['rows'])
+    hit_rows_set = [r for r in rows_needed if r in cached_rows_set]
+    miss_rows = [r for r in rows_needed if r not in cached_rows_set]
+    
+    if not hit_rows_set:
+        return np.zeros((0, block_size)), [], miss_rows
+    
+    # Sort hit_rows to match sorted cache_rows
+    sorted_hit_rows = sorted(hit_rows_set)
+    positions = np.searchsorted(shard_cache['rows'], sorted_hit_rows)
+    tokens = shard_cache['tokens'][positions]
+    
+    # Returns: (tokens, sorted_hit_rows, miss_rows)
+    # Caller uses sorted_hit_rows to create row_to_token_pos mapping for reorder
+    return tokens, sorted_hit_rows, miss_rows
 
-# Merge: concatenate + dedupe + sort
+# Merge: concatenate + dedupe (keep latest)
 def merge_to_memory_cache(sid, new_rows, new_tokens):
     if sid not in memory_cache:
         memory_cache[sid] = {'rows': new_rows, 'tokens': new_tokens}
     else:
         combined_rows = np.concatenate([memory_cache[sid]['rows'], new_rows])
         combined_tokens = np.concatenate([memory_cache[sid]['tokens'], new_tokens])
-        unique_rows, idx = np.unique(combined_rows, return_index=True)
-        memory_cache[sid] = {'rows': unique_rows, 'tokens': combined_tokens[idx]}
+        # Dict dedupe: later entry overwrites earlier (keep latest)
+        row_to_idx = {}
+        for i, r in enumerate(combined_rows):
+            row_to_idx[int(r)] = i
+        unique_rows = np.array(sorted(row_to_idx.keys()), dtype=np.int64)
+        final_tokens = combined_tokens[[row_to_idx[int(r)] for r in unique_rows]]
+        memory_cache[sid] = {'rows': unique_rows, 'tokens': final_tokens}
 ```
 
 **Why this structure**:
@@ -735,22 +754,25 @@ def merge_to_memory_cache(sid, new_rows, new_tokens):
 
 ```python
 def tokenize_batch_optimized(batch_ids, batch_selected):
-    # Step 1: Compute union miss rows
+    # Step 1: Compute union miss rows (check memory_cache + disk_cache)
     union_miss = compute_union_miss(batch_selected, memory_cache, disk_cache)
     
-    # Step 2: Batch read + tokenize (each shard once)
-    for sid, miss_rows in union_miss.items():
+    # Step 2: Load disk cache hits into memory_cache (for subsequent batches)
+    for sid, disk_hit_rows in union_miss['disk_hits'].items():
+        load_from_disk_to_memory(sid, disk_hit_rows)
+    
+    # Step 3: Batch read + tokenize (each shard once, only true miss)
+    for sid, miss_rows in union_miss['true_miss'].items():
         texts = read_parquet_rows(sid, miss_rows)
         tokens = tokenize_texts(texts)
         merge_to_memory_cache(sid, miss_rows, tokens)
+        # Queue async write (per-shard, not whole batch)
+        async_write_queue.put((sid, miss_rows, tokens))
     
-    # Step 3: Batch pack exp_tokens.pt
+    # Step 4: Batch pack exp_tokens.pt (from memory_cache)
     for exp_id, selected in zip(batch_ids, batch_selected):
         pack_exp_from_memory(exp_id, selected)
         ready_events[exp_id] = True
-    
-    # Step 4: Queue async write (non-blocking)
-    async_write_queue.put(union_miss)
     
     # Step 5: Immediately start next batch tokenize
     # (Workers already running from previous batch)
@@ -761,14 +783,12 @@ def tokenize_batch_optimized(batch_ids, batch_selected):
 ```python
 def async_write_thread_func():
     while True:
-        union_miss = async_write_queue.get()
-        if union_miss is None:
-            break
-        for sid, miss_rows in union_miss.items():
-            rows = memory_cache[sid]['rows']
-            tokens = memory_cache[sid]['tokens']
-            _cache_add_rows(sid, rows, torch.from_numpy(tokens))
-        # After write, can optionally clear memory_cache entries
+        item = async_write_queue.get()
+        if item is None:
+            break  # Termination signal
+        sid, rows, tokens = item  # Per-shard, new rows only
+        # _cache_add_rows merges with existing disk cache
+        _cache_add_rows(sid, rows, torch.from_numpy(tokens))
 ```
 
 **Key insight**: Cache write benefits future batches/runs, not current batch.
