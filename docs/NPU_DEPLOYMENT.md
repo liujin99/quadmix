@@ -294,7 +294,7 @@ python scripts/run_essential_web_v1.py \
 | 预采样（Eq.2-3） | ~5 分钟 | ~5 分钟 |
 | 首次实验（cache miss） | ~2-3 分钟 | ~2-3 分钟 |
 | 后续实验（cache hit） | ~2-5 分钟/实验 | ~2-5 分钟/实验 |
-| Shard cache blocking | ~0.5s × N冲突 | **0** (异步merge) |
+| Shard cache 共享 | 无 | **即时写入** (同批次共享) |
 | 3000 实验总计 | **100-250 小时** | **~100 小时** |
 | LightGBM 回归 | < 1 分钟 | < 1 分钟 |
 | 最优参数搜索 | < 1 分钟 | < 1 分钟 |
@@ -318,7 +318,7 @@ bash scripts/demo_run_full.sh --device-type npu --npu-devices 8
 
 **性能优化亮点**：
 - **Eq.1 预计算**：预采样阶段从 ~500 min → ~100 min（**5x**）
-- **异步 shard cache merge**：tokenize 阶段 0 锁竞争，0 阻塞
+- **Shard cache 即时写入**：当前批次实验共享 tokenize 结果
 
 **动态任务队列架构：**
 - Worker 完成任务后立即领取下一个，无批次边界
@@ -381,17 +381,14 @@ for i in range(torch.npu.device_count()):
 [Progress] 100/3000 done (avg: 45s/exp, ETA: 2175s)
 ...
 [DynamicParallel] All 3000 experiments complete (900s ≈ 15min)
-
-[MergeCache] Merging 240 pending files to shard cache...
-[MergeCache] Done: 240 pending → 100 shard caches (12.3s)
 ```
 
 **关键信号：**
 - `Pre-normalized 5 quality criteria` → Eq.1 优化已生效（~10s one-time）
 - `PreSample 3000/3000 done (600s)` → 预采样阶段 ~100 min（而非 ~500 min）
-- `MergeCache` → 异步 shard cache merge（batch 结束后 ~10s）
 - `cache: 0/488K hits` → 首次运行，正在生成 token cache
 - `cache: 488K/488K hits` → 全部 cache hit，最快速度
+- `cache: 410K/495K hits` → 部分来自之前实验的 cache（同批次共享）
 - `loss=3.12` → 训练正常收敛
 - `val_loss=2.89` → 验证集 loss，越低越好
 

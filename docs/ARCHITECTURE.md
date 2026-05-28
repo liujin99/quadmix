@@ -58,7 +58,7 @@ quadmix/
 │   ├── preprocessed/              # Preprocessed parquet shards
 │   ├── token_cache/               # Incremental per-shard npz cache
 │   │   ├── shard_{sid:05d}_bs{bs}.npz  # Persistent shard cache
-│   │   └── *.pending.{thread_id}.npz   # Temp files (cleaned after batch)
+│   │   └── shard_{sid}_bs{bs}.lock    # Lock files (tiny)
 │   └── outputs/                   # Test outputs
 ├── data/                       # Downloaded raw data & validation set
 │   ├── essential-web/             # Raw parquet shards
@@ -190,78 +190,70 @@ else:
     np.savez(cache_path, tokens=new_tokens_np, rows=new_rows)
 ```
 
-#### Concurrent Access: Async Shard Cache Merge (Zero Lock Contention)
+#### Concurrent Access: File Lock Protection (Immediate Write)
 
-**Problem**: In NPU parallel mode, 8 Tokenize Threads write to shard cache simultaneously. If 2 threads hit the same shard:
+**Problem**: Tokenize Thread writes to shard cache. If multiple writes happen to same shard:
 - Thread A creates `.tmp` file
 - Thread B overwrites `.tmp` file
 - Thread A's rename fails (`.tmp` no longer exists)
 
-**OLD solution (file lock)**: `fcntl.flock()` on shard cache
-- Lock contention probability: ~8% (100 shards / 8 threads)
-- Blocking time: ~0.5s per conflict
-- Total blocking: ~0.5s × N_conflicts
-
-**NEW solution (async merge)**: Write to pending files, merge after batch completes.
+**Solution**: File lock (`fcntl.flock()`) + unique temp file name.
 
 ```
-Tokenize Thread (during batch)
+Tokenize Thread
+      │
+      ├─ _cache_add_rows(sid, rows, tokens)
+      │     │
+      │     ├─ Acquire fcntl.flock(lock_path, LOCK_EX)
+      │     │
+      │     ├─ Read existing shard cache (if any)
+      │     │
+      │     ├─ Merge new rows → deduplicate
+      │     │
+      │     ├─ Write to .tmp.{timestamp} (unique name)
+      │     │
+      │     ├─ os.replace(.tmp, cache.npz) — atomic
+      │     │
+      │     └─ Release lock
       │
       ▼
-.pending.{thread_id}.npz (NO lock, NO merge)
-      │
-      │  ← Just raw data, immediate return
-      │
-      └─ Continue to next experiment
-
-After ALL experiments complete
-      │
-      ▼
-_merge_all_pending_to_cache()
-      │
-      ├─ Group pending files by shard
-      ├─ Acquire lock per shard (batch now complete, no contention)
-      ├─ Merge all pending → shard_cache.npz
-      └─ Delete pending files
-      │
-      ▼
-shard_cache.npz (ready for NEXT batch)
+shard_cache.npz (immediately visible to next exp)
 ```
+
+**Key insight**: Current batch experiments need to see each other's tokenize results.
+- Exp 0 tokenizes docs → shard cache updated immediately
+- Exp 1 needs same docs → `_cached_shard_rows()` finds them → cache hit
+- Async merge would break this: pending files not visible to same batch
 
 **Architecture flow**:
 
 ```
-T+0s      Tokenize Thread 0: exp 0 → shard_00000.pending.0.npz (no lock)
-          Tokenize Thread 1: exp 1 → shard_00001.pending.1.npz (no lock)
-          ...
-          Tokenize Thread 7: exp 7 → shard_00002.pending.7.npz (no lock)
+T+0s      Exp 0: tokenize 500 docs from shard_00000
+          ├─ _cache_add_rows() → shard_00000.npz (immediate)
+          └─ Pack exp_0000_tokens.pt
           
-T+10s     All 8 threads continue to next batch
-          NO blocking, NO lock contention
+T+10s     Exp 1: needs 300 docs from shard_00000 (200 overlap with Exp 0)
+          ├─ _cached_shard_rows() → finds 500 cached rows
+          ├─ Cache hit: 200 docs read from shard_00000.npz
+          ├─ Cache miss: 100 new docs → tokenize + _cache_add_rows()
+          └─ Pack exp_0001_tokens.pt
           
-T+Batch   All experiments complete
-          _merge_all_pending_to_cache() runs
-          ├─ shard_00000.npz ← merge all shard_00000.pending.*.npz
-          ├─ shard_00001.npz ← merge all shard_00001.pending.*.npz
-          ...
-          └─ Delete all pending files
+T+20s     shard_00000.npz now has 600 cached rows
+          Future exps benefit from accumulated cache
 ```
-
-**Key insight**: Current batch doesn't need shard cache — it uses `exp_{id}_tokens.pt` temp files. Shard cache is for **FUTURE batches**. So merge can happen asynchronously after batch completes.
 
 **Performance impact**:
 
-| Metric | File Lock (OLD) | Async Merge (NEW) |
-|--------|-----------------|-------------------|
-| Lock contention | ~8% probability | **0%** |
-| Blocking per conflict | ~0.5s | **0s** |
-| Tokenize thread stall | Yes | **No** |
-| Merge overhead | N/A | ~10s after batch |
+| Metric | Value |
+|--------|-------|
+| Lock contention | Rare (single Tokenize Thread) |
+| Lock wait time | ~0.5s if contention happens |
+| vs Tokenization time | ~100s per exp (negligible) |
 
 **Disk usage**:
-- Pending files: N_experiments × ~500MB peak
-- Cleaned up after merge
-- Shard cache: Persistent for subsequent runs
+- Shard cache: Persistent, grows as experiments run
+- Temp files: `.tmp.{timestamp}` deleted after atomic replace
+- Lock files: `.lock` text files (tiny)
 
 ## Pipeline Stages
 
@@ -335,9 +327,9 @@ run_batch(params)  # Original sequential mode, no precompute
 | Tokenize timing | All upfront | On-demand (lookahead) |
 | Eq.1 normalization | Pre-computed (5x faster) | Pre-computed (5x faster) |
 | Cache behavior | 100% hit after first | Progressive fill |
-| Shard cache merge | N/A (no concurrent writes) | Async after batch (0 blocking) |
+| Shard cache write | Immediate (no lock needed) | Immediate (file lock protection) |
 | IO overhead | One-time union | Per-exp on-demand |
-| Lock contention | N/A | **0%** (async merge) |
+| Lock contention | N/A | Rare (single thread) |
 | Best for | Debug, CI, demo | Production 8x NPU |
 | 3000 exp time | ~100h (single CPU) | **~15h** (8x NPU) |
 
@@ -407,13 +399,16 @@ T+0s     Precompute: Eq.1 (pre-normalized, ~10s one-time)
          Precompute: Eq.2-3 for 3000 exps (~100 min, 5x faster)
          
 T+100min Tokenize Thread: pre-tokenize exp 0-7 (lookahead=num_workers)
-         ├─ Write .pending.{thread_id}.npz (NO lock)
+         ├─ For each exp: tokenize miss rows → _cache_add_rows() (immediate)
+         ├─ shard_cache.npz visible to subsequent exps
          └─ Pack exp_{id}_tokens.pt for workers
          Worker 0-7: waiting for tasks
          
 T+110s   Dispatcher: push exp 0-7 to task_queue
          Worker 0-7: start exp 0-7 training
-         Tokenize Thread: continue exp 8-15 (NO blocking)
+         Tokenize Thread: continue exp 8-15
+         ├─ Exp 8 may have cache hits from Exp 0-7
+         └─ Same docs already tokenized → reuse
          
 T+180s   Worker 3: exp 3 done → result_queue → push exp 8 to Worker 3
          Worker 0-2,4-7: still training (different exp sizes)
@@ -422,21 +417,20 @@ T+200s   Worker 3: exp 8 done → fetch exp 9
          (fast worker does more experiments)
          
 T+Batch  All experiments complete
-         _merge_all_pending_to_cache():
-         ├─ Merge .pending.*.npz → shard_cache.npz (~10s)
-         └─ Benefit future batches
+         shard_cache accumulated for future runs
          
 No batch boundaries — each worker independently fetches next task
-Queue overhead ≈ 1ms, negligible vs ~2-5min training time
-Zero lock contention during tokenize
+Shard cache progressively filled — later exps benefit from earlier
+File lock ensures atomic writes (minimal contention)
 ```
 
 ### Token Cache Sharing
 - All workers share `temp/token_cache/` on the same filesystem
 - `.npz` writes are atomic (temp file + rename on POSIX)
-- **Async merge**: `.pending.{thread_id}.npz` written during tokenize, merged after batch
-- `_merge_all_pending_to_cache()` handles merge with file lock (no contention, batch complete)
-- Shard cache persists for subsequent runs
+- **Immediate write**: `_cache_add_rows()` updates shard cache directly
+- **File lock**: `fcntl.flock()` ensures atomic merge when concurrent writes happen
+- Shard cache progressively filled — later experiments benefit from earlier
+- Cache persists for subsequent runs
 
 ## Data Download & Resume
 
@@ -558,35 +552,29 @@ Per experiment:
 
 **Impact**: 3000 experiments from ~500 min → ~100 min (**5x faster**).
 
-### Why Async Shard Cache Merge?
+### Why File Lock for Shard Cache Write?
 
-**Key insight**: Current batch doesn't need shard cache.
-
-```
-Tokenize Thread writes shard_cache.npz
-          │
-          │  ← Why? For FUTURE batches to reuse
-          │
-          │  ← Current batch uses exp_{id}_tokens.pt temp files
-          │
-          ▼
-Blocking current tokenize for future benefit → BAD
-```
-
-**Better approach**: Write raw data immediately, merge later.
+**Key insight**: Current batch experiments need to see each other's tokenize results.
 
 ```
-Tokenize Thread:
-  ├─ Write .pending.{thread_id}.npz (raw data, no merge)
-  └─ Return immediately (NO blocking)
-
-After batch:
-  └─ _merge_all_pending_to_cache()
-     ├─ Merge all pending files to shard cache
-     └─ Benefit future batches
+Exp 0 tokenizes docs → shard_cache.npz updated
+Exp 1 needs same docs → _cached_shard_rows() finds them → cache hit
 ```
 
-**Result**: Zero lock contention, zero blocking during tokenize.
+If we used async merge (pending files):
+- Exp 0 writes to `.pending.0.npz`
+- Exp 1 checks shard cache → not found → cache miss
+- Exp 1 re-tokenizes same docs (wasted work)
+
+**Solution**: Immediate write with file lock.
+- `fcntl.flock()` ensures atomic merge
+- Unique temp file `.tmp.{timestamp}` prevents collision
+- `os.replace()` atomic rename
+
+**Lock contention is minimal**:
+- Single Tokenize Thread (no concurrent writes in current architecture)
+- Only relevant for future multi-thread tokenize
+- Lock wait (~0.5s) is negligible vs tokenization time (~100s)
 
 ### Why Two Execution Modes?
 
@@ -635,8 +623,7 @@ Metadata (~15 GB) fits in RAM, but text (~800 GB) does not.
 |--------------|--------|-------|-------------|
 | Eq.1 pre-normalize | ~20s/exp | ~4s/exp | **5x** |
 | 3000 exp precompute | ~500 min | ~100 min | **5x** |
-| Shard cache lock | ~8% contention | **0%** | **∞** |
-| Tokenize blocking | ~0.5s/conflict | **0s** | **∞** |
+| Shard cache write | N/A | Immediate + file lock | Safe concurrent |
 | 8x NPU total time | ~250h (single) | ~15h | **16x** |
 
 **Combined effect**: Production 3000-exp run from ~250h → ~15h on 8x NPU.
