@@ -230,127 +230,67 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
     def _cache_add_rows(self, sid: int, new_rows: np.ndarray, new_tokens: torch.Tensor):
         """
-        Add new rows to shard cache (async merge via separate file).
+        Add new rows to shard cache (immediate write with file lock).
         
-        Key insight: Tokenize threads should NOT wait for shard cache merge.
-        Current batch doesn't need shard cache - it's for FUTURE batches.
+        Key insight: Current batch NEEDS immediate shard cache write.
+        - Exp 0 tokenizes docs → Exp 1 needs same docs → must see cache
+        - Async merge was wrong: pending files not visible to subsequent exps
         
-        Solution:
-        1. Write to per-exp temp file immediately (no lock, no wait)
-        2. Async merge happens when ALL exps in batch are done
-        3. Or merge at cleanup time
-        
-        This avoids ALL lock contention during tokenize.
+        File lock ensures atomic merge when multiple threads hit same shard
+        (rare but possible in future multi-thread tokenize architecture).
         """
-        import threading
+        import fcntl
         
         cache_path = self._get_shard_token_path(sid)
         new_np = new_tokens.numpy().astype(np.int32)  # [M, block_size]
         
-        # Write to per-exp temp file (NO lock, NO contention)
-        # Format: shard_{sid}_exp_{exp_id}_pending.npz
-        # These will be merged into shard cache later
-        thread_id = threading.current_thread().ident or 0
-        pending_path = cache_path + f".pending.{thread_id}"
+        # Use unique temp file per call
+        import time
+        temp_path = cache_path + f".tmp.{int(time.time()*1000000)}"
         
-        np.savez(pending_path, tokens=new_np, rows=new_rows)
+        # Lock file for this shard
+        lock_path = cache_path + ".lock"
         
-        # No shard cache write here - that's done asynchronously
-
-    def _merge_all_pending_to_cache(self):
-        """Merge all pending files to shard cache (called after batch completes).
-        
-        This is NON-blocking for tokenize threads - merge happens after all
-        experiments are done, so future batches can benefit from the cache.
-        
-        Pending files: shard_{sid}.pending.{thread_id}.npz
-        Target cache:  shard_{sid}_bs{block_size}.npz
-        """
-        import glob
-        import fcntl
-        
-        pending_files = glob.glob(os.path.join(self.token_cache_dir, "*.pending.*"))
-        if not pending_files:
-            return
-        
-        print(f"[MergeCache] Merging {len(pending_files)} pending files to shard cache...")
-        t0 = time.time()
-        
-        # Group by shard
-        shard_to_pending = {}
-        for pf in pending_files:
-            # Parse: shard_00000_bs2048.pending.12345.npz
-            basename = os.path.basename(pf)
-            # Remove .pending.{thread_id}.npz to get cache name
-            cache_name = basename.split(".pending.")[0] + ".npz"
-            shard_key = cache_name  # shard_00000_bs2048.npz
+        with open(lock_path, 'w') as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
             
-            if shard_key not in shard_to_pending:
-                shard_to_pending[shard_key] = []
-            shard_to_pending[shard_key].append(pf)
-        
-        # Merge each shard (with file lock)
-        merged_count = 0
-        for shard_key, pending_list in shard_to_pending.items():
-            cache_path = os.path.join(self.token_cache_dir, shard_key)
-            lock_path = cache_path + ".lock"
-            
-            # Acquire lock
-            with open(lock_path, 'w') as lock_file:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-                
-                try:
-                    # Read existing cache (if any)
-                    if os.path.exists(cache_path):
-                        old = np.load(cache_path)
-                        old_rows = old['rows']
-                        old_tokens = old['tokens']
-                        del old
-                    else:
-                        old_rows = np.array([], dtype=np.int64)
-                        old_tokens = np.zeros((0, self.block_size), dtype=np.int32)
-                    
-                    # Merge all pending files
-                    all_rows = [old_rows]
-                    all_tokens = [old_tokens]
-                    
-                    for pf in pending_list:
-                        data = np.load(pf)
-                        all_rows.append(data['rows'])
-                        all_tokens.append(data['tokens'])
-                        
-                    combined_rows = np.concatenate(all_rows)
-                    combined_tokens = np.concatenate(all_tokens)
-                    
-                    # Deduplicate
-                    unique_rows, inverse = np.unique(combined_rows, return_index=True)
-                    order = np.argsort(unique_rows)
-                    unique_rows = unique_rows[order]
-                    
-                    row_to_token_idx = {}
-                    for i, r in enumerate(combined_rows):
-                        row_to_token_idx[int(r)] = i
-                    final_tokens = combined_tokens[[row_to_token_idx[int(r)] for r in unique_rows]]
-                    
-                    # Atomic write
-                    temp_path = cache_path + ".tmp.merge"
-                    np.savez(temp_path, tokens=final_tokens, rows=unique_rows)
-                    os.replace(temp_path, cache_path)
-                    
-                    merged_count += len(pending_list)
-                    
-                finally:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-        
-        # Clean up pending files
-        for pf in pending_files:
             try:
-                os.remove(pf)
-            except:
-                pass
-        
-        elapsed = time.time() - t0
-        print(f"[MergeCache] Done: {merged_count} pending → {len(shard_to_pending)} shard caches ({elapsed:.1f}s)")
+                # Read existing cache (if any)
+                if os.path.exists(cache_path):
+                    old = np.load(cache_path)
+                    old_rows: np.ndarray = old['rows']
+                    old_tokens: np.ndarray = old['tokens']
+                    del old
+                else:
+                    old_rows = np.array([], dtype=np.int64)
+                    old_tokens = np.zeros((0, new_np.shape[1]), dtype=np.int32)
+
+                # Merge with new rows (dedupe by row_in_shard)
+                combined_rows = np.concatenate([old_rows, new_rows])
+                combined_tokens = np.concatenate([old_tokens, new_np])
+                
+                # Deduplicate: keep latest (new overwrites old if duplicate)
+                unique_rows, inverse = np.unique(combined_rows, return_index=True)
+                order = np.argsort(unique_rows)
+                unique_rows = unique_rows[order]
+                
+                row_to_token_idx = {}
+                for i, r in enumerate(combined_rows):
+                    row_to_token_idx[int(r)] = i  # Later entry overwrites earlier
+                final_tokens = combined_tokens[[row_to_token_idx[int(r)] for r in unique_rows]]
+                
+                # Atomic write (unique temp file prevents collision)
+                np.savez(temp_path, tokens=final_tokens, rows=unique_rows)
+                os.replace(temp_path, cache_path)
+                
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                # Clean up temp file if something went wrong
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except:
+                        pass
 
     # ═══════════════════════════════════════════════════════════
     # Batch-level tokenization (CPU, called from main process)
@@ -1338,11 +1278,6 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         elapsed = time.time() - t_start
         print(f"\n[DynamicParallel] All {n_exp} experiments complete "
               f"({elapsed:.0f}s ≈ {elapsed/60:.1f}min)")
-        
-        # ── 6. Merge pending files to shard cache (async) ───────────
-        # This is for FUTURE batches - current batch already used exp temp files
-        self._merge_all_pending_to_cache()
-        
         return all_results
 
 
