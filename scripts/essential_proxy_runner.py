@@ -322,6 +322,9 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         """
         mgr = self.metadata_manager
         shard_groups = mgr.global_to_shard_rows(selected_idx)
+        
+        # Debug: log entry
+        print(f"[PackExp {exp_id:04d}] Starting: {len(selected_idx):,} docs, {len(shard_groups)} shards")
 
         all_tokens = []
         total_tokenized = 0
@@ -1173,20 +1176,30 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         tokenize_thread = threading.Thread(target=tokenize_thread_func, daemon=True)
         tokenize_thread.start()
 
-        # ── Wait for first batch to be tokenized ────────────────
+# ── Wait for first batch to be tokenized ────────────────
         # Key fix: Workers must wait for cache to be ready
         first_batch_end = min(tokenize_lookahead, n_exp)
         print(f"[DynamicParallel] Waiting for first batch (exp 0-{first_batch_end-1}) to be tokenized...")
         wait_start = time.time()
+        last_progress_time = 0
         while True:
             with ready_lock:
                 ready_count = sum(1 for i in range(first_batch_end) if ready_events.get(i, False))
-            # Show progress every 2s
-            if time.time() - wait_start > 2:
-                print(f"[DynamicParallel] Tokenizing... {ready_count}/{first_batch_end} ready")
-                wait_start = time.time()
             if ready_count == first_batch_end:
                 break
+            if time.time() - wait_start > 300:  # 5 min timeout
+                # Debug: print what's blocking
+                with ready_lock:
+                    for i in range(first_batch_end):
+                        status = ready_events.get(i, None)
+                        print(f"[DynamicParallel] Exp {i} status: {status}")
+                print("[DynamicParallel] TIMEOUT waiting for first batch - check tokenize errors above")
+                break
+            # Progress output every 5s
+            now = time.time()
+            if now - last_progress_time > 5:
+                print(f"[DynamicParallel] tokenizing... {ready_count}/{first_batch_end} ready")
+                last_progress_time = now
             time.sleep(0.5)
         print(f"[DynamicParallel] First batch tokenized ({first_batch_end} exps), starting workers")
 
