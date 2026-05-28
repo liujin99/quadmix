@@ -23,7 +23,10 @@ set -euo pipefail
 QUADMIX_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 export PATH="$HOME/.local/bin:$PATH"
 
-PREPROCESSED_DIR="$QUADMIX_DIR/temp/preprocessed"
+# Temp/cache dir: override via QUADMIX_TEMP_DIR env var, defaults to ~/.cache/QuaDMix/temp/
+export QUADMIX_TEMP_DIR="${QUADMIX_TEMP_DIR:-$HOME/.cache/QuaDMix/temp}"
+
+PREPROCESSED_DIR="$QUADMIX_TEMP_DIR/preprocessed"
 RAW_DATA_DIR="$QUADMIX_DIR/data/essential-web-v1"
 VAL_FILE="$QUADMIX_DIR/data/openhermes_10k_assistant_tokenized.pt"
 
@@ -33,14 +36,14 @@ if [ ! -f "$VAL_FILE" ]; then
     echo ""
     echo "  驗證集不存在: $VAL_FILE"
     echo "  從 liujin99/quadmix-openhermes-10k 下載..."
-    
+
     HF_ENDPOINT="${HF_ENDPOINT:-https://huggingface.co}"
     if [ "$HF_ENDPOINT" != "https://huggingface.co" ]; then
         echo "  使用 HF 镜像: $HF_ENDPOINT"
     fi
-    
+
     VAL_URL="$HF_ENDPOINT/datasets/liujin99/quadmix-openhermes-10k/resolve/main/openhermes_10k_assistant_tokenized.pt?download=true"
-    
+
     mkdir -p "$(dirname "$VAL_FILE")"
     if command -v wget &>/dev/null; then
         wget -q --show-progress "$VAL_URL" -O "$VAL_FILE"
@@ -162,7 +165,7 @@ fi
 
 python3 "$QUADMIX_DIR/scripts/run_essential_web_v1.py" \
     --preprocessed-dir "$PREPROCESSED_DIR" \
-    --num-experiments 20 \
+    --num-experiments 10 \
     --num-search 1000 \
     --top-k 3 \
     --block-size 2048 \

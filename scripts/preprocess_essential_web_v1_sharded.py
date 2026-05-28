@@ -140,7 +140,7 @@ def main():
                    default=os.path.join(_QUADMIX_DIR, "data/essential-web-v1"),
                    help="Directory containing raw parquet shards")
     p.add_argument("--output-dir",
-                   default=os.path.join(_QUADMIX_DIR, "temp/preprocessed"),
+                   default=os.path.join(os.path.expanduser("~"), ".cache", "QuaDMix", "temp", "preprocessed"),
                    help="Output directory for preprocessed shards")
     p.add_argument("--limit", type=int, default=None,
                    help="Limit number of shards to process (for testing)")

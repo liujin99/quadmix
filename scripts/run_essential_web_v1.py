@@ -21,14 +21,19 @@ automatically downloaded from HuggingFace if not found locally.
 """
 
 import argparse, os, sys, time, urllib.request
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from quadmix import QuaDMixConfig
 from quadmix.pipeline.real_pipeline import QuaDMixPipeline
 from quadmix.data.metadata_manager import ShardMetadataManager
 
 # ── Defaults ──────────────────────────────────────────────
 QUADMIX_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_PREPROCESSED_DIR = os.path.join(QUADMIX_DIR, "temp/preprocessed")
+# Temp/cache dir: override via QUADMIX_TEMP_DIR env var, defaults to ~/.cache/QuaDMix/temp/
+QUADMIX_TEMP_DIR = os.environ.get(
+    "QUADMIX_TEMP_DIR",
+    os.path.join(os.path.expanduser("~"), ".cache", "QuaDMix", "temp"),
+)
+DEFAULT_PREPROCESSED_DIR = os.path.join(QUADMIX_TEMP_DIR, "preprocessed")
 DEFAULT_VAL_DIR = os.path.join(QUADMIX_DIR, "data")
 DEFAULT_VAL_PATH = os.path.join(DEFAULT_VAL_DIR, "openhermes_10k_assistant_tokenized.pt")
 
@@ -130,7 +135,7 @@ def build_parser():
 
 def create_proxy_runner(config, args, output_dir, metadata_manager):
     """Create an EssentialWebProxyRunner with sharded metadata manager."""
-    from scripts.essential_proxy_runner import EssentialWebProxyRunner
+    from essential_proxy_runner import EssentialWebProxyRunner
     proxy_dir = os.path.join(output_dir, "proxy_experiments")
 
     # Ensure validation data exists (auto-download if needed)
@@ -151,7 +156,7 @@ def create_proxy_runner(config, args, output_dir, metadata_manager):
         test_block_size=args.block_size,
         rank_ref_size=args.rank_ref_size,
         val_doc_limit=args.val_limit,
-        token_cache_dir=os.path.join(QUADMIX_DIR, "temp/token_cache"),
+        token_cache_dir=os.path.join(QUADMIX_TEMP_DIR, "token_cache"),
     )
     return runner
 

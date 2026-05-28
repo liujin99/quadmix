@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+# !/usr/bin/env python3
 """
 EssentialWebProxyRunner — Real proxy training on essential-web-v1 data.
 
@@ -39,11 +39,15 @@ from quadmix.core.quality_rank import compute_quality_ranks
 from quadmix.core.sampler import compute_sampling_values
 from quadmix.pipeline.proxy_runner import BaseProxyRunner
 
-# Default cache directory for per-shard token cache
-# Override via token_cache_dir param in constructor
+# Default cache/temp directory
+# Override via QUADMIX_TEMP_DIR env var, defaults to ~/.cache/QuaDMix/temp/
 _SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_DIR = os.path.dirname(_SCRIPTS_DIR)
-DEFAULT_TOKEN_CACHE_DIR = os.path.join(_PROJECT_DIR, "temp/token_cache")
+DEFAULT_TEMP_DIR = os.environ.get(
+    "QUADMIX_TEMP_DIR",
+    os.path.join(os.path.expanduser("~"), ".cache", "QuaDMix", "temp"),
+)
+DEFAULT_TOKEN_CACHE_DIR = os.path.join(DEFAULT_TEMP_DIR, "token_cache")
 
 
 class EssentialWebProxyRunner(BaseProxyRunner):
@@ -57,31 +61,31 @@ class EssentialWebProxyRunner(BaseProxyRunner):
     """
 
     def __init__(
-        self,
-        config: QuaDMixConfig,
-        val_data_path: str,
-        metadata_manager: Optional[object] = None,
-        # Legacy mode: if metadata_manager is None, fall back to data_path
-        data_path: Optional[str] = None,
-        output_dir: str = "./proxy_validation",
-        device_type: str = "cpu",
-        npu_device_id: int = 0,  # ← 新增
-        # RegMix training params
-        model_variant: str = "tinyllama_1M",
-        global_batch_size: int = 512,
-        micro_batch_size: int = 4,
-        max_step: int = 25000,
-        warmup_steps: int = 1000,
-        learning_rate: float = 4e-4,
-        weight_decay: float = 0.1,
-        grad_clip: float = 1.0,
-        # "just runnable" flags
-        tiny_steps: int = 10,
-        doc_limit: Optional[int] = None,
-        test_block_size: Optional[int] = None,
-        rank_ref_size: int = 10000,
-        val_doc_limit: int = 500,
-        token_cache_dir: str = DEFAULT_TOKEN_CACHE_DIR,
+            self,
+            config: QuaDMixConfig,
+            val_data_path: str,
+            metadata_manager: Optional[object] = None,
+            # Legacy mode: if metadata_manager is None, fall back to data_path
+            data_path: Optional[str] = None,
+            output_dir: str = "./proxy_validation",
+            device_type: str = "cpu",
+            npu_device_id: int = 0,  # ← 新增
+            # RegMix training params
+            model_variant: str = "tinyllama_1M",
+            global_batch_size: int = 512,
+            micro_batch_size: int = 4,
+            max_step: int = 25000,
+            warmup_steps: int = 1000,
+            learning_rate: float = 4e-4,
+            weight_decay: float = 0.1,
+            grad_clip: float = 1.0,
+            # "just runnable" flags
+            tiny_steps: int = 10,
+            doc_limit: Optional[int] = None,
+            test_block_size: Optional[int] = None,
+            rank_ref_size: int = 10000,
+            val_doc_limit: int = 500,
+            token_cache_dir: str = DEFAULT_TOKEN_CACHE_DIR,
     ):
         self.config = config
         self.metadata_manager = metadata_manager
@@ -152,7 +156,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
     def _load_metadata_only(self):
         """Load domain labels + quality scores from metadata manager (no text).
-        
+
         Pre-compute normalized quality scores to avoid repeated normalization
         in Eq.1 (major performance bottleneck).
         """
@@ -164,21 +168,21 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         self._train_idx = np.arange(self._num_docs)
 
         print(f"[ProxyRunner] Sharded mode: {self._num_docs:,} docs "
-              f"(metadata only, {mgr.num_shards} shards) ({time.time()-t0:.0f}s)")
+              f"(metadata only, {mgr.num_shards} shards) ({time.time() - t0:.0f}s)")
 
         # ── Pre-compute normalized quality (Eq.1 optimization) ───────────────
         # Each experiment repeats normalize_fn(quality_scores[:, n]) - expensive!
         # Pre-compute once, reuse in all experiments (only weighted sum needed)
         from quadmix.utils.normalization import get_normalizer
         normalize_fn = get_normalizer("rank")
-        
+
         t1 = time.time()
         num_criteria = self._quality_scores.shape[1]
         self._normalized_quality = np.zeros_like(self._quality_scores)
         for n in range(num_criteria):
             self._normalized_quality[:, n] = normalize_fn(self._quality_scores[:, n])
         print(f"[ProxyRunner] Pre-normalized {num_criteria} quality criteria "
-              f"({time.time()-t1:.1f}s) — Eq.1 now ~5x faster per experiment")
+              f"({time.time() - t1:.1f}s) — Eq.1 now ~5x faster per experiment")
 
         # Per-shard token cache: dict[int, dict[int, torch.Tensor]]
         # cache[shard_idx] = {row_idx: token_ids_tensor}
@@ -231,40 +235,44 @@ class EssentialWebProxyRunner(BaseProxyRunner):
     def _cache_add_rows(self, sid: int, new_rows: np.ndarray, new_tokens: torch.Tensor):
         """
         Add new rows to shard cache (immediate write with file lock).
-        
+
         Key insight: Current batch NEEDS immediate shard cache write.
         - Exp 0 tokenizes docs → Exp 1 needs same docs → must see cache
         - Async merge was wrong: pending files not visible to subsequent exps
-        
+
         File lock ensures atomic merge when multiple threads hit same shard
         (rare but possible in future multi-thread tokenize architecture).
         """
         import fcntl
-        
+
         cache_path = self._get_shard_token_path(sid)
-        
+
         # Ensure directory exists before writing
         cache_dir = os.path.dirname(cache_path)
         if not os.path.exists(cache_dir):
             os.makedirs(cache_dir, exist_ok=True)
-        
+
         new_np = new_tokens.numpy().astype(np.int32)  # [M, block_size]
-        
+
         # Use unique temp file per call
+        # NOTE: np.savez auto-appends '.npz' if path doesn't already end with '.npz'
+        # cache_path ends with '.npz', so we strip it and use a tmp name instead
         import time
-        temp_path = cache_path + f".tmp.{int(time.time()*1000000)}"
-        
+        cache_no_ext = cache_path[:-4]  # strip '.npz'
+        temp_path = cache_no_ext + f".tmp.{int(time.time() * 1000000)}"
+        actual_temp = temp_path + ".npz"  # this is what np.savez actually creates
+
         # Lock file for this shard
         lock_path = cache_path + ".lock"
-        
+
         # Ensure lock file directory exists
         lock_dir = os.path.dirname(lock_path)
         if not os.path.exists(lock_dir):
             os.makedirs(lock_dir, exist_ok=True)
-        
+
         with open(lock_path, 'w') as lock_file:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-            
+
             try:
                 # Read existing cache (if any)
                 if os.path.exists(cache_path):
@@ -279,17 +287,17 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 # Merge with new rows (dedupe by row_in_shard)
                 combined_rows = np.concatenate([old_rows, new_rows])
                 combined_tokens = np.concatenate([old_tokens, new_np])
-                
+
                 # Deduplicate: keep latest (new overwrites old if duplicate)
                 unique_rows, inverse = np.unique(combined_rows, return_index=True)
                 order = np.argsort(unique_rows)
                 unique_rows = unique_rows[order]
-                
+
                 row_to_token_idx = {}
                 for i, r in enumerate(combined_rows):
                     row_to_token_idx[int(r)] = i  # Later entry overwrites earlier
                 final_tokens = combined_tokens[[row_to_token_idx[int(r)] for r in unique_rows]]
-                
+
                 # Atomic write (unique temp file prevents collision)
                 # Debug: check directory and disk space before write
                 if not os.path.exists(cache_dir):
@@ -300,43 +308,43 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                     except Exception as e:
                         print(f"[CacheAddRows] Failed to create directory: {e}")
                         raise
-                
+
                 # Check disk space
                 import shutil
                 try:
                     stat = shutil.disk_usage(cache_dir)
-                    free_gb = stat.free / (1024**3)
+                    free_gb = stat.free / (1024 ** 3)
                     if free_gb < 1:
                         print(f"[CacheAddRows] WARNING: Low disk space {free_gb:.2f} GB")
                 except Exception as e:
                     print(f"[CacheAddRows] Could not check disk space: {e}")
-                
+
                 # Check write permission
                 if not os.access(cache_dir, os.W_OK):
                     print(f"[CacheAddRows] WARNING: No write permission on {cache_dir}")
                     raise IOError(f"No write permission on {cache_dir}")
-                
-                print(f"[CacheAddRows] Writing {len(unique_rows)} rows to {temp_path}...")
+
+                print(f"[CacheAddRows] Writing {len(unique_rows)} rows to {actual_temp}...")
                 try:
                     np.savez(temp_path, tokens=final_tokens, rows=unique_rows)
                 except Exception as e:
                     print(f"[CacheAddRows] np.savez exception: {e}")
                     raise
-                
-                # Verify temp file was created
-                if not os.path.exists(temp_path):
+
+                # Verify temp file was created (np.savez appends .npz)
+                if not os.path.exists(actual_temp):
                     print(f"[CacheAddRows] np.savez returned but file not created!")
-                    raise IOError(f"np.savez failed to create {temp_path}")
-                
-                print(f"[CacheAddRows] Temp file created: {os.path.getsize(temp_path)} bytes")
-                os.replace(temp_path, cache_path)
-                
+                    raise IOError(f"np.savez failed to create {actual_temp}")
+
+                print(f"[CacheAddRows] Temp file created: {os.path.getsize(actual_temp)} bytes")
+                os.replace(actual_temp, cache_path)
+
             finally:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
                 # Clean up temp file if something went wrong (file not moved)
-                if os.path.exists(temp_path):
+                if os.path.exists(actual_temp):
                     try:
-                        os.remove(temp_path)
+                        os.remove(actual_temp)
                     except:
                         pass
 
@@ -352,9 +360,9 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         )
 
     def _pack_exp_tokens(
-        self,
-        exp_id: int,
-        selected_idx: np.ndarray,
+            self,
+            exp_id: int,
+            selected_idx: np.ndarray,
     ) -> str:
         """Pack tokens for a single experiment into a temporary file.
 
@@ -370,7 +378,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         """
         mgr = self.metadata_manager
         shard_groups = mgr.global_to_shard_rows(selected_idx)
-        
+
         # Debug: log entry
         print(f"[PackExp {exp_id:04d}] Starting: {len(selected_idx):,} docs, {len(shard_groups)} shards")
 
@@ -448,9 +456,9 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         return exp_token_path
 
     def tokenize_batch_delta(
-        self,
-        batch_selected: List[np.ndarray],
-        batch_exp_ids: List[int],
+            self,
+            batch_selected: List[np.ndarray],
+            batch_exp_ids: List[int],
     ):
         """Tokenize and pack tokens for each experiment in the batch.
 
@@ -462,7 +470,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             self._pack_exp_tokens(exp_id, selected_idx)
 
     def _load_tokens_for_experiment(
-        self, selected_idx: np.ndarray, exp_id: int = None
+            self, selected_idx: np.ndarray, exp_id: int = None
     ) -> torch.Tensor:
         """Load tokens for selected document indices.
 
@@ -614,7 +622,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             "qs_eai_general_math", "qs_eai_open_web_math",
         ]].to_numpy(dtype=np.float64)[:len(texts)]
         self._num_docs = len(texts)
-        print(f"[ProxyRunner] (legacy) {self._num_docs:,} docs ({time.time()-t0:.0f}s)")
+        print(f"[ProxyRunner] (legacy) {self._num_docs:,} docs ({time.time() - t0:.0f}s)")
 
         # Tokenize with caching
         dl = self.doc_limit if self.doc_limit else "all"
@@ -643,24 +651,24 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         # ── Pre-compute normalized quality (Eq.1 optimization) ───────────────
         from quadmix.utils.normalization import get_normalizer
         normalize_fn = get_normalizer("rank")
-        
+
         t1 = time.time()
         num_criteria = self._quality_scores.shape[1]
         self._normalized_quality = np.zeros_like(self._quality_scores)
         for n in range(num_criteria):
             self._normalized_quality[:, n] = normalize_fn(self._quality_scores[:, n])
         print(f"[ProxyRunner] (legacy) Pre-normalized {num_criteria} criteria "
-              f"({time.time()-t1:.1f}s) — Eq.1 now ~5x faster")
+              f"({time.time() - t1:.1f}s) — Eq.1 now ~5x faster")
 
     # ═══════════════════════════════════════════════════════════
     # Experiment execution
     # ═══════════════════════════════════════════════════════════
 
     def _compute_ranks_for_params(
-        self, params: ParameterSet, experiment_id: int,
+            self, params: ParameterSet, experiment_id: int,
     ) -> np.ndarray:
         """Per-experiment Eq.1 + Eq.2 (optimized with pre-normalized quality).
-        
+
         Eq.1 optimization: use pre-computed normalized_quality instead of
         re-normalizing every time. Only weighted sum needed per experiment.
         """
@@ -672,7 +680,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         # OLD: compute_merged_quality_scores() normalized every time (~20s)
         # NEW: only weighted sum per domain (~4s)
         merged_scores = np.zeros(self._num_docs, dtype=np.float64)
-        
+
         unique_domains = np.unique(self._domain_labels)
         for m in unique_domains:
             if m < 0:
@@ -680,10 +688,10 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             mask = self._domain_labels == m
             if mask.sum() == 0:
                 continue
-            
+
             # Get final weights α_m for this domain
             alpha_m = params.merge_config.get_final_weights(m)
-            
+
             # Weighted sum: ¯q = Σ σ(q_n) · α_{n,m}
             merged_scores[mask] = self._normalized_quality[mask] @ alpha_m
 
@@ -707,8 +715,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         return ranks
 
     def run_experiment(
-        self, params: ParameterSet, experiment_id: int = 0,
-        selected_idx: Optional[np.ndarray] = None,  # ← 新增：外部傳入選中文檔索引
+            self, params: ParameterSet, experiment_id: int = 0,
+            selected_idx: Optional[np.ndarray] = None,  # ← 新增：外部傳入選中文檔索引
     ) -> ProxyResult:
         """Train one proxy model. Validates on openhermes-10k.
 
@@ -818,7 +826,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 elapsed = time.time() - t_start
                 rem = (num_steps - step_ct) * elapsed / max(1, step_ct)
                 print(f"    Step {step_ct}/{num_steps}, loss={avg:.4f}, "
-                      f"lr={lr:.2e}, {tok_per_step*step_ct/elapsed:.0f} tok/s, "
+                      f"lr={lr:.2e}, {tok_per_step * step_ct / elapsed:.0f} tok/s, "
                       f"ETA: {rem:.0f}s")
 
         # ---- 6. Validation: assistant-only loss ----
@@ -889,7 +897,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         dr = (it - warm) / max(1, max_iters - warm)
         coeff = 0.5 * (1.0 + math.cos(math.pi * dr))
         return self.learning_rate * 0.025 + coeff * (
-            self.learning_rate - self.learning_rate * 0.025
+                self.learning_rate - self.learning_rate * 0.025
         )
 
     def save_summary(self, results: List[ProxyResult], path: str):
@@ -913,7 +921,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
     # ═══════════════════════════════════════════════════════════
 
     def precompute_samples(
-        self, all_params: List[ParameterSet]
+            self, all_params: List[ParameterSet]
     ) -> List[np.ndarray]:
         """Run Eq.1-3 + fractional sampling for all experiments.
 
@@ -925,7 +933,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         n = len(all_params)
 
         print(f"[PreSample] Pre-sampling {n} experiments (Eq.1-3)...")
-        
+
         for i, params in enumerate(all_params):
             quality_ranks = self._compute_ranks_for_params(params, i)
             sv = compute_sampling_values(
@@ -947,18 +955,18 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 selected = rng2.choice(self._train_idx, 100, replace=False)
 
             all_selected.append(selected)
-            
+
             # Progress: every 5 experiments or last one
             if (i + 1) % 5 == 0 or (i + 1) == n:
                 elapsed = time.time() - t0
                 eta = elapsed / (i + 1) * (n - i - 1)
-                print(f"[PreSample] {i+1}/{n} done ({elapsed:.1f}s, ETA: {eta:.0f}s)")
+                print(f"[PreSample] {i + 1}/{n} done ({elapsed:.1f}s, ETA: {eta:.0f}s)")
 
         elapsed = time.time() - t0
         total_docs = sum(len(s) for s in all_selected)
         print(f"[PreSample] {n} experiments pre-sampled in {elapsed:.1f}s")
         print(f"[PreSample] Total selected docs: {total_docs:,} "
-              f"(avg {total_docs//max(1,n):,}/exp)")
+              f"(avg {total_docs // max(1, n):,}/exp)")
 
         # Collect unique docs → per-shard rows (union across all experiments)
         if self.metadata_manager is not None:
@@ -1075,12 +1083,12 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         }
 
     def run_batch_parallel(
-        self,
-        params_list: List[ParameterSet],
-        all_selected: List[np.ndarray],
-        num_workers: int = 1,
-        device_type: str = "npu",
-        tokenize_lookahead: int = None,
+            self,
+            params_list: List[ParameterSet],
+            all_selected: List[np.ndarray],
+            num_workers: int = 1,
+            device_type: str = "npu",
+            tokenize_lookahead: int = None,
     ) -> List:
         """Run proxy experiments in parallel using dynamic task queue.
 
@@ -1130,12 +1138,12 @@ class EssentialWebProxyRunner(BaseProxyRunner):
     # ═══════════════════════════════════════════════════════════
 
     def _run_batch_dynamic(
-        self,
-        params_list: List[ParameterSet],
-        all_selected: List[np.ndarray],
-        num_workers: int,
-        device_type: str,
-        tokenize_lookahead: int = None,
+            self,
+            params_list: List[ParameterSet],
+            all_selected: List[np.ndarray],
+            num_workers: int,
+            device_type: str,
+            tokenize_lookahead: int = None,
     ) -> List:
         """Dynamic task queue mode: workers pull tasks on-demand.
 
@@ -1219,15 +1227,15 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 pos = end_pos
                 time.sleep(0.05)  # Small pause to let workers catch up
 
-            print(f"[TokenizeThread] All {n_exp} experiments tokenized ({time.time()-t_start:.1f}s)")
+            print(f"[TokenizeThread] All {n_exp} experiments tokenized ({time.time() - t_start:.1f}s)")
 
         tokenize_thread = threading.Thread(target=tokenize_thread_func, daemon=True)
         tokenize_thread.start()
 
-# ── Wait for first batch to be tokenized ────────────────
+        # ── Wait for first batch to be tokenized ────────────────
         # Key fix: Workers must wait for cache to be ready
         first_batch_end = min(tokenize_lookahead, n_exp)
-        print(f"[DynamicParallel] Waiting for first batch (exp 0-{first_batch_end-1}) to be tokenized...")
+        print(f"[DynamicParallel] Waiting for first batch (exp 0-{first_batch_end - 1}) to be tokenized...")
         wait_start = time.time()
         last_progress_time = 0
         while True:
@@ -1338,16 +1346,16 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         elapsed = time.time() - t_start
         print(f"\n[DynamicParallel] All {n_exp} experiments complete "
-              f"({elapsed:.0f}s ≈ {elapsed/60:.1f}min)")
+              f"({elapsed:.0f}s ≈ {elapsed / 60:.1f}min)")
         return all_results
 
 
 def _worker_dynamic_loop(
-    worker_id: int,
-    device_type: str,
-    config_dict: dict,
-    task_queue,
-    result_queue,
+        worker_id: int,
+        device_type: str,
+        config_dict: dict,
+        task_queue,
+        result_queue,
 ):
     """Worker loop for dynamic mode: pull task → run → push result → repeat."""
     from quadmix.data.metadata_manager import ShardMetadataManager
@@ -1409,7 +1417,7 @@ def test_runner_sharded():
     from quadmix.data.metadata_manager import ShardMetadataManager
 
     mgr = ShardMetadataManager(
-        os.path.join(_PROJECT_DIR, "temp/preprocessed")
+        os.path.join(DEFAULT_TEMP_DIR, "preprocessed")
     )
 
     config = QuaDMixConfig(
@@ -1420,7 +1428,7 @@ def test_runner_sharded():
         config=config,
         metadata_manager=mgr,
         val_data_path=os.path.join(_PROJECT_DIR, "data/openhermes_10k_assistant_tokenized.pt"),
-        output_dir=os.path.join(_PROJECT_DIR, "temp/outputs/test_sharded"),
+        output_dir=os.path.join(DEFAULT_TEMP_DIR, "outputs/test_sharded"),
         device_type="cpu",
         micro_batch_size=2,
         global_batch_size=8,
@@ -1435,7 +1443,7 @@ def test_runner_sharded():
     t0 = time.time()
     results = runner.run_batch(params)
     print(f"\n{'=' * 60}")
-    print(f"  Test Complete! ({time.time()-t0:.1f}s)")
+    print(f"  Test Complete! ({time.time() - t0:.1f}s)")
     for r in results:
         print(f"  Exp {r.metadata['experiment_id']:04d}: "
               f"val_loss={r.validation_loss:.4f}")
