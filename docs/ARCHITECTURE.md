@@ -617,7 +617,197 @@ Metadata (~15 GB) fits in RAM, but text (~800 GB) does not.
 - Load text only for selected docs: ~550K per experiment
 - Parquet filter pushdown: reads only needed rows, not full shard
 
-## Performance Summary
+## NPU Parallel Mode Optimization (Planned)
+
+### Current Architecture (Problem)
+
+```
+Time    Tokenize Thread                Workers (NPU)
+─────────────────────────────────────────────────────
+T+0s    开始处理 batch 0-7              等待中...
+        ├─ tokenize shard_0 miss rows
+        ├─ 写 cache npz ← 磁盘IO ~2s    ← NPU 空转!
+        ├─ tokenize shard_1 miss rows
+        ├─ 写 cache npz ← 磁盘IO ~2s    ← NPU 空转!
+        ├─ ... (重复 100 shards)
+        ├─ 打包 exp_0_tokens.pt
+        ├─ 打包 exp_1_tokens.pt
+        ├─ ...
+        ├─ 打包 exp_7_tokens.pt
+        └─ 8 个 exp 全部 ready
+T+120s  
+        Dispatcher 推送任务              Workers 启动训练
+                                        ├─ Worker 0: exp 0
+                                        ├─ Worker 1: exp 1
+                                        └─ ...
+
+T+180s  开始处理 batch 8-15             Workers 还在训练 exp 0-7
+        ├─ tokenize + 写 cache
+        ├─ 打包 exp_8_tokens.pt
+        ├─ ... 等 batch 8-15 全部完成
+T+300s  
+        8 个 exp 全部 ready              Workers 可能已完成 exp 0-7
+                                        但没有新任务 ← NPU 空转!
+        Dispatcher 推送 batch 8-15      Workers 继续训练
+```
+
+**Problems**:
+1. **Cache write blocks tokenize**: Each `_cache_add_rows()` ~2s disk IO, NPU idle
+2. **Batch boundary blocks dispatch**: Workers wait for entire batch to tokenize
+3. **Repeated IO**: Same shard read multiple times across experiments
+
+### Optimized Architecture
+
+```
+Time    Tokenize Thread                Workers (NPU)         AsyncWrite Thread
+──────────────────────────────────────────────────────────────────────────────
+T+0s    开始处理 batch 0-7              等待中...
+        ├─ 计算 union miss rows
+        ├─ 批量读取 parquet (每 shard 一次)
+        ├─ 批量 tokenize union
+        ├─ 存入 memory_cache
+        ├─ 批量打包 8 个 exp_tokens.pt
+        └─ 8 个 exp 全部 ready
+T+60s  
+        Dispatcher 推送任务              Workers 启动训练      后台启动
+                                        ├─ Worker 0: exp 0    ├─ 写 cache npz
+                                        ├─ Worker 1: exp 1    ├─ shard_0...
+                                        └─ ...                └─ (不阻塞)
+
+T+90s   开始处理 batch 8-15             Workers 训练中        写 cache 继续...
+        ├─ 计算 union miss rows
+        ├─ 检查 memory_cache → 已有部分
+        ├─ 只读取真正 miss (减少 IO)
+        ├─ 批量 tokenize 新 miss
+        ├─ 合并入 memory_cache
+        ├─ 批量打包 8 个 exp_tokens.pt
+        └─ batch 8-15 全部 ready
+        
+        Dispatcher 推送 batch 8-15     Workers 继续          写 cache 继续...
+                                        (单个 exp done 就拿新任务)
+
+T+120s  开始处理 batch 16-23            Workers 继续          写 cache 完成
+        ...                             ← 无 batch 边界限制!
+```
+
+**Key improvements**:
+1. **Batch tokenize → no repeated IO**: Each shard read once per batch
+2. **Memory cache → no disk block**: Tokenize from RAM, cache written async
+3. **AsyncWrite → NPU not idle**: Workers start before cache write finishes
+4. **No batch boundary**: Single exp ready → dispatch immediately
+
+### Memory Cache Design
+
+```python
+# Structure: Dict[shard_id -> {rows: Array, tokens: Array}]
+memory_cache: Dict[int, dict] = {
+    shard_id: {
+        'rows': np.ndarray[int64],    # [N] row_in_shard, sorted
+        'tokens': np.ndarray[int32],  # [N, block_size]
+    }
+}
+
+# Query: use np.searchsorted for O(log N) lookup
+def get_tokens_from_memory(sid, rows_needed):
+    shard_cache = memory_cache.get(sid)
+    if not shard_cache:
+        return None
+    positions = np.searchsorted(shard_cache['rows'], rows_needed)
+    return shard_cache['tokens'][positions]
+
+# Merge: concatenate + dedupe + sort
+def merge_to_memory_cache(sid, new_rows, new_tokens):
+    if sid not in memory_cache:
+        memory_cache[sid] = {'rows': new_rows, 'tokens': new_tokens}
+    else:
+        combined_rows = np.concatenate([memory_cache[sid]['rows'], new_rows])
+        combined_tokens = np.concatenate([memory_cache[sid]['tokens'], new_tokens])
+        unique_rows, idx = np.unique(combined_rows, return_index=True)
+        memory_cache[sid] = {'rows': unique_rows, 'tokens': combined_tokens[idx]}
+```
+
+**Why this structure**:
+- `np.searchsorted` faster than dict lookup for batch queries
+- Contiguous array → no memory fragmentation
+- Same structure as disk cache → code reuse
+
+### Batch Processing Flow
+
+```python
+def tokenize_batch_optimized(batch_ids, batch_selected):
+    # Step 1: Compute union miss rows
+    union_miss = compute_union_miss(batch_selected, memory_cache, disk_cache)
+    
+    # Step 2: Batch read + tokenize (each shard once)
+    for sid, miss_rows in union_miss.items():
+        texts = read_parquet_rows(sid, miss_rows)
+        tokens = tokenize_texts(texts)
+        merge_to_memory_cache(sid, miss_rows, tokens)
+    
+    # Step 3: Batch pack exp_tokens.pt
+    for exp_id, selected in zip(batch_ids, batch_selected):
+        pack_exp_from_memory(exp_id, selected)
+        ready_events[exp_id] = True
+    
+    # Step 4: Queue async write (non-blocking)
+    async_write_queue.put(union_miss)
+    
+    # Step 5: Immediately start next batch tokenize
+    # (Workers already running from previous batch)
+```
+
+### AsyncWrite Thread
+
+```python
+def async_write_thread_func():
+    while True:
+        union_miss = async_write_queue.get()
+        if union_miss is None:
+            break
+        for sid, miss_rows in union_miss.items():
+            rows = memory_cache[sid]['rows']
+            tokens = memory_cache[sid]['tokens']
+            _cache_add_rows(sid, rows, torch.from_numpy(tokens))
+        # After write, can optionally clear memory_cache entries
+```
+
+**Key insight**: Cache write benefits future batches/runs, not current batch.
+- Current batch uses memory_cache (already tokenized)
+- Disk cache written in background (parallel with training)
+- No blocking, no NPU idle time
+
+### Dispatcher: No Batch Boundary
+
+```python
+# Current: wait for batch boundary
+while pos < batch_end:
+    if ready_events[pos]:
+        task_queue.put(pos)
+        pos += 1
+    else:
+        wait()
+
+# Optimized: dispatch immediately when single exp ready
+while pos < n_exp:
+    if ready_events[pos]:
+        task_queue.put(pos)
+        pos += 1
+    else:
+        wait(0.02)  # Short poll
+```
+
+**Effect**: Worker finishes exp 3 → immediately gets exp 8 (no wait for batch 8-15)
+
+### Expected Performance Improvement
+
+| Metric | Current | Optimized | Improvement |
+|--------|---------|-----------|-------------|
+| Tokenize time per batch | ~120s (8× disk IO) | ~60s (no disk IO) | **2x** |
+| NPU idle time | ~120s per batch | ~0s | **∞** |
+| Parquet reads | 8× per shard | 1× per shard | **8x** |
+| Total batch time | ~180s | ~90s | **2x** |
+
+**Estimated**: 3000 exp from ~15h → **~8h** on 8x NPU
 
 | Optimization | Before | After | Improvement |
 |--------------|--------|-------|-------------|
