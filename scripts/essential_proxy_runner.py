@@ -619,7 +619,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             miss_rows = [r for r in remaining_rows if r not in disk_cached]
 
             if miss_rows:
-                shard_path = mgr._shard_paths[sid]  # Get shard path
+                shard_path = mgr._per_shard_info[sid]["path"]  # Get shard path
                 miss_rows_arr = np.array(sorted(miss_rows), dtype=np.int64)
                 shard_miss_info[sid] = (shard_path, miss_rows_arr)
                 total_miss_rows += len(miss_rows)
