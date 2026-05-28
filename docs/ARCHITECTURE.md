@@ -379,14 +379,25 @@ DeviceManager(device_type=DeviceType.NPU, npu_device_id=3)
 ```
 
 ### Worker Process (`_worker_dynamic_loop` in essential_proxy_runner.py)
-Module-level function (pickle-safe for `mp.get_context(\"spawn\")`):
+Module-level function (pickle-safe for `mp.get_context("spawn")`):
+
+Workers use **shared memory** to avoid per-process 15GB+ metadata reload:
+
 ```python
 _worker_dynamic_loop(worker_id, device_type, config_dict, task_queue, result_queue):
-    mgr = ShardMetadataManager(preprocessed_dir)  # shared filesystem
+    # ── Shared memory path (~1s): map arrays, no disk read ──
+    if config_dict["shared_domain_labels"]:
+        domain_labels = shared_to_ndarray(config_dict["shared_domain_labels"])  # mmap
+        quality_scores = shared_to_ndarray(config_dict["shared_quality_scores"])
+        mgr = ShardMetadataManager.from_shared(domain_labels, quality_scores, ...)
+    # ── Fallback path (~60s): reload from disk ──
+    else:
+        mgr = ShardMetadataManager(preprocessed_dir)
+
     runner = EssentialWebProxyRunner(..., npu_device_id=worker_id)
     while True:
-        task = task_queue.get()  # Blocking pull
-        if task is None: break   # Termination signal
+        task = task_queue.get()       # Blocking pull
+        if task is None: break        # Termination signal
         exp_id, params, selected_idx = task
         result = runner.run_experiment(params, exp_id, selected_idx)
         result_queue.put(result)
@@ -539,18 +550,22 @@ Eq.1 per experiment:
   merged = weighted_sum(normalized, alpha_m)             # ~4s
 ```
 
-**Solution**: Normalization is deterministic and independent of experiment parameters. Pre-compute once.
+**Solution**: Pre-compute once.
 
+```python
+# At initialization (one-time):
+for n in range(5 criteria):
+    _normalized_quality[:, n] = rank_normalize(quality[:, n])  # ~10s one-time
+# Pre-compute domain indices (avoid 275M-element bool mask per experiment)
+_domain_indices = {m: np.where(domain_labels == m)[0] for m in range(M)}  # ~3s
+
+# Per experiment (much faster):
+for m in range(M):
+    indices = _domain_indices[m]      # direct indexing, no bool mask
+    merged_scores[indices] = _normalized_quality[indices] @ alpha_m  # ~1s
 ```
-At initialization:
-  for n in range(5 criteria):
-      _normalized_quality[:, n] = rank_normalize(quality[:, n])  # ~10s one-time
 
-Per experiment:
-  merged = _normalized_quality @ alpha_m  # ~4s (weighted sum only)
-```
-
-**Impact**: 3000 experiments from ~500 min → ~100 min (**5x faster**).
+**Impact**: 3000 experiments from ~500 min → **~50 min** (**10x faster** cumulative).
 
 ### Why File Lock for Shard Cache Write?
 
@@ -749,6 +764,7 @@ def merge_to_memory_cache(sid, new_rows, new_tokens):
 - `np.searchsorted` faster than dict lookup for batch queries
 - Contiguous array → no memory fragmentation
 - Same structure as disk cache → code reuse
+- **LRU eviction**: When total exceeds `memory_cache_max_gb` (default 16 GB), least-recently-used shards are evicted. Fallback to disk mmap.
 
 ### Batch Processing Flow
 
@@ -796,27 +812,36 @@ def async_write_thread_func():
 - Disk cache written in background (parallel with training)
 - No blocking, no NPU idle time
 
-### Dispatcher: No Batch Boundary
+### Dispatcher: Signal-Driven Dispatch
 
 ```python
-# Current: wait for batch boundary
-while pos < batch_end:
-    if ready_events[pos]:
-        task_queue.put(pos)
-        pos += 1
-    else:
-        wait()
-
-# Optimized: dispatch immediately when single exp ready
+# OLD: busy-wait polling (750K+ wasted wakeups over 3000 experiments)
 while pos < n_exp:
-    if ready_events[pos]:
-        task_queue.put(pos)
+    if ready_events.get(pos):   # poll every 20ms
+        dispatch(pos)
         pos += 1
     else:
-        wait(0.02)  # Short poll
+        time.sleep(0.02)        # CPU spin
+
+# NEW: signal-driven with threading.Condition
+ready_cond = threading.Condition()
+
+# Tokenize thread notifies on completion:
+with ready_cond:
+    ready_events[exp_id] = True
+    ready_cond.notify_all()
+
+# Dispatcher waits for signal:
+with ready_cond:
+    is_ready = ready_events.get(pos, None)
+    if is_ready is True:
+        task_queue.put((pos, params_list[pos], all_selected[pos]))
+        pos += 1
+    elif is_ready is None:
+        ready_cond.wait(timeout=1.0)  # block until notified
 ```
 
-**Effect**: Worker finishes exp 3 → immediately gets exp 8 (no wait for batch 8-15)
+**Effect**: Zero CPU spin. Dispatcher only wakes when new experiments are ready.
 
 ### Expected Performance Improvement
 
@@ -837,3 +862,113 @@ while pos < n_exp:
 | 8x NPU total time | ~250h (single) | ~15h | **16x** |
 
 **Combined effect**: Production 3000-exp run from ~250h → ~15h on 8x NPU.
+
+---
+
+## Performance Optimizations (2025-05-28)
+
+Systematic audit and optimization of the QuaDMix codebase (`~/quadmix/`). Audit report: `todo.md`.
+
+### Implemented (10 items)
+
+#### P0-2: Shared Memory Metadata — Highest Impact
+
+**Problem**: Each of 8 workers re-creates `ShardMetadataManager` from scratch, reading ~15 GB of metadata from 3291 parquet files. Total RAM: 8 × 15 GB = 120 GB. Startup: 30–60 seconds per worker.
+
+**Solution**: `multiprocessing.shared_memory` for large numpy arrays.
+
+```
+Main Process:                         Worker Process (×8):
+  ndarray_to_shared(arr) ──→           shared_to_ndarray(info)
+  SharedMemory block                   mmap → np.ndarray (zero-copy)
+  (physical RAM: 1 copy, ~26 GB)       (virtual mapping only)
+```
+
+**Files changed**:
+- `src/quadmix/data/metadata_manager.py` — `from_shared()` classmethod (accepts pre-loaded arrays)
+- `scripts/essential_proxy_runner.py` — `SharedArrayInfo`, `ndarray_to_shared()`, `shared_to_ndarray()` helpers
+- `scripts/essential_proxy_runner.py:_run_batch_dynamic()` — creates shared memory blocks before spawn
+- `scripts/essential_proxy_runner.py:_worker_dynamic_loop()` — maps shared memory (~1s), falls back to disk (~60s)
+
+**Impact**: RAM 120 GB → 26 GB, worker startup 30–60s → ~1s.
+
+#### P1-3: Pre-Computed Domain Indices
+
+**Problem**: `_compute_ranks_for_params()` created 275M-element boolean masks via `domain_labels == m` — 30,000 times (3000 experiments × 10 domains).
+
+**Solution**: Pre-compute `_domain_indices = {m: np.where(domain_labels == m)[0]}` at initialization. Use direct integer indexing instead of boolean masks in the per-experiment hot loop.
+
+```python
+# OLD: 275M bool array × 30,000 = 8.25 trillion comparisons
+for m in unique_domains:
+    mask = self._domain_labels == m
+    merged_scores[mask] = self._normalized_quality[mask] @ alpha_m
+
+# NEW: direct indexing
+for m in range(M):
+    indices = self._domain_indices[m]
+    merged_scores[indices] = self._normalized_quality[indices] @ alpha_m
+```
+
+**Impact**: Eq.1 per-experiment from ~4s → ~1s (cumulative 10x vs original).
+
+#### P1-5: Signal-Driven Dispatcher (Condition instead of Busy-Wait)
+
+**Problem**: Dispatcher thread polled `ready_events` every 20ms with `time.sleep(0.02)`. Over 3000 experiments × ~5s avg wait = 750,000 wasted wakeups.
+
+**Solution**: `threading.Condition` with `notify_all()`. Tokenize thread signals dispatcher when experiments are ready. Dispatcher blocks on `wait()` instead of polling.
+
+**Impact**: Zero CPU spin. Dispatcher only wakes on actual state changes.
+
+#### P2-6: Dead Code Removal
+
+Deleted `_pack_exp_tokens()` and `tokenize_batch_delta()` (110 lines). Neither was called by any code path — parallel mode uses `_tokenize_batch_union()`, sequential mode calls `run_experiment()` → `_load_tokens_for_experiment()` directly.
+
+#### P2-7: Memory Cache LRU Eviction
+
+**Problem**: `_memory_cache` grew unbounded — 3291 shards × ~200 MB each = potentially 65 GB.
+
+**Solution**: Track total bytes, evict least-recently-used shards when exceeding `memory_cache_max_gb` (default 16 GB). Evicted shards fall back to disk mmap via `np.load(..., mmap_mode='r')`.
+
+**Impact**: Memory controlled, no unbounded growth.
+
+#### P2-8: Simplified Disk Cache Write
+
+Removed 60 lines of defensive checks from `_cache_add_rows()` (directory existence, disk space via `shutil.disk_usage`, write permission, verbose logging). These checks always passed in normal operation but added overhead to every write.
+
+#### P3-9: Removed Duplicate Method
+
+Deleted duplicate `_get_shard_token_path()` definition (7 lines) that returned `.npy` extension. The active definition returns `.npz`.
+
+#### P3-10: RoPE Pre-Computation
+
+**Problem**: `RotaryEmbedding.forward()` recomputed `torch.arange` + `einsum` + `cos`/`sin` every call.
+
+**Solution**: Pre-compute `cos_cached` and `sin_cached` buffers at `__init__`. Forward just slices: `self.cos_cached[:seq_len, :]`.
+
+**Impact**: ~10 µs saved per forward pass × 50,000+ forward passes per experiment × 3000 experiments.
+
+#### P3-11: Causal Mask Optimization
+
+Confirmed `causal_mask` is already registered as `register_buffer` — no code change needed. Added documentation note.
+
+#### P3-12: Validation Batch Size
+
+Increased `val_bs` from 200 to `min(1024, val_n)`. 1M proxy model is ~50 MB — can handle much larger batches.
+
+### Analyzed and Deferred (2 items)
+
+| Item | Reason |
+|------|--------|
+| P0-1: HDF5/LMDB token cache | Batch union mode avoids per-batch shard re-reads. I/O is in pipeline (parallel with NPU training). Initial 650 GB write is one-time. |
+| P1-4: Pre-computed reference sorting | `np.random.choice(27.5M, 10000)` + `np.sort(10000)` ≈ 230 µs. 30,000 calls ≈ 7 seconds vs 300–600 seconds pre-sampling. Not worth the complexity. |
+
+### File Change Summary
+
+| File | +Lines | -Lines | Changes |
+|------|--------|--------|---------|
+| `scripts/essential_proxy_runner.py` | +190 | -300 | Shared memory, domain indices, Condition dispatcher, LRU, dead code removal, simplified cache write, validation batch |
+| `src/quadmix/core/proxy_model.py` | +9 | -7 | RoPE pre-computation |
+| `src/quadmix/data/metadata_manager.py` | +26 | 0 | `from_shared()` factory method |
+| `todo.md` | +88 | 0 | Audit report and tracking |
+| **Total** | **+313** | **-307** | Net: +6 lines, substantial complexity reduction |

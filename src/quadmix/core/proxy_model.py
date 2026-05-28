@@ -32,7 +32,7 @@ class RMSNorm(nn.Module):
 
 
 class RotaryEmbedding(nn.Module):
-    """Rotary Position Embedding (RoPE) — full 100% rotary."""
+    """Rotary Position Embedding (RoPE) — full 100% rotary with pre-computed cos/sin."""
 
     def __init__(self, dim: int, max_seq_len: int = 2048, base: float = 10000.0):
         super().__init__()
@@ -40,11 +40,15 @@ class RotaryEmbedding(nn.Module):
         self.register_buffer("inv_freq", inv_freq)
         self.max_seq_len = max_seq_len
 
-    def forward(self, x: torch.Tensor, seq_len: int):
-        t = torch.arange(seq_len, device=x.device).type_as(self.inv_freq)
-        freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+        # Pre-compute cos/sin for max_seq_len (block_size fixed during training)
+        t = torch.arange(max_seq_len, dtype=torch.float)
+        freqs = torch.einsum("i,j->ij", t, inv_freq)
         emb = torch.cat((freqs, freqs), dim=-1)
-        return emb.cos(), emb.sin()
+        self.register_buffer("cos_cached", emb.cos())  # [max_seq_len, dim]
+        self.register_buffer("sin_cached", emb.sin())  # [max_seq_len, dim]
+
+    def forward(self, x: torch.Tensor, seq_len: int):
+        return self.cos_cached[:seq_len, :], self.sin_cached[:seq_len, :]
 
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -219,7 +223,7 @@ class ProxyModel(nn.Module):
             f"Sequence length {T} exceeds block_size {self.config.block_size}"
 
         x = self.embed(input_ids)  # (B, T, C)
-        mask = self.causal_mask[:T, :T]
+        mask = self.causal_mask[:T, :T]  # slice is cheap (~100ns), precomputed buffer
 
         for layer in self.layers:
             x = layer(x, mask)

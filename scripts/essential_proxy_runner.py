@@ -25,6 +25,7 @@ Aligned with RegMix:
 
 import os, math, time, json, glob
 import multiprocessing as mp
+import multiprocessing.shared_memory  # for SharedMemory in ndarray_to_shared
 from functools import partial
 from typing import List, Optional, Dict, Tuple
 import pandas as pd
@@ -48,6 +49,30 @@ DEFAULT_TEMP_DIR = os.environ.get(
     os.path.join(os.path.expanduser("~"), ".cache", "QuaDMix", "temp"),
 )
 DEFAULT_TOKEN_CACHE_DIR = os.path.join(DEFAULT_TEMP_DIR, "token_cache")
+
+# ── Shared memory helpers (avoids re-reading 15GB+ metadata per worker) ──────
+
+class SharedArrayInfo:
+    """Descriptor for a numpy array in shared memory — pickle-safe for mp."""
+    def __init__(self, name: str, shape: tuple, dtype: str, nbytes: int):
+        self.name = name
+        self.shape = shape
+        self.dtype = dtype
+        self.nbytes = nbytes
+
+
+def ndarray_to_shared(arr: np.ndarray, prefix: str) -> SharedArrayInfo:
+    """Copy numpy array into shared memory, return descriptor."""
+    shm = mp.shared_memory.SharedMemory(create=True, size=arr.nbytes, name=f"{prefix}_shm")
+    shared = np.ndarray(arr.shape, dtype=arr.dtype, buffer=shm.buf)
+    np.copyto(shared, arr)
+    return SharedArrayInfo(name=shm.name, shape=arr.shape, dtype=str(arr.dtype), nbytes=arr.nbytes)
+
+
+def shared_to_ndarray(info: SharedArrayInfo) -> np.ndarray:
+    """Map shared memory back to numpy array (read-only is fine)."""
+    shm = mp.shared_memory.SharedMemory(name=info.name)
+    return np.ndarray(shape=info.shape, dtype=np.dtype(info.dtype), buffer=shm.buf)
 
 
 class EssentialWebProxyRunner(BaseProxyRunner):
@@ -86,6 +111,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             rank_ref_size: int = 10000,
             val_doc_limit: int = 500,
             token_cache_dir: str = DEFAULT_TOKEN_CACHE_DIR,
+            memory_cache_max_gb: float = 16.0,  # LRU eviction threshold
     ):
         self.config = config
         self.metadata_manager = metadata_manager
@@ -95,6 +121,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         self.model_variant = model_variant
         self.device_type = device_type
         self.npu_device_id = npu_device_id  # ← 新增：指定 NPU 卡號
+        self.memory_cache_max_gb = memory_cache_max_gb
         self.tiny_steps = tiny_steps
         self.doc_limit = doc_limit
         self.rank_ref_size = rank_ref_size
@@ -184,6 +211,15 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         print(f"[ProxyRunner] Pre-normalized {num_criteria} quality criteria "
               f"({time.time() - t1:.1f}s) — Eq.1 now ~5x faster per experiment")
 
+        # ── Pre-compute domain indices (optimization: avoid mask creation per experiment) ─
+        t2 = time.time()
+        unique_domains = np.unique(self._domain_labels)
+        self._domain_indices: Dict[int, np.ndarray] = {}
+        for m in unique_domains:
+            self._domain_indices[int(m)] = np.where(self._domain_labels == m)[0]
+        print(f"[ProxyRunner] Pre-computed domain indices for {len(self._domain_indices)} domains "
+              f"({time.time() - t2:.1f}s) — Eq.1 mask elimination")
+
         # Per-shard token cache: dict[int, dict[int, torch.Tensor]]
         # cache[shard_idx] = {row_idx: token_ids_tensor}
         # OR saved to disk: cache_dir/tokens_shard_{sid:05d}_bs{bs}.npz
@@ -194,14 +230,10 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         # ── Memory Cache (NPU Parallel Mode Optimization) ───────────────────
         # Dict[sid -> {rows: np.ndarray, tokens: np.ndarray}]
         # Used during batch tokenize to avoid repeated parquet reads
+        # LRU eviction when total exceeds memory_cache_max_gb (default 16 GB)
         self._memory_cache: Dict[int, dict] = {}  # sid -> {"rows": ndarray, "tokens": ndarray}
-
-    def _get_shard_token_path(self, shard_idx: int) -> str:
-        """Path to disk cache for a shard's tokens."""
-        return os.path.join(
-            self.token_cache_dir,
-            f"shard_{shard_idx:05d}_bs{self.block_size}.npy",
-        )
+        self._memory_cache_bytes: int = 0  # total bytes across all cached shards
+        self._memory_cache_lru: List[int] = []  # sids in access order (head = LRU)
 
     def _tokenize_texts(self, texts: List[str]) -> torch.Tensor:
         """Tokenize a list of texts into [M, block_size] int64 tensor."""
@@ -225,16 +257,26 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         """Return set of row_in_shard already in memory cache for this shard."""
         if sid not in self._memory_cache:
             return set()
+        # Mark as recently used (move to tail of LRU)
+        if sid in self._memory_cache_lru:
+            self._memory_cache_lru.remove(sid)
+            self._memory_cache_lru.append(sid)
         return set(int(r) for r in self._memory_cache[sid]["rows"])
 
     def _memory_cache_add_rows(self, sid: int, new_rows: np.ndarray, new_tokens: np.ndarray):
-        """Add new rows to memory cache for this shard.
+        """Add new rows to memory cache. LRU eviction when over limit.
 
         Args:
             sid: Shard index
             new_rows: Array of row_in_shard indices
             new_tokens: Array of tokens [M, block_size]
         """
+        # Track old byte count if sid already exists
+        old_bytes = 0
+        if sid in self._memory_cache:
+            old_data = self._memory_cache[sid]
+            old_bytes = old_data["rows"].nbytes + old_data["tokens"].nbytes
+
         if sid not in self._memory_cache:
             self._memory_cache[sid] = {
                 "rows": np.array([], dtype=np.int64),
@@ -257,7 +299,22 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         unique_rows = np.array(sorted(row_to_idx.keys()), dtype=np.int64)
         final_tokens = combined_tokens[[row_to_idx[int(r)] for r in unique_rows]]
 
+        new_bytes = unique_rows.nbytes + final_tokens.nbytes
         self._memory_cache[sid] = {"rows": unique_rows, "tokens": final_tokens}
+
+        # Update byte tracking and LRU
+        self._memory_cache_bytes += new_bytes - old_bytes
+        if sid in self._memory_cache_lru:
+            self._memory_cache_lru.remove(sid)
+        self._memory_cache_lru.append(sid)  # Most recently used
+
+        # Evict LRU entries if over limit
+        max_bytes = int(self.memory_cache_max_gb * 1024**3)
+        while self._memory_cache_bytes > max_bytes and self._memory_cache_lru:
+            victim_sid = self._memory_cache_lru.pop(0)  # Least recently used
+            if victim_sid in self._memory_cache:
+                victim = self._memory_cache.pop(victim_sid)
+                self._memory_cache_bytes -= (victim["rows"].nbytes + victim["tokens"].nbytes)
 
     def _memory_cache_query(self, sid: int, requested_rows: List[int]) -> Tuple[np.ndarray, List[int], List[int]]:
         """Query memory cache for requested rows.
@@ -318,119 +375,57 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         return rows
 
     def _cache_add_rows(self, sid: int, new_rows: np.ndarray, new_tokens: torch.Tensor):
-        """
-        Add new rows to shard cache (immediate write with file lock).
+        """Add new rows to shard cache (immediate write with file lock).
 
-        Key insight: Current batch NEEDS immediate shard cache write.
-        - Exp 0 tokenizes docs → Exp 1 needs same docs → must see cache
-        - Async merge was wrong: pending files not visible to subsequent exps
-
-        File lock ensures atomic merge when multiple threads hit same shard
-        (rare but possible in future multi-thread tokenize architecture).
+        Uses fcntl.flock for atomic merge. np.savez writes to temp file then
+        os.replace for atomic replacement — no partial reads possible.
         """
         import fcntl
 
         cache_path = self._get_shard_token_path(sid)
-
-        # Ensure directory exists before writing
         cache_dir = os.path.dirname(cache_path)
-        if not os.path.exists(cache_dir):
-            os.makedirs(cache_dir, exist_ok=True)
+        os.makedirs(cache_dir, exist_ok=True)
 
         new_np = new_tokens.numpy().astype(np.int32)  # [M, block_size]
 
-        # Use unique temp file per call
-        # NOTE: np.savez auto-appends '.npz' if path doesn't already end with '.npz'
-        # cache_path ends with '.npz', so we strip it and use a tmp name instead
-        import time
-        cache_no_ext = cache_path[:-4]  # strip '.npz'
+        # Unique temp file per call (np.savez auto-appends .npz)
+        cache_no_ext = cache_path[:-4]
         temp_path = cache_no_ext + f".tmp.{int(time.time() * 1000000)}"
-        actual_temp = temp_path + ".npz"  # this is what np.savez actually creates
+        actual_temp = temp_path + ".npz"
 
-        # Lock file for this shard
         lock_path = cache_path + ".lock"
-
-        # Ensure lock file directory exists
-        lock_dir = os.path.dirname(lock_path)
-        if not os.path.exists(lock_dir):
-            os.makedirs(lock_dir, exist_ok=True)
+        os.makedirs(os.path.dirname(lock_path), exist_ok=True)
 
         with open(lock_path, 'w') as lock_file:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-
             try:
-                # Read existing cache (if any)
+                # Read existing cache
                 if os.path.exists(cache_path):
                     old = np.load(cache_path)
-                    old_rows: np.ndarray = old['rows']
-                    old_tokens: np.ndarray = old['tokens']
+                    old_rows = old['rows']
+                    old_tokens = old['tokens']
                     del old
                 else:
                     old_rows = np.array([], dtype=np.int64)
                     old_tokens = np.zeros((0, new_np.shape[1]), dtype=np.int32)
 
-                # Merge with new rows (dedupe by row_in_shard)
+                # Merge + deduplicate (new overwrites old on conflict)
                 combined_rows = np.concatenate([old_rows, new_rows])
                 combined_tokens = np.concatenate([old_tokens, new_np])
 
-                # Deduplicate: keep latest (new overwrites old if duplicate)
-                unique_rows, inverse = np.unique(combined_rows, return_index=True)
-                order = np.argsort(unique_rows)
-                unique_rows = unique_rows[order]
+                # Keep latest row for each key
+                row_to_idx = {int(r): i for i, r in enumerate(combined_rows)}
+                unique_rows = np.array(sorted(row_to_idx.keys()), dtype=np.int64)
+                final_tokens = combined_tokens[[row_to_idx[int(r)] for r in unique_rows]]
 
-                row_to_token_idx = {}
-                for i, r in enumerate(combined_rows):
-                    row_to_token_idx[int(r)] = i  # Later entry overwrites earlier
-                final_tokens = combined_tokens[[row_to_token_idx[int(r)] for r in unique_rows]]
-
-                # Atomic write (unique temp file prevents collision)
-                # Debug: check directory and disk space before write
-                if not os.path.exists(cache_dir):
-                    print(f"[CacheAddRows] WARNING: directory {cache_dir} does not exist!")
-                    try:
-                        os.makedirs(cache_dir, exist_ok=True)
-                        print(f"[CacheAddRows] Created directory {cache_dir}")
-                    except Exception as e:
-                        print(f"[CacheAddRows] Failed to create directory: {e}")
-                        raise
-
-                # Check disk space
-                import shutil
-                try:
-                    stat = shutil.disk_usage(cache_dir)
-                    free_gb = stat.free / (1024 ** 3)
-                    if free_gb < 1:
-                        print(f"[CacheAddRows] WARNING: Low disk space {free_gb:.2f} GB")
-                except Exception as e:
-                    print(f"[CacheAddRows] Could not check disk space: {e}")
-
-                # Check write permission
-                if not os.access(cache_dir, os.W_OK):
-                    print(f"[CacheAddRows] WARNING: No write permission on {cache_dir}")
-                    raise IOError(f"No write permission on {cache_dir}")
-
-                print(f"[CacheAddRows] Writing {len(unique_rows)} rows to {actual_temp}...")
-                try:
-                    np.savez(temp_path, tokens=final_tokens, rows=unique_rows)
-                except Exception as e:
-                    print(f"[CacheAddRows] np.savez exception: {e}")
-                    raise
-
-                # Verify temp file was created (np.savez appends .npz)
-                if not os.path.exists(actual_temp):
-                    print(f"[CacheAddRows] np.savez returned but file not created!")
-                    raise IOError(f"np.savez failed to create {actual_temp}")
-
-                print(f"[CacheAddRows] Temp file created: {os.path.getsize(actual_temp)} bytes")
+                np.savez(temp_path, tokens=final_tokens, rows=unique_rows)
                 os.replace(actual_temp, cache_path)
-
             finally:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-                # Clean up temp file if something went wrong (file not moved)
                 if os.path.exists(actual_temp):
                     try:
                         os.remove(actual_temp)
-                    except:
+                    except OSError:
                         pass
 
     # ═══════════════════════════════════════════════════════════
@@ -443,116 +438,6 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             self.token_cache_dir,
             f"exp_{exp_id:04d}_tokens.pt"
         )
-
-    def _pack_exp_tokens(
-            self,
-            exp_id: int,
-            selected_idx: np.ndarray,
-    ) -> str:
-        """Pack tokens for a single experiment into a temporary file.
-
-        Process:
-          1. For each shard needed by this exp:
-             - Check shard cache for existing rows
-             - Tokenize missing rows → write to shard cache
-          2. Collect all tokens for this exp
-          3. Save to temporary file (exp_{id}_tokens.pt)
-
-        Returns:
-            Path to the temporary token file.
-        """
-        mgr = self.metadata_manager
-        shard_groups = mgr.global_to_shard_rows(selected_idx)
-
-        # Debug: log entry
-        print(f"[PackExp {exp_id:04d}] Starting: {len(selected_idx):,} docs, {len(shard_groups)} shards")
-
-        all_tokens = []
-        total_tokenized = 0
-        t0 = time.time()
-
-        for sid, (shard_path, local_rows) in shard_groups.items():
-            cache_path = self._get_shard_token_path(sid)
-            cached_rows = self._cached_shard_rows(sid)
-
-            # Split into hit and miss
-            hit_rows = [r for r in local_rows if int(r) in cached_rows]
-            miss_rows = [r for r in local_rows if int(r) not in cached_rows]
-
-            hit_tokens = None
-            miss_tokens = None
-
-            # Hit: read from cache
-            if hit_rows:
-                data = np.load(cache_path, mmap_mode='r')
-                token_mmap = data['tokens']
-                row_index = data['rows']
-                row_to_pos = {int(r): i for i, r in enumerate(row_index)}
-                positions = np.array([row_to_pos[int(r)] for r in hit_rows], dtype=np.int64)
-                hit_tokens = torch.from_numpy(token_mmap[positions].astype(np.int64))
-                del data
-
-            # Miss: tokenize and add to cache
-            if miss_rows:
-                miss_rows_arr = np.array(miss_rows, dtype=np.int64)
-                df_shard = pd.read_parquet(
-                    shard_path,
-                    columns=["row_in_shard", "text"],
-                    filters=[("row_in_shard", "in", miss_rows_arr.tolist())],
-                )
-                df_shard = df_shard.sort_values("row_in_shard")
-                texts = df_shard["text"].astype(str).tolist()
-                parsed_rows = df_shard["row_in_shard"].to_numpy(dtype=np.int64)
-
-                miss_tokens_full = self._tokenize_texts(texts)
-                self._cache_add_rows(sid, parsed_rows, miss_tokens_full)
-                total_tokenized += len(texts)
-
-                # Extract requested rows
-                row_to_pos_new = {int(r): i for i, r in enumerate(parsed_rows)}
-                positions = np.array([row_to_pos_new[int(r)] for r in miss_rows], dtype=np.int64)
-                miss_tokens = torch.from_numpy(miss_tokens_full.numpy().astype(np.int64)[positions])
-
-            # Merge hit and miss in original order
-            if miss_rows:
-                row_to_token = {}
-                if hit_tokens is not None:
-                    for i, r in enumerate(hit_rows):
-                        row_to_token[int(r)] = hit_tokens[i]
-                if miss_tokens is not None:
-                    for i, r in enumerate(miss_rows):
-                        row_to_token[int(r)] = miss_tokens[i]
-                shard_tokens = torch.stack([row_to_token[int(r)] for r in local_rows])
-            else:
-                shard_tokens = hit_tokens
-
-            all_tokens.append(shard_tokens)
-
-        # Pack into temporary file
-        result = torch.cat(all_tokens, dim=0)
-        exp_token_path = self._get_exp_token_path(exp_id)
-        torch.save(result, exp_token_path)
-
-        elapsed = time.time() - t0
-        print(f"  [PackExp {exp_id:04d}] {len(result):,} docs, "
-              f"tokenized {total_tokenized:,} new, "
-              f"{len(shard_groups)} shards ({elapsed:.1f}s)")
-
-        return exp_token_path
-
-    def tokenize_batch_delta(
-            self,
-            batch_selected: List[np.ndarray],
-            batch_exp_ids: List[int],
-    ):
-        """Tokenize and pack tokens for each experiment in the batch.
-
-        For each exp:
-          1. Check shard cache, tokenize missing rows
-          2. Pack into temporary file (exp_{id}_tokens.pt)
-        """
-        for exp_id, selected_idx in zip(batch_exp_ids, batch_selected):
-            self._pack_exp_tokens(exp_id, selected_idx)
 
     def _tokenize_batch_union(
             self,
@@ -920,6 +805,15 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         print(f"[ProxyRunner] (legacy) Pre-normalized {num_criteria} criteria "
               f"({time.time() - t1:.1f}s) — Eq.1 now ~5x faster")
 
+        # ── Pre-compute domain indices ───────────────────────────
+        t2 = time.time()
+        unique_domains = np.unique(self._domain_labels)
+        self._domain_indices: Dict[int, np.ndarray] = {}
+        for m in unique_domains:
+            self._domain_indices[int(m)] = np.where(self._domain_labels == m)[0]
+        print(f"[ProxyRunner] (legacy) Pre-computed domain indices for {len(self._domain_indices)} domains "
+              f"({time.time() - t2:.1f}s)")
+
     # ═══════════════════════════════════════════════════════════
     # Experiment execution
     # ═══════════════════════════════════════════════════════════
@@ -927,42 +821,37 @@ class EssentialWebProxyRunner(BaseProxyRunner):
     def _compute_ranks_for_params(
             self, params: ParameterSet, experiment_id: int,
     ) -> np.ndarray:
-        """Per-experiment Eq.1 + Eq.2 (optimized with pre-normalized quality).
+        """Per-experiment Eq.1 + Eq.2 (optimized with pre-normalized quality + pre-computed domain indices).
 
-        Eq.1 optimization: use pre-computed normalized_quality instead of
-        re-normalizing every time. Only weighted sum needed per experiment.
+        Optimizations:
+          - Pre-normalized quality scores (no re-normalization per experiment)
+          - Pre-computed _domain_indices (no 275M bool mask creation × 3000 exps)
         """
-        N = self.config.num_quality_criteria
         M = self.config.num_domains
         rng = np.random.default_rng(experiment_id + 1729)
 
-        # Eq.1 (optimized): Weighted sum using pre-normalized quality
+        # Eq.1 (optimized): Weighted sum using pre-normalized quality + pre-computed indices
         # OLD: compute_merged_quality_scores() normalized every time (~20s)
-        # NEW: only weighted sum per domain (~4s)
+        # MID: boolean mask per domain (~4s, still creates 275M mask × M)
+        # NEW: direct indexing via pre-computed _domain_indices (~1s)
         merged_scores = np.zeros(self._num_docs, dtype=np.float64)
 
-        unique_domains = np.unique(self._domain_labels)
-        for m in unique_domains:
-            if m < 0:
+        for m in range(M):
+            indices = self._domain_indices.get(m)
+            if indices is None or len(indices) == 0:
                 continue
-            mask = self._domain_labels == m
-            if mask.sum() == 0:
-                continue
-
-            # Get final weights α_m for this domain
             alpha_m = params.merge_config.get_final_weights(m)
-
-            # Weighted sum: ¯q = Σ σ(q_n) · α_{n,m}
-            merged_scores[mask] = self._normalized_quality[mask] @ alpha_m
+            merged_scores[indices] = self._normalized_quality[indices] @ alpha_m
 
         # Eq.2: Subset-based rank estimation per domain
         ranks = np.zeros(self._num_docs, dtype=np.float64)
         for m in range(M):
-            mask = self._domain_labels == m
-            if mask.sum() == 0:
+            indices = self._domain_indices.get(m)
+            if indices is None:
                 continue
-            indices = np.where(mask)[0]
             n_domain = len(indices)
+            if n_domain == 0:
+                continue
             domain_scores = merged_scores[indices]
 
             k = min(self.rank_ref_size, n_domain)
@@ -1097,7 +986,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         val_mask = self._val_loss_mask[:val_n, :bs].to(device)
 
         with torch.no_grad():
-            val_bs = 200
+            val_bs = min(1024, val_n)  # 1M model is tiny, maximize throughput
             per_doc_losses = []
             for start in range(0, len(val_tokens), val_bs):
                 end = min(start + val_bs, len(val_tokens))
@@ -1316,9 +1205,16 @@ class EssentialWebProxyRunner(BaseProxyRunner):
     # Parallel run across multiple NPU devices
     # ═══════════════════════════════════════════════════════════
 
-    def _serialize_config(self) -> dict:
-        """Pickle-safe config for worker processes."""
-        return {
+    def _serialize_config(self, shared_metadata: Optional[Dict[str, "SharedArrayInfo"]] = None) -> dict:
+        """Pickle-safe config for worker processes.
+
+        Args:
+            shared_metadata: If provided, workers use shared memory for metadata arrays
+                             instead of re-reading parquet. Dict with keys:
+                             'domain_labels', 'quality_scores', 'doc_char_counts',
+                             'normalized_quality'.
+        """
+        cfg = {
             "config": self.config,
             "val_data_path": self.val_data_path,
             "preprocessed_dir": (
@@ -1340,7 +1236,15 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             "rank_ref_size": self.rank_ref_size,
             "val_doc_limit": self.val_doc_limit,
             "token_cache_dir": self.token_cache_dir,
+            # Shared memory descriptors (None if not using shared memory)
+            "shared_domain_labels": shared_metadata.get("domain_labels") if shared_metadata else None,
+            "shared_quality_scores": shared_metadata.get("quality_scores") if shared_metadata else None,
+            "shared_doc_char_counts": shared_metadata.get("doc_char_counts") if shared_metadata else None,
+            "shared_normalized_quality": shared_metadata.get("normalized_quality") if shared_metadata else None,
+            # Per-shard info (pickle-safe, small)
+            "per_shard_info": self.metadata_manager.shard_info if self.metadata_manager else None,
         }
+        return cfg
 
     def run_batch_parallel(
             self,
@@ -1442,7 +1346,30 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         n_exp = len(params_list)
         all_results = [None] * n_exp
-        config_ser = self._serialize_config()
+        # ── Shared memory for metadata (avoids 15GB+ reload per worker) ─
+        shared_meta: Optional[Dict[str, "SharedArrayInfo"]] = None
+        if self._mode == "sharded" and self.metadata_manager is not None:
+            try:
+                shared_meta = {}
+                mgr = self.metadata_manager
+                shared_meta["domain_labels"] = ndarray_to_shared(
+                    mgr.domain_labels, f"dl_{os.getpid()}")
+                shared_meta["quality_scores"] = ndarray_to_shared(
+                    mgr.quality_scores, f"qs_{os.getpid()}")
+                shared_meta["doc_char_counts"] = ndarray_to_shared(
+                    mgr.doc_char_counts, f"cc_{os.getpid()}")
+                # Pre-computed in _load_metadata_only
+                if hasattr(self, '_normalized_quality') and self._normalized_quality is not None:
+                    shared_meta["normalized_quality"] = ndarray_to_shared(
+                        self._normalized_quality, f"nq_{os.getpid()}")
+                total_gb = sum(v.nbytes for v in shared_meta.values()) / (1024**3)
+                print(f"[SharedMem] Packed {total_gb:.1f} GB metadata for {num_workers} workers")
+            except Exception as e:
+                print(f"[SharedMem] WARNING: shared memory setup failed ({e}), "
+                      f"workers will reload from disk")
+                shared_meta = None
+
+        config_ser = self._serialize_config(shared_meta)
         t_start = time.time()
 
         print(f"\n[DynamicParallel] {n_exp} experiments, {num_workers} workers")
@@ -1459,7 +1386,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         # Track which experiments are tokenized
         ready_events: Dict[int, bool] = {}
-        ready_lock = threading.Lock()
+        ready_cond = threading.Condition()  # replaces busy-wait polling
         completed_count = 0
 
         # ── 0. AsyncWrite Thread (background write to disk cache) ──────
@@ -1504,8 +1431,9 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
                     # Mark each exp as ready (immediate dispatch)
                     for exp_id in batch_ids:
-                        with ready_lock:
+                        with ready_cond:
                             ready_events[exp_id] = True
+                        ready_cond.notify_all()  # wake dispatcher
 
                     print(f"[TokenizeThread] Batch {batch_count}: {len(batch_ids)} exps ready ({pos}-{end_pos - 1})")
 
@@ -1515,8 +1443,9 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                     traceback.print_exc()
                     # Mark all exps in this batch as failed
                     for exp_id in batch_ids:
-                        with ready_lock:
+                        with ready_cond:
                             ready_events[exp_id] = False
+                        ready_cond.notify_all()
 
                 pos = end_pos
                 time.sleep(0.05)  # Small pause to let workers catch up
@@ -1534,12 +1463,12 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         wait_start = time.time()
         last_progress_time = 0
         while True:
-            with ready_lock:
+            with ready_cond:
                 ready_count = sum(1 for i in range(first_batch_end) if ready_events.get(i, False))
             if ready_count == first_batch_end:
                 break
             if time.time() - wait_start > 300:  # 5 min timeout
-                with ready_lock:
+                with ready_cond:
                     for i in range(first_batch_end):
                         status = ready_events.get(i, None)
                         print(f"[DynamicParallel] Exp {i} status: {status}")
@@ -1549,33 +1478,37 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             if now - last_progress_time > 5:
                 print(f"[DynamicParallel] tokenizing... {ready_count}/{first_batch_end} ready")
                 last_progress_time = now
-            time.sleep(0.5)
+            with ready_cond:
+                ready_cond.wait(timeout=5.0)  # signal-based wait, not polling
         print(f"[DynamicParallel] First batch tokenized ({first_batch_end} exps), starting workers")
 
-        # ── 2. Dispatcher Thread (no batch boundary) ───────────────
+        # ── 2. Dispatcher Thread (signal-driven, no busy-wait) ────────
         def dispatcher_thread_func():
-            """Push ready tasks immediately (no batch boundary)."""
+            """Push ready tasks when signaled (no busy-wait polling)."""
             pos = 0
             failed_exps = []
             while pos < n_exp:
-                with ready_lock:
+                with ready_cond:
                     is_ready = ready_events.get(pos, None)
 
-                if is_ready is True:
-                    # Immediate dispatch: single exp ready
-                    task_queue.put((pos, params_list[pos], all_selected[pos]))
-                    pos += 1
-                elif is_ready is False:
-                    print(f"[Dispatcher] Skipping exp {pos} (tokenize failed)")
-                    failed_exps.append(pos)
-                    result_queue.put(ProxyResult(
-                        parameters=params_list[pos],
-                        validation_loss=float('inf'),
-                        metadata={"experiment_id": pos, "error": "tokenize_failed"}
-                    ))
-                    pos += 1
-                else:
-                    time.sleep(0.02)
+                    if is_ready is True:
+                        # Immediate dispatch: single exp ready
+                        task_queue.put((pos, params_list[pos], all_selected[pos]))
+                        pos += 1
+                        continue
+                    elif is_ready is False:
+                        print(f"[Dispatcher] Skipping exp {pos} (tokenize failed)")
+                        failed_exps.append(pos)
+                        result_queue.put(ProxyResult(
+                            parameters=params_list[pos],
+                            validation_loss=float('inf'),
+                            metadata={"experiment_id": pos, "error": "tokenize_failed"}
+                        ))
+                        pos += 1
+                        continue
+                    else:
+                        # Not ready yet — wait for tokenize thread signal
+                        ready_cond.wait(timeout=1.0)  # timeout for safety, but normally woken by notify
 
             for _ in range(num_workers):
                 task_queue.put(None)
@@ -1630,6 +1563,19 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         elapsed = time.time() - t_start
         print(f"\n[DynamicParallel] All {n_exp} experiments complete ({elapsed:.0f}s ≈ {elapsed / 60:.1f}min)")
+
+        # ── Cleanup shared memory ─────────────────────────────
+        if shared_meta:
+            import gc
+            for name, info in list(shared_meta.items()):
+                try:
+                    shm = mp.shared_memory.SharedMemory(name=info.name)
+                    shm.close()
+                    shm.unlink()
+                except Exception:
+                    pass
+            print(f"[SharedMem] Cleaned up {len(shared_meta)} shared memory blocks")
+
         return all_results
 
 
@@ -1640,11 +1586,52 @@ def _worker_dynamic_loop(
         task_queue,
         result_queue,
 ):
-    """Worker loop for dynamic mode: pull task → run → push result → repeat."""
+    """Worker loop for dynamic mode: pull task → run → push result → repeat.
+
+    Uses shared memory for metadata arrays when available, avoiding
+    per-worker 15GB+ parquet reload. Falls back to disk loading gracefully.
+    """
     from quadmix.data.metadata_manager import ShardMetadataManager
 
-    # Re-create runner in worker process
-    mgr = ShardMetadataManager(config_dict["preprocessed_dir"])
+    # ── Metadata loading: shared memory or disk ──────────────────
+    shared_dl = config_dict.get("shared_domain_labels")
+    shared_qs = config_dict.get("shared_quality_scores")
+    shared_cc = config_dict.get("shared_doc_char_counts")
+    shared_nq = config_dict.get("shared_normalized_quality")
+    per_shard_info = config_dict.get("per_shard_info")
+
+    use_shared = (shared_dl is not None and shared_qs is not None
+                  and shared_cc is not None and per_shard_info is not None)
+
+    if use_shared:
+        t0 = time.time()
+        # Map shared memory arrays (zero-copy, no disk read)
+        domain_labels = shared_to_ndarray(shared_dl)
+        quality_scores = shared_to_ndarray(shared_qs)
+        doc_char_counts = shared_to_ndarray(shared_cc)
+
+        # Reconstruct shard_starts from per_shard_info
+        shard_starts_arr = np.array(
+            [s["start_idx"] for s in per_shard_info], dtype=np.int64
+        )
+
+        mgr = ShardMetadataManager.from_shared(
+            domain_labels=domain_labels,
+            quality_scores=quality_scores,
+            doc_char_counts=doc_char_counts,
+            per_shard_info=per_shard_info,
+            shard_starts=shard_starts_arr,
+            preprocessed_dir=config_dict.get("preprocessed_dir", ""),
+        )
+        print(f"[Worker {worker_id}] Mapped {len(domain_labels):,} docs from shared memory "
+              f"({time.time() - t0:.1f}s vs ~60s disk reload)")
+    else:
+        # Fallback: reload from disk (backward compatible)
+        if config_dict.get("preprocessed_dir"):
+            mgr = ShardMetadataManager(config_dict["preprocessed_dir"])
+        else:
+            mgr = None  # Legacy mode, no sharded metadata needed
+
     runner = EssentialWebProxyRunner(
         config=config_dict["config"],
         metadata_manager=mgr,

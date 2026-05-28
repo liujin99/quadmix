@@ -144,6 +144,32 @@ class ShardMetadataManager:
     def shard_info(self) -> List[dict]:
         return list(self._per_shard_info)
 
+    # ── Shared memory factory (avoids re-reading parquet in worker processes) ──
+
+    @classmethod
+    def from_shared(
+        cls,
+        domain_labels: npt.NDArray[np.int64],
+        quality_scores: npt.NDArray[np.float64],
+        doc_char_counts: npt.NDArray[np.int64],
+        per_shard_info: List[dict],
+        shard_starts: npt.NDArray[np.int64],
+        preprocessed_dir: str = "",
+    ) -> "ShardMetadataManager":
+        """Create from pre-loaded arrays (shared memory or otherwise)."""
+        mgr = cls.__new__(cls)
+        mgr._dir = preprocessed_dir
+        mgr._domain_labels = domain_labels
+        mgr._quality_scores = quality_scores
+        mgr._doc_char_counts = doc_char_counts
+        mgr._per_shard_info = per_shard_info
+        mgr._shard_starts = shard_starts
+        mgr._num_docs = len(domain_labels)
+        mgr._num_shards = len(per_shard_info)
+        mgr._shard_files = []  # not needed for shared mode
+        mgr._shard_index = None
+        return mgr
+
     # ── Token estimation ──
 
     def get_total_chars(self) -> int:

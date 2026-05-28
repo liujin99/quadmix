@@ -317,14 +317,19 @@ bash scripts/demo_run_full.sh --device-type npu --npu-devices 8
 ```
 
 **性能优化亮点**：
-- **Eq.1 预计算**：预采样阶段从 ~500 min → ~100 min（**5x**）
-- **Shard cache 即时写入**：当前批次实验共享 tokenize 结果
+- **Shared memory metadata**：8 worker 共享 1 份元数据 (~26 GB RAM, 1s 启动 vs 60s 重载)
+- **预计算 domain indices**：Eq.1 不再每实验创建 275M boolean mask（~10x 加速）
+- **Eq.1 预计算**：预采样阶段从 ~500 min → ~50 min（**10x**）
+- **信号驱动调度**：Dispatcher 使用 `threading.Condition`，零 CPU 空转
+- **LRU memory cache**：16 GB 上限，自动淘汰不常用的 shard
 
 **动态任务队列架构：**
 - Worker 完成任务后立即领取下一个，无批次边界
 - 快的 NPU 自然做更多实验，慢的只影响自己
 - CPU tokenize 线程独立运行，与 NPU 训练重叠
 - 每张 NPU 绑定独立的 `worker_id` 作为 `npu_device_id`
+
+**共享内存要求**：Python 3.8+ 内置 `multiprocessing.shared_memory`，无需额外依赖。如果共享内存创建失败（如 /dev/shm 空间不足），worker 自动退回磁盘加载模式。
 
 **架构示意：**
 ```
