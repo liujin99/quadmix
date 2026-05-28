@@ -291,12 +291,44 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 final_tokens = combined_tokens[[row_to_token_idx[int(r)] for r in unique_rows]]
                 
                 # Atomic write (unique temp file prevents collision)
-                np.savez(temp_path, tokens=final_tokens, rows=unique_rows)
+                # Debug: check directory and disk space before write
+                if not os.path.exists(cache_dir):
+                    print(f"[CacheAddRows] WARNING: directory {cache_dir} does not exist!")
+                    try:
+                        os.makedirs(cache_dir, exist_ok=True)
+                        print(f"[CacheAddRows] Created directory {cache_dir}")
+                    except Exception as e:
+                        print(f"[CacheAddRows] Failed to create directory: {e}")
+                        raise
+                
+                # Check disk space
+                import shutil
+                try:
+                    stat = shutil.disk_usage(cache_dir)
+                    free_gb = stat.free / (1024**3)
+                    if free_gb < 1:
+                        print(f"[CacheAddRows] WARNING: Low disk space {free_gb:.2f} GB")
+                except Exception as e:
+                    print(f"[CacheAddRows] Could not check disk space: {e}")
+                
+                # Check write permission
+                if not os.access(cache_dir, os.W_OK):
+                    print(f"[CacheAddRows] WARNING: No write permission on {cache_dir}")
+                    raise IOError(f"No write permission on {cache_dir}")
+                
+                print(f"[CacheAddRows] Writing {len(unique_rows)} rows to {temp_path}...")
+                try:
+                    np.savez(temp_path, tokens=final_tokens, rows=unique_rows)
+                except Exception as e:
+                    print(f"[CacheAddRows] np.savez exception: {e}")
+                    raise
                 
                 # Verify temp file was created
                 if not os.path.exists(temp_path):
+                    print(f"[CacheAddRows] np.savez returned but file not created!")
                     raise IOError(f"np.savez failed to create {temp_path}")
                 
+                print(f"[CacheAddRows] Temp file created: {os.path.getsize(temp_path)} bytes")
                 os.replace(temp_path, cache_path)
                 
             finally:
