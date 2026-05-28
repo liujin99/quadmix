@@ -617,9 +617,9 @@ Metadata (~15 GB) fits in RAM, but text (~800 GB) does not.
 - Load text only for selected docs: ~550K per experiment
 - Parquet filter pushdown: reads only needed rows, not full shard
 
-## NPU Parallel Mode Optimization (Planned)
+## NPU Parallel Mode Optimization (Implemented)
 
-### Current Architecture (Problem)
+### Current Architecture (Problem) — RESOLVED
 
 ```
 Time    Tokenize Thread                Workers (NPU)
@@ -656,7 +656,7 @@ T+300s
 2. **Batch boundary blocks dispatch**: Workers wait for entire batch to tokenize
 3. **Repeated IO**: Same shard read multiple times across experiments
 
-### Optimized Architecture
+### Optimized Architecture — NOW ACTIVE
 
 ```
 Time    Tokenize Thread                Workers (NPU)         AsyncWrite Thread

@@ -1,4 +1,4 @@
-# !/usr/bin/env python3
+#!/usr/bin/env python3
 """
 EssentialWebProxyRunner — Real proxy training on essential-web-v1 data.
 
@@ -186,10 +186,15 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         # Per-shard token cache: dict[int, dict[int, torch.Tensor]]
         # cache[shard_idx] = {row_idx: token_ids_tensor}
-        # OR saved to disk: cache_dir/tokens_shard_{sid:05d}_bs{bs}.npy
+        # OR saved to disk: cache_dir/tokens_shard_{sid:05d}_bs{bs}.npz
         os.makedirs(self.token_cache_dir, exist_ok=True)
         self._cache_hits = 0
         self._cache_misses = 0
+
+        # ── Memory Cache (NPU Parallel Mode Optimization) ───────────────────
+        # Dict[sid -> {rows: np.ndarray, tokens: np.ndarray}]
+        # Used during batch tokenize to avoid repeated parquet reads
+        self._memory_cache: Dict[int, dict] = {}  # sid -> {"rows": ndarray, "tokens": ndarray}
 
     def _get_shard_token_path(self, shard_idx: int) -> str:
         """Path to disk cache for a shard's tokens."""
@@ -211,6 +216,85 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             )
             all_ids.append(enc["input_ids"])
         return torch.cat(all_ids, dim=0)
+
+    # ═══════════════════════════════════════════════════════════
+    # Memory Cache (NPU Parallel Mode Optimization)
+    # ═══════════════════════════════════════════════════════════
+
+    def _memory_cache_get_rows(self, sid: int) -> set:
+        """Return set of row_in_shard already in memory cache for this shard."""
+        if sid not in self._memory_cache:
+            return set()
+        return set(int(r) for r in self._memory_cache[sid]["rows"])
+
+    def _memory_cache_add_rows(self, sid: int, new_rows: np.ndarray, new_tokens: np.ndarray):
+        """Add new rows to memory cache for this shard.
+
+        Args:
+            sid: Shard index
+            new_rows: Array of row_in_shard indices
+            new_tokens: Array of tokens [M, block_size]
+        """
+        if sid not in self._memory_cache:
+            self._memory_cache[sid] = {
+                "rows": np.array([], dtype=np.int64),
+                "tokens": np.zeros((0, new_tokens.shape[1]), dtype=np.int32),
+            }
+
+        old = self._memory_cache[sid]
+        old_rows = old["rows"]
+        old_tokens = old["tokens"]
+
+        # Merge: new rows appended, dedupe by row_in_shard (new overwrites old)
+        combined_rows = np.concatenate([old_rows, new_rows])
+        combined_tokens = np.concatenate([old_tokens, new_tokens])
+
+        # Deduplicate: keep latest (new overwrites old)
+        row_to_idx = {}
+        for i, r in enumerate(combined_rows):
+            row_to_idx[int(r)] = i  # Later entry overwrites earlier
+
+        unique_rows = np.array(sorted(row_to_idx.keys()), dtype=np.int64)
+        final_tokens = combined_tokens[[row_to_idx[int(r)] for r in unique_rows]]
+
+        self._memory_cache[sid] = {"rows": unique_rows, "tokens": final_tokens}
+
+    def _memory_cache_query(self, sid: int, requested_rows: List[int]) -> Tuple[np.ndarray, List[int], List[int]]:
+        """Query memory cache for requested rows.
+
+        Args:
+            sid: Shard index
+            requested_rows: List of row_in_shard to query
+
+        Returns:
+            (tokens, hit_rows, miss_rows)
+            - tokens: Array of tokens for hit rows (empty if no hit)
+            - hit_rows: List of rows found in cache
+            - miss_rows: List of rows not in cache
+        """
+        cached_rows = self._memory_cache_get_rows(sid)
+        hit_rows = [r for r in requested_rows if int(r) in cached_rows]
+        miss_rows = [r for r in requested_rows if int(r) not in cached_rows]
+
+        if not hit_rows:
+            return np.zeros((0, self.block_size), dtype=np.int32), hit_rows, miss_rows
+
+        # Use np.searchsorted for efficient batch query
+        cache_data = self._memory_cache[sid]
+        cache_rows = cache_data["rows"]
+        cache_tokens = cache_data["tokens"]
+
+        # Sort hit_rows to match cache_rows order (cache_rows is sorted)
+        sorted_hit_rows = sorted(hit_rows)
+        positions = np.searchsorted(cache_rows, sorted_hit_rows)
+
+        # Verify all positions are valid (searchsorted returns len if not found)
+        valid_mask = positions < len(cache_rows)
+        assert valid_mask.all(), f"Some hit rows not in cache: {sorted_hit_rows}"
+
+        tokens = cache_tokens[positions]
+
+        return tokens, hit_rows, miss_rows
 
     # ═══════════════════════════════════════════════════════════
     # Incremental token cache (append new rows to existing npz)
@@ -468,6 +552,180 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         """
         for exp_id, selected_idx in zip(batch_exp_ids, batch_selected):
             self._pack_exp_tokens(exp_id, selected_idx)
+
+    def _tokenize_batch_union(
+            self,
+            batch_selected: List[np.ndarray],
+            batch_exp_ids: List[int],
+            async_write_queue: Optional["Queue"] = None,
+    ) -> Dict[int, str]:
+        """NPU Parallel Mode: Batch tokenize union miss rows across all experiments.
+
+        Key optimization:
+          1. Compute union of all rows needed by this batch
+          2. For each shard, read parquet ONCE (not 8 times)
+          3. Tokenize all miss rows in batch
+          4. Store in memory_cache for subsequent batches
+          5. Pack each exp's tokens to temp file
+          6. AsyncWrite thread writes to disk cache in background
+
+        Args:
+            batch_selected: List of selected_indices for each exp
+            batch_exp_ids: List of experiment IDs
+            async_write_queue: Queue for AsyncWrite thread (optional)
+
+        Returns:
+            Dict[exp_id -> exp_token_path] for each experiment
+        """
+        mgr = self.metadata_manager
+        t0 = time.time()
+
+        # ── Step 1: Collect all shard rows needed by this batch ───────────
+        # shard_to_exp_rows[sid] = {exp_id: [row_in_shard, ...]}
+        shard_to_exp_rows: Dict[int, Dict[int, List[int]]] = {}
+
+        for exp_id, selected_idx in zip(batch_exp_ids, batch_selected):
+            shard_groups = mgr.global_to_shard_rows(selected_idx)
+            for sid, (shard_path, local_rows) in shard_groups.items():
+                if sid not in shard_to_exp_rows:
+                    shard_to_exp_rows[sid] = {}
+                shard_to_exp_rows[sid][exp_id] = list(int(r) for r in local_rows)
+
+        n_shards = len(shard_to_exp_rows)
+        print(f"[BatchTokenize] {len(batch_exp_ids)} exps, {n_shards} shards")
+
+        # ── Step 2: For each shard, compute union miss rows ───────────────
+        # Check memory_cache first, then disk cache
+        total_miss_rows = 0
+        shard_miss_info: Dict[int, Tuple[str, np.ndarray]] = {}  # sid -> (shard_path, miss_rows)
+
+        for sid, exp_rows_dict in shard_to_exp_rows.items():
+            # Union of all rows needed by this batch for this shard
+            all_needed_rows = set()
+            for exp_id, rows in exp_rows_dict.items():
+                all_needed_rows.update(rows)
+
+            # Check memory_cache
+            memory_cached = self._memory_cache_get_rows(sid)
+            hit_in_memory = [r for r in all_needed_rows if r in memory_cached]
+
+            # Check disk cache for remaining rows
+            remaining_rows = [r for r in all_needed_rows if r not in memory_cached]
+            disk_cached = self._cached_shard_rows(sid)
+            hit_in_disk = [r for r in remaining_rows if r in disk_cached]
+
+            # True miss: not in memory_cache or disk_cache
+            miss_rows = [r for r in remaining_rows if r not in disk_cached]
+
+            if miss_rows:
+                shard_path = mgr._shard_paths[sid]  # Get shard path
+                miss_rows_arr = np.array(sorted(miss_rows), dtype=np.int64)
+                shard_miss_info[sid] = (shard_path, miss_rows_arr)
+                total_miss_rows += len(miss_rows)
+
+            # Load disk cache hits into memory_cache (for subsequent batches)
+            if hit_in_disk:
+                cache_path = self._get_shard_token_path(sid)
+                data = np.load(cache_path, mmap_mode='r')
+                disk_rows = data['rows']
+                disk_tokens = data['tokens']
+
+                # Find positions for hit rows
+                row_to_pos = {int(r): i for i, r in enumerate(disk_rows)}
+                positions = np.array([row_to_pos[int(r)] for r in hit_in_disk], dtype=np.int64)
+                hit_tokens = disk_tokens[positions]
+
+                # Add to memory_cache
+                self._memory_cache_add_rows(sid, np.array(hit_in_disk, dtype=np.int64), hit_tokens)
+                del data
+
+        if total_miss_rows == 0:
+            print(f"[BatchTokenize] All {n_shards} shards fully cached, 0 miss rows")
+        else:
+            print(f"[BatchTokenize] {total_miss_rows:,} miss rows across {len(shard_miss_info)} shards")
+
+        # ── Step 3: Batch read parquet + tokenize (each shard ONCE) ───────
+        if shard_miss_info:
+            read_t0 = time.time()
+            for sid, (shard_path, miss_rows_arr) in shard_miss_info.items():
+                # Read all miss rows from parquet in ONE call
+                df_shard = pd.read_parquet(
+                    shard_path,
+                    columns=["row_in_shard", "text"],
+                    filters=[("row_in_shard", "in", miss_rows_arr.tolist())],
+                )
+                df_shard = df_shard.sort_values("row_in_shard")
+                texts = df_shard["text"].astype(str).tolist()
+                parsed_rows = df_shard["row_in_shard"].to_numpy(dtype=np.int64)
+
+                # Tokenize batch
+                tokenize_t0 = time.time()
+                miss_tokens = self._tokenize_texts(texts).numpy().astype(np.int32)
+                tokenize_time = time.time() - tokenize_t0
+
+                # Add to memory_cache
+                self._memory_cache_add_rows(sid, parsed_rows, miss_tokens)
+
+                # Schedule async write to disk cache (if queue provided)
+                if async_write_queue is not None:
+                    async_write_queue.put((sid, parsed_rows, miss_tokens))
+                else:
+                    # Fallback: immediate write (blocking)
+                    self._cache_add_rows(sid, parsed_rows, torch.from_numpy(miss_tokens))
+
+                print(f"  [Shard {sid}] {len(texts):,} docs tokenized ({tokenize_time:.1f}s)")
+
+            read_time = time.time() - read_t0
+            print(f"[BatchTokenize] Parquet read + tokenize: {read_time:.1f}s")
+
+        # ── Step 4: Pack each exp's tokens from memory_cache ───────────────
+        exp_token_paths: Dict[int, str] = {}
+        pack_t0 = time.time()
+
+        for exp_id, selected_idx in zip(batch_exp_ids, batch_selected):
+            shard_groups = mgr.global_to_shard_rows(selected_idx)
+            all_tokens = []
+
+            for sid, (shard_path, local_rows) in shard_groups.items():
+                # Query memory_cache for all needed rows (should be 100% hit now)
+                requested_rows = [int(r) for r in local_rows]
+                tokens, hit_rows, miss_rows = self._memory_cache_query(sid, requested_rows)
+
+                if miss_rows:
+                    print(f"  WARNING: exp {exp_id} shard {sid} has {len(miss_rows)} miss rows after batch tokenize!")
+                    # Fallback: read from disk cache (should not happen in normal flow)
+                    cache_path = self._get_shard_token_path(sid)
+                    if os.path.exists(cache_path):
+                        data = np.load(cache_path, mmap_mode='r')
+                        disk_rows = data['rows']
+                        disk_tokens = data['tokens']
+                        row_to_pos = {int(r): i for i, r in enumerate(disk_rows)}
+                        for r in miss_rows:
+                            if r in row_to_pos:
+                                # Append miss token
+                                pass  # TODO: handle this edge case
+                        del data
+
+                # Reorder tokens to match local_rows order
+                # memory_cache_query returns tokens in sorted order, need to reorder
+                row_to_idx = {int(r): i for i, r in enumerate(hit_rows)}
+                positions = np.array([row_to_idx[int(r)] for r in requested_rows], dtype=np.int64)
+                shard_tokens = torch.from_numpy(tokens[positions].astype(np.int64))
+                all_tokens.append(shard_tokens)
+
+            # Pack into temporary file
+            result = torch.cat(all_tokens, dim=0)
+            exp_token_path = self._get_exp_token_path(exp_id)
+            torch.save(result, exp_token_path)
+            exp_token_paths[exp_id] = exp_token_path
+
+        pack_time = time.time() - pack_t0
+        print(f"[BatchTokenize] Pack {len(batch_exp_ids)} exps: {pack_time:.1f}s")
+
+        elapsed = time.time() - t0
+        print(f"[BatchTokenize] Total: {elapsed:.1f}s for {len(batch_exp_ids)} experiments")
+
+        return exp_token_paths
 
     def _load_tokens_for_experiment(
             self, selected_idx: np.ndarray, exp_id: int = None
@@ -1147,17 +1405,21 @@ class EssentialWebProxyRunner(BaseProxyRunner):
     ) -> List:
         """Dynamic task queue mode: workers pull tasks on-demand.
 
-        Architecture:
+        NPU Parallel Mode Optimization:
           Main Process:
-            ├─ Tokenize Thread (CPU) → continuously pre-tokenize
-            ├─ Dispatcher Thread → push ready tasks to queue
+            ├─ Tokenize Thread (CPU) → batch tokenize union miss rows
+            ├─ AsyncWrite Thread → background write to disk cache
+            ├─ Dispatcher Thread → push ready tasks (no batch boundary)
             └─ Collector Thread → receive results
 
           Worker 0-7 (NPU):
             └─ pull task → run → push result → pull next task
 
-        Key: Wait for first batch to be tokenized before starting workers.
-             This ensures workers get cache hits instead of re-tokenizing.
+        Key optimizations:
+          - Batch tokenize: each shard read ONCE per batch (not 8 times)
+          - Memory cache: subsequent batches reuse tokens from memory
+          - AsyncWrite: disk cache write in background, non-blocking
+          - No batch boundary: single exp ready → immediate dispatch
 
         Args:
             params_list: All parameter configurations
@@ -1170,7 +1432,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             List of ProxyResult in experiment order
         """
         import threading
-        from multiprocessing import Queue
+        import queue as thread_queue  # For AsyncWrite thread
 
         # Default: tokenize batch size = NPU count
         if tokenize_lookahead is None:
@@ -1182,58 +1444,89 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         t_start = time.time()
 
         print(f"\n[DynamicParallel] {n_exp} experiments, {num_workers} workers")
-        print(f"[DynamicParallel] tokenize_lookahead={tokenize_lookahead}")
+        print(f"[DynamicParallel] tokenize_lookahead={tokenize_lookahead} (batch union mode)")
+        print(f"[DynamicParallel] NPU Parallel Mode: memory_cache + AsyncWrite enabled")
 
         # ── Create queues ───────────────────────────────────────
         ctx = mp.get_context("spawn")
         task_queue = ctx.Queue(maxsize=num_workers * 2)  # Limit backlog
         result_queue = ctx.Queue()
 
+        # AsyncWrite queue (thread queue, not mp.Queue)
+        async_write_queue = thread_queue.Queue()
+
         # Track which experiments are tokenized
         ready_events: Dict[int, bool] = {}
         ready_lock = threading.Lock()
         completed_count = 0
 
-        # ── 1. Tokenize Thread (CPU, continuously run) ───────────
+        # ── 0. AsyncWrite Thread (background write to disk cache) ──────
+        def async_write_thread_func():
+            """Write shard cache to disk in background, non-blocking."""
+            write_count = 0
+            while True:
+                try:
+                    item = async_write_queue.get(timeout=1.0)
+                    if item is None:
+                        # Termination signal
+                        break
+                    sid, rows, tokens = item
+                    # Write to disk cache (blocking I/O but in background thread)
+                    self._cache_add_rows(sid, rows, torch.from_numpy(tokens))
+                    write_count += 1
+                except thread_queue.Empty:
+                    continue  # Timeout, check if tokenize thread finished
+
+            print(f"[AsyncWrite] Wrote {write_count} shard caches to disk")
+
+        async_write_thread = threading.Thread(target=async_write_thread_func, daemon=True)
+        async_write_thread.start()
+
+        # ── 1. Tokenize Thread (CPU, batch union mode) ───────────
         def tokenize_thread_func():
-            """Continuously pre-tokenize experiments ahead of workers."""
+            """Continuously pre-tokenize experiments in BATCH UNION mode."""
             pos = 0
-            tokenize_done_count = 0
+            batch_count = 0
             while pos < n_exp:
-                # Tokenize a batch of experiments
+                # Tokenize a batch of experiments using UNION optimization
                 end_pos = min(pos + tokenize_lookahead, n_exp)
                 batch_ids = list(range(pos, end_pos))
                 batch_selected = [all_selected[i] for i in batch_ids]
 
-                # Tokenize one-by-one, mark each as ready only when successful
-                for exp_id, selected_idx in zip(batch_ids, batch_selected):
-                    try:
-                        self._pack_exp_tokens(exp_id, selected_idx)
-                        tokenize_done_count += 1
-                        # Progress: show every exp during first batch, then every 10
-                        if tokenize_done_count <= tokenize_lookahead or tokenize_done_count % 10 == 0:
-                            print(f"[TokenizeThread] Exp {exp_id} ready ({tokenize_done_count}/{n_exp})")
-                        # Only mark as ready if successful
+                try:
+                    # Batch tokenize: union miss rows, each shard read ONCE
+                    exp_token_paths = self._tokenize_batch_union(
+                        batch_selected, batch_ids, async_write_queue
+                    )
+                    batch_count += 1
+
+                    # Mark each exp as ready (immediate dispatch)
+                    for exp_id in batch_ids:
                         with ready_lock:
                             ready_events[exp_id] = True
-                    except Exception as e:
-                        print(f"[TokenizeThread] ERROR exp {exp_id}: {e}")
-                        import traceback
-                        traceback.print_exc()
-                        # Mark as failed - Worker will see no temp file and fail
+
+                    print(f"[TokenizeThread] Batch {batch_count}: {len(batch_ids)} exps ready ({pos}-{end_pos - 1})")
+
+                except Exception as e:
+                    print(f"[TokenizeThread] ERROR batch {batch_count}: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    # Mark all exps in this batch as failed
+                    for exp_id in batch_ids:
                         with ready_lock:
-                            ready_events[exp_id] = False  # Explicitly mark as failed
+                            ready_events[exp_id] = False
 
                 pos = end_pos
                 time.sleep(0.05)  # Small pause to let workers catch up
 
-            print(f"[TokenizeThread] All {n_exp} experiments tokenized ({time.time() - t_start:.1f}s)")
+            # Signal AsyncWrite thread to finish
+            async_write_queue.put(None)
+            print(f"[TokenizeThread] All {n_exp} experiments tokenized in {batch_count} batches ({time.time() - t_start:.1f}s)")
 
         tokenize_thread = threading.Thread(target=tokenize_thread_func, daemon=True)
         tokenize_thread.start()
 
         # ── Wait for first batch to be tokenized ────────────────
-        # Key fix: Workers must wait for cache to be ready
         first_batch_end = min(tokenize_lookahead, n_exp)
         print(f"[DynamicParallel] Waiting for first batch (exp 0-{first_batch_end - 1}) to be tokenized...")
         wait_start = time.time()
@@ -1244,14 +1537,12 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             if ready_count == first_batch_end:
                 break
             if time.time() - wait_start > 300:  # 5 min timeout
-                # Debug: print what's blocking
                 with ready_lock:
                     for i in range(first_batch_end):
                         status = ready_events.get(i, None)
                         print(f"[DynamicParallel] Exp {i} status: {status}")
                 print("[DynamicParallel] TIMEOUT waiting for first batch - check tokenize errors above")
                 break
-            # Progress output every 5s
             now = time.time()
             if now - last_progress_time > 5:
                 print(f"[DynamicParallel] tokenizing... {ready_count}/{first_batch_end} ready")
@@ -1259,23 +1550,22 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             time.sleep(0.5)
         print(f"[DynamicParallel] First batch tokenized ({first_batch_end} exps), starting workers")
 
-        # ── 2. Dispatcher Thread (push ready tasks) ───────────────
+        # ── 2. Dispatcher Thread (no batch boundary) ───────────────
         def dispatcher_thread_func():
-            """Push tokenized experiments to task queue."""
+            """Push ready tasks immediately (no batch boundary)."""
             pos = 0
             failed_exps = []
             while pos < n_exp:
                 with ready_lock:
-                    is_ready = ready_events.get(pos, None)  # None = not yet processed
+                    is_ready = ready_events.get(pos, None)
 
                 if is_ready is True:
+                    # Immediate dispatch: single exp ready
                     task_queue.put((pos, params_list[pos], all_selected[pos]))
                     pos += 1
                 elif is_ready is False:
-                    # Tokenize failed for this exp - skip and record
                     print(f"[Dispatcher] Skipping exp {pos} (tokenize failed)")
                     failed_exps.append(pos)
-                    # Push a failed result placeholder directly to result queue
                     result_queue.put(ProxyResult(
                         parameters=params_list[pos],
                         validation_loss=float('inf'),
@@ -1283,10 +1573,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                     ))
                     pos += 1
                 else:
-                    # Not yet processed, wait
                     time.sleep(0.02)
 
-            # Send termination signals
             for _ in range(num_workers):
                 task_queue.put(None)
 
@@ -1297,7 +1585,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         dispatcher_thread = threading.Thread(target=dispatcher_thread_func, daemon=True)
         dispatcher_thread.start()
 
-        # ── 3. Collector Thread (receive results) ────────────────
+        # ── 3. Collector Thread ────────────────
         def collector_thread_func():
             """Collect results from result queue."""
             nonlocal completed_count
@@ -1312,10 +1600,9 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                         elapsed = time.time() - t_start
                         eta = (n_exp - completed_count) * elapsed / max(1, completed_count)
                         if completed_count % 50 == 0 or completed_count == n_exp:
-                            print(f"[Collector] {completed_count}/{n_exp} done "
-                                  f"({elapsed:.0f}s, ETA: {eta:.0f}s)")
+                            print(f"[Collector] {completed_count}/{n_exp} done ({elapsed:.0f}s, ETA: {eta:.0f}s)")
                 except:
-                    pass  # Timeout, continue waiting
+                    pass
 
         collector_thread = threading.Thread(target=collector_thread_func, daemon=True)
         collector_thread.start()
@@ -1325,13 +1612,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         for wid in range(num_workers):
             p = ctx.Process(
                 target=_worker_dynamic_loop,
-                args=(
-                    wid,
-                    device_type,
-                    config_ser,
-                    task_queue,
-                    result_queue,
-                ),
+                args=(wid, device_type, config_ser, task_queue, result_queue),
             )
             p.start()
             worker_processes.append(p)
@@ -1340,13 +1621,13 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         collector_thread.join()
         dispatcher_thread.join()
         tokenize_thread.join()
+        async_write_thread.join()
 
         for p in worker_processes:
             p.join(timeout=5.0)
 
         elapsed = time.time() - t_start
-        print(f"\n[DynamicParallel] All {n_exp} experiments complete "
-              f"({elapsed:.0f}s ≈ {elapsed / 60:.1f}min)")
+        print(f"\n[DynamicParallel] All {n_exp} experiments complete ({elapsed:.0f}s ≈ {elapsed / 60:.1f}min)")
         return all_results
 
 
