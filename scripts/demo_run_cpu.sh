@@ -1,27 +1,30 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────────
-# Demo: QuaDMix 8x NPU — 小规模快速测试，适合 NPU 集群验证
+# Demo: QuaDMix Quick — 快速验证整个流程能跑通
 # ──────────────────────────────────────────────────────────────
-# 目标：20 shards (~1.6B tokens)，8 NPU 并行，500 步快速验证
+# 目标：参数最小化，计算/时间开销最少，仅验证端到端流程
 # 数据不存在则自动下载 + 预处理
 #
 # Usage:
-#   bash scripts/demo_run.sh
+#   bash scripts/demo_run_cpu.sh
 #
-# 自定义 shard 数量：
-#   NUM_SHARDS=50 bash scripts/demo_run.sh
+# 缓存控制：
+#   CLEAN_PREPROCESSED=1 — 强制清理预处理目录后重新预处理
+#   CLEAN_PREPROCESSED=0 — 强制不清理（默认 auto：旧 shard 多于当前时自动清理）
+#   CLEAN_TOKEN_CACHE=0  — 不清理 token cache（默认清理）
 #
-# 自定义 NPU 设备数：
-#   bash scripts/demo_run.sh --npu-devices 4
-#
-# HF 镜像加速（中国用户）：
-#   HF_ENDPOINT=https://hf-mirror.com bash scripts/demo_run.sh
 # ──────────────────────────────────────────────────────────────
 
 set -euo pipefail
 
+# ── 使用 conda nano 环境（包含 pyarrow 等依赖）─────────────
+if command -v conda &>/dev/null; then
+    eval "$(conda shell.bash hook 2>/dev/null)" && conda activate nano
+fi
+
 QUADMIX_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 export PATH="$HOME/.local/bin:$PATH"
+export CUDA_VISIBLE_DEVICES=""
 
 # Temp/cache dir: override via QUADMIX_TEMP_DIR env var, defaults to ~/.cache/QuaDMix/temp/
 export QUADMIX_TEMP_DIR="${QUADMIX_TEMP_DIR:-$HOME/.cache/QuaDMix/temp}"
@@ -37,6 +40,7 @@ if [ ! -f "$VAL_FILE" ]; then
     echo "  驗證集不存在: $VAL_FILE"
     echo "  從 liujin99/quadmix-openhermes-10k 下載..."
 
+    # Support HF mirror via environment variable
     HF_ENDPOINT="${HF_ENDPOINT:-https://huggingface.co}"
     if [ "$HF_ENDPOINT" != "https://huggingface.co" ]; then
         echo "  使用 HF 镜像: $HF_ENDPOINT"
@@ -56,26 +60,8 @@ if [ ! -f "$VAL_FILE" ]; then
     echo ""
 fi
 
-# ── 下载规模控制 ──────────────────────────────────
-# 每 shard ≈ 79M tokens (char//4) / 246 MB 原始 parquet
-# 20 shards ≈ 1.6B tokens / 4.9 GB
-NUM_SHARDS="${NUM_SHARDS:-20}"
-TOKEN_ESTIMATE=$(( NUM_SHARDS * 79000000 ))
-TOKEN_ESTIMATE_B=$(echo "scale=1; $TOKEN_ESTIMATE / 1000000000" | bc 2>/dev/null || echo "~$(( TOKEN_ESTIMATE / 1000000000 ))")
-
-# ── NPU 设备数 ──────────────────────────────────
-NPU_DEVICES="${NPU_DEVICES:-8}"
-
-echo "╔══ 配置摘要 ═══╗"
-echo ""
-echo "  Shards:       $NUM_SHARDS (~$TOKEN_ESTIMATE_B B tokens)"
-echo "  NPU 设备:     $NPU_DEVICES 张卡并行"
-echo "  预计下载:     ~$(( NUM_SHARDS * 246 / 1024 )) GB (如需)"
-echo ""
-echo "╚══════════════════════════════════════╝"
-echo ""
-
 # ── 数据就绪检查（逐个 shard 检查，补充下载）──────────────────
+NUM_SHARDS=2  # quick demo 只需要 2 个 shard
 NEED_DOWNLOAD=0
 MISSING_SHARDS=()
 
@@ -104,10 +90,53 @@ if [ $NEED_DOWNLOAD -eq 1 ]; then
     echo ""
 fi
 
-# 检查是否需要预处理（shard 数量变化或首次运行）
-if [ $NEED_DOWNLOAD -eq 1 ] || [ ! -f "$PREPROCESSED_DIR/shard_index.json" ]; then
+# ── 缓存清理 + 预处理 ──────────────────────────────────────────────
+# CLEAN_PREPROCESSED: 强制清理 preprocessed/ 目录（默认自动检测）
+#   - 旧 shard 数量 > 当前 NUM_SHARDS 时自动清理（防止旧文件残留）
+#   - 设为 1 强制清理，设为 0 强制不清
+# CLEAN_TOKEN_CACHE:  清理 token_cache/ 目录（默认清理）
+CLEAN_PREPROCESSED="${CLEAN_PREPROCESSED:-auto}"
+CLEAN_TOKEN_CACHE="${CLEAN_TOKEN_CACHE:-1}"
+RUN_PREPROCESS=0
+
+TOKEN_CACHE_DIR="$QUADMIX_TEMP_DIR/token_cache"
+
+# 自动检测 shard 数量是否变化（减少时需要清理旧文件）
+NEED_CLEAN_PREPROCESSED=0
+if [ "$CLEAN_PREPROCESSED" = "1" ]; then
+    NEED_CLEAN_PREPROCESSED=1
+elif [ "$CLEAN_PREPROCESSED" = "0" ]; then
+    NEED_CLEAN_PREPROCESSED=0
+elif [ -f "$PREPROCESSED_DIR/shard_index.json" ]; then
+    OLD_SHARDS=$(python3 -c "import json; print(json.load(open('$PREPROCESSED_DIR/shard_index.json'))['num_shards'])" 2>/dev/null || echo 0)
+    if [ "$OLD_SHARDS" -gt "$NUM_SHARDS" ]; then
+        NEED_CLEAN_PREPROCESSED=1
+        echo ""
+        echo "  [警告] 旧预处理有 $OLD_SHARDS 个 shard，当前只需 $NUM_SHARDS 个"
+        echo "         将自动清理旧预处理目录防止残留文件干扰"
+    fi
+fi
+
+# 是否需要预处理：清理预处理目录 或 索引不存在
+if [ $NEED_CLEAN_PREPROCESSED -eq 1 ]; then
+    RUN_PREPROCESS=1
+elif [ ! -f "$PREPROCESSED_DIR/shard_index.json" ]; then
+    RUN_PREPROCESS=1
+fi
+
+if [ $RUN_PREPROCESS -eq 1 ]; then
+    echo ""
     echo "╔══ 预处理数据 ═══╗"
     echo ""
+    if [ $NEED_CLEAN_PREPROCESSED -eq 1 ] && [ -d "$PREPROCESSED_DIR" ]; then
+        echo "  [清理] 预处理目录: $PREPROCESSED_DIR"
+        rm -rf "$PREPROCESSED_DIR"
+    fi
+    if [ "$CLEAN_TOKEN_CACHE" = "1" ] && [ -d "$TOKEN_CACHE_DIR" ]; then
+        echo "  [清理] token cache 目录: $TOKEN_CACHE_DIR"
+        rm -rf "$TOKEN_CACHE_DIR"
+    fi
+    mkdir -p "$PREPROCESSED_DIR"
     echo "  运行多 shard 预处理脚本..."
     python3 "$QUADMIX_DIR/scripts/preprocess_essential_web_v1_sharded.py" \
         --input-dir "$RAW_DATA_DIR" \
@@ -116,71 +145,55 @@ if [ $NEED_DOWNLOAD -eq 1 ] || [ ! -f "$PREPROCESSED_DIR/shard_index.json" ]; th
     echo ""
     echo "╚══════════════════════════════════════╝"
     echo ""
+elif [ "$CLEAN_TOKEN_CACHE" = "1" ] && [ -d "$TOKEN_CACHE_DIR" ]; then
+    echo "  [清理] token cache 目录: $TOKEN_CACHE_DIR"
+    rm -rf "$TOKEN_CACHE_DIR"
 fi
 
-OUTPUT_DIR="${OUTPUT_DIR:-$QUADMIX_DIR/result/demo_8xnpu_$(date +%Y%m%d_%H%M%S)}"
+OUTPUT_DIR="${OUTPUT_DIR:-$QUADMIX_DIR/result/demo_quick_$(date +%Y%m%d_%H%M%S)}"
 
 echo "═══════════════════════════════════════════"
-echo "  QuaDMix Demo — 8x NPU"
-echo "  快速验证 (20 shards, 500 steps)"
+echo "  QuaDMix Demo — Quick"
+echo "  验证流程跑通（最小计算/时间开销）"
 echo "═══════════════════════════════════════════"
 cat << PARAMS
 
   Output:  $OUTPUT_DIR
 
-  ┌────────────────────────────┬──────────────┐
-  │ 参数                       │  值          │
-  ├────────────────────────────┼──────────────┤
-  │ Shards                     │        $NUM_SHARDS  │
-  │ NPU 设备                   │         $NPU_DEVICES  │
-  │ 实验数                     │          10  │
-  │ 搜索点                     │       1,000  │
-  │ Top-K 平均                 │           3  │
-  │ seq_len (block_size)       │       2,048  │ ← 论文值
-  │ 训练步数                   │         500  │ ← 快速验证
-  │ 全局 batch size            │         512  │ ← 论文值
-  │ 微批大小                   │           4  │ ← 论文值
-  │ 验证集文档数               │       1,000  │ ← 论文值
-  │ 排名参考集大小             │      10,000  │ ← 论文值
-  │ 代理模型                   │  tinyllama_1M│
-  └────────────────────────────┴──────────────┘
+  ┌────────────────────────────┬──────────┐
+  │ 参数                       │  值      │
+  ├────────────────────────────┼──────────┤
+  │ 实验数                     │      20  │
+  │ 搜索点                     │     200  │
+  │ Top-K 平均                 │       2  │
+  │ seq_len (block_size)       │      64  │
+  │ 训练步数 (tiny_steps)      │       3  │
+  │ 全局 batch size            │       8  │
+  │ 微批大小                   │       2  │
+  │ 验证集文档数               │      50  │
+  │ 排名参考集大小             │     200  │
+  └────────────────────────────┴──────────┘
 
-  ⏱ 预计耗时: ~3-5 分钟 (10 exp × 500 steps on NPU)
-  ⚠ 快速验证模式 (500 steps)，完整训练用 --tiny-steps 0
+  ⚡ 预计耗时: ~1-2分钟
 PARAMS
-
-# 检查 NPU 环境
-if ! command -v npu-smi &> /dev/null; then
-    echo ""
-    echo "  ⚠ 未检测到 NPU 环境 (npu-smi 不存在)"
-    echo "     将尝试使用 CUDA 或降级 CPU..."
-    echo "     ⚠ CPU 模式下完整训练会极慢！建议使用 GPU/NPU"
-    echo ""
-    DEVICE_ARG=""
-else
-    echo ""
-    echo "  ✓ NPU 已检测 (npu-smi 可用)"
-    DEVICE_ARG="--device-type npu --npu-devices $NPU_DEVICES"
-fi
 
 python3 "$QUADMIX_DIR/scripts/run_essential_web_v1.py" \
     --preprocessed-dir "$PREPROCESSED_DIR" \
-    --num-experiments 10 \
-    --num-search 1000 \
-    --top-k 3 \
-    --block-size 2048 \
-    --tiny-steps 500 \
-    --micro-batch-size 4 \
-    --global-batch-size 512 \
-    --val-limit 1000 \
-    --rank-ref-size 10000 \
+    --num-experiments 20 \
+    --num-search 200 \
+    --top-k 2 \
+    --block-size 64 \
+    --tiny-steps 3 \
+    --micro-batch-size 2 \
+    --global-batch-size 8 \
+    --val-limit 50 \
+    --rank-ref-size 200 \
     --output "$OUTPUT_DIR" \
-    $DEVICE_ARG \
     "$@" || exit $?
 
 echo ""
 echo "═══════════════════════════════════════════"
-echo "  Demo 8x NPU complete!"
+echo "  Demo Quick complete!"
 echo "  Output: $OUTPUT_DIR/"
 echo "    ├── quadmix_report.md"
 echo "    ├── optimal_parameters.json"

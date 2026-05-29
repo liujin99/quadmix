@@ -57,9 +57,9 @@ quadmix/
 │   ├── essential_proxy_runner.py   # Shard-aware proxy experiments
 │   ├── download_essential_web.py   # Download tool
 │   ├── validation_set/             # Validation set prep script (reference only)
-│   ├── demo_run_quick.sh           # Quick demo (~1-2min, CPU)
-│   ├── demo_run_npu.sh             # Medium demo (~15-30min, 8x NPU)
-│   └── demo_run_full.sh            # Full demo (paper config, GPU)
+│   ├── demo_run_cpu.sh            # CPU 快速验证 (~1-2min)
+│   ├── demo_run_quick.sh          # NPU 快速验证 (~3-5min, 8x NPU)
+│   └── demo_run_full.sh           # 中等规模验证 (~2-4h, GPU/NPU)
 ├── result/                     # Final results (one dir per run)
 ├── temp/                       # Intermediate data (deletable)
 │   ├── preprocessed/               # Preprocessed shards
@@ -76,13 +76,13 @@ quadmix/
 # Install
 pip install -e .
 
-# Quick demo (20 experiments, ~1-2min, CPU) — auto-downloads validation set
+# Quick demo (CPU, ~1-2min) — auto-downloads validation set
+bash scripts/demo_run_cpu.sh
+
+# NPU quick demo (~3-5min, 8x NPU)
 bash scripts/demo_run_quick.sh
 
-# NPU demo (200 experiments, ~15-30min, 8x NPU)
-bash scripts/demo_run_npu.sh
-
-# Full run (paper config, needs GPU/NPU)
+# Medium demo (~2-4h, GPU/NPU)
 bash scripts/demo_run_full.sh
 
 # Custom run
@@ -97,6 +97,36 @@ python scripts/run_essential_web_v1.py \
 > **Note**: The validation set (`openhermes_10k_assistant_tokenized.pt`)
 > is automatically downloaded from [HuggingFace](https://huggingface.co/datasets/liujin99/quadmix-openhermes-10k)
 > on first run. No manual data preparation required.
+
+## Validation Status
+
+**已验证环境：**
+
+| 配置项 | 规格 |
+|-------|------|
+| NPU | 8x Ascend 910B3, 64GB VRAM each |
+| 内存 | 1500 GB |
+| CPU | ARM 192 vCPUs |
+| 验证脚本 | `demo_run_quick.sh` (8 experiments, 10 steps) |
+| 验证结果 | ✓ 轻量级验证跑通，多卡并行调度正常 |
+
+验证日志：
+- 并行 tokenize (Stage 1 IO + Stage 2 tokenize) 正常执行
+- 8 workers 动态任务队列调度正常
+- val_loss 计算正常（tinyllama_1M proxy model）
+
+**验证通过的修复点：**
+- `shared_to_ndarray()` 返回 `.copy()` — 解决 spawn 子进程 shared memory segfault
+- `notify_all()` 移入 `with ready_cond:` — 解决信号丢失竞态
+- val batch size 1024→50 — 避免 NPU OOM
+
+## Demo Scripts
+
+| 脚本 | 设备 | 数据量 | 实验 | 步数 | 耗时 | 用途 |
+|------|------|--------|------|------|------|------|
+| `demo_run_cpu.sh` | CPU | 3 shards | 20 | 3 | ~1-2min | CI / 流程验证 |
+| `demo_run_quick.sh` | 8x NPU | 20 shards | 8 | 10 | ~3-5min | **轻量级验证** |
+| `demo_run_full.sh` | GPU/NPU | 100 shards | 50 | 1000 | ~2-4h | 中等规模验证 |
 
 ## Architecture Highlights
 

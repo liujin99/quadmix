@@ -224,52 +224,57 @@ print(f'Domains:{len(mgr.unique_domains)}')
 
 ## 4. 运行流水线
 
-### 4.1 快速验证（20 实验，CPU，~1-2分钟）
+### 4.1 快速验证（CPU，~1-2分钟）
 
 验证环境配置正确、数据路径正常：
+
+```bash
+cd $QUADMIX_DIR
+bash scripts/demo_run_cpu.sh
+```
+
+成功标志：控制台打印完成信息并在 `result/` 下生成结果目录。
+
+### 4.2 轻量级验证（8 实验，8x NPU，10 步）
+
+验证 NPU 多卡并行 + 端到端流程：
 
 ```bash
 cd $QUADMIX_DIR
 bash scripts/demo_run_quick.sh
 ```
 
-成功标志：控制台打印 `All 20 experiments complete` 并在 `result/` 下生成结果目录。
+**轻量级配置**：
+- 20 shards (~1.6B tokens)
+- 8 实验，1000 搜索点
+- block_size=2048，tiny_steps=10（快速验证）
+- global_batch_size=256，micro_batch_size=4
 
-### 4.2 正式配置测试（20 实验，8x NPU，完整训练）
+**耗时预期**：每实验 ~30 秒，总计 ~3-5 分钟。
 
-验证 NPU 多卡并行 + 论文训练配置：
-
-```bash
-cd $QUADMIX_DIR
-bash scripts/demo_run_npu.sh
-```
-
-**论文训练配置**：
-- 100 shards (~7.9B tokens)
-- 20 实验，1000 搜索点
-- block_size=2048，**tiny_steps=0**（完整 25000 步训练）
-- global_batch_size=512，micro_batch_size=4
-- val_limit=1000，rank_ref_size=10000
-
-**耗时预期**：每实验 ~3-5 分钟（完整训练），总计 ~10-20 分钟。
+**已验证环境**：
+- 8x Ascend 910B3, 64GB VRAM each
+- 1500 GB 内存
+- ARM 192 vCPUs
+- ✓ 轻量级验证跑通，多卡并行调度正常
 
 可自定义：
 ```bash
-# 减少 shard 数量
-NUM_SHARDS=50 bash scripts/demo_run_npu.sh
+# 增加 shard 数量
+NUM_SHARDS=50 bash scripts/demo_run_quick.sh
 
 # 减少 NPU 设备
-NPU_DEVICES=4 bash scripts/demo_run_npu.sh
+NPU_DEVICES=4 bash scripts/demo_run_quick.sh
 
 # HF 镜像加速
-HF_ENDPOINT=https://hf-mirror.com bash scripts/demo_run_npu.sh
+HF_ENDPOINT=https://hf-mirror.com bash scripts/demo_run_quick.sh
 ```
 
-### 4.3 单卡 NPU 完整运行（3000 实验）
+### 4.3 中等规模验证（50 实验，GPU/NPU，1000 步）
 
 ```bash
 cd $QUADMIX_DIR
-bash scripts/demo_run_full.sh --device-type npu
+bash scripts/demo_run_full.sh --device-type npu --npu-devices 8
 ```
 
 或等价命令：
@@ -464,7 +469,7 @@ result/quadmix_20250525_143022/
 | 5 | torch_npu | `python -c "import torch_npu; print('ok')"` |
 | 6 | 原始数据 | `ls data/essential-web-v1/shard_00000.parquet` |
 | 7 | 预处理数据 | `ls temp/preprocessed/shard_index.json` |
-| 8 | 快速测试 | `bash scripts/demo_run_quick.sh` |
+| 8 | 快速测试 | `bash scripts/demo_run_cpu.sh` |
 
 ---
 
@@ -476,9 +481,9 @@ result/quadmix_20250525_143022/
 | `scripts/essential_proxy_runner.py` | 代理模型训练、token cache、多卡调度 |
 | `scripts/preprocess_essential_web_v1_sharded.py` | 数据预处理 |
 | `scripts/download_essential_web.py` | 原始数据下载 |
-| `scripts/demo_run_quick.sh` | 快速验证脚本（2 exp） |
-| `scripts/demo_run_npu.sh` | 正式配置测试（20 exp, 25000 steps, 论文值） |
-| `scripts/demo_run_full.sh` | 完整论文配置脚本（3000 exp） |
+| `scripts/demo_run_cpu.sh` | CPU 快速验证脚本（~1-2min） |
+| `scripts/demo_run_quick.sh` | NPU 快速验证脚本（~3-5min） |
+| `scripts/demo_run_full.sh` | 中等规模验证脚本（~2-4h） |
 | `src/quadmix/npu/device.py` | NPU 设备抽象层（try-import torch_npu） |
 | `src/quadmix/data/metadata_manager.py` | Shard 元数据管理（~15GB 常驻内存） |
 | `src/quadmix/core/proxy_model.py` | tinyllama_1M 代理模型 |

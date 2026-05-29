@@ -38,9 +38,9 @@ quadmix/
 │   ├── essential_proxy_runner.py   # Proxy runner: precompute + batch loop + cache
 │   ├── download_essential_web.py   # Download tool
 │   ├── validation_set/             # Reference scripts for validation set prep
-│   ├── demo_run_quick.sh           # Quick demo (~1-2min, CPU)
-│   ├── demo_run_npu.sh             # Medium demo (~15-30min, 8x NPU, 100 shards)
-│   └── demo_run_full.sh            # Full demo (paper config, GPU/NPU)
+│   ├── demo_run_cpu.sh            # CPU 快速验证 (~1-2min)
+│   ├── demo_run_quick.sh          # NPU 快速验证 (~3-5min, 8x NPU)
+│   └── demo_run_full.sh           # 中等规模验证 (~2-4h, GPU/NPU)
 ├── result/                     # Final results (one dir per run)
 │   └── quadmix_YYYYMMDD_HHMMSS/
 │       ├── optimal_parameters.json
@@ -488,14 +488,14 @@ export HF_ENDPOINT=https://hf-mirror.com  # For users in China
 ## CLI Usage
 
 ```bash
-# Quick test (20 experiments, CPU, ~1-2min)
+# Quick test (CPU, ~1-2min)
+bash scripts/demo_run_cpu.sh
+
+# NPU quick test (~3-5min, 8x NPU)
 bash scripts/demo_run_quick.sh
 
-# Medium test (200 experiments, 8x NPU, ~15-30min)
-bash scripts/demo_run_npu.sh
-
-# Full run (3000 experiments, paper config, ~15h on 8x NPU)
-bash scripts/demo_run_full.sh --device-type npu --npu-devices 8
+# Medium test (~2-4h, GPU/NPU)
+bash scripts/demo_run_full.sh
 
 # Custom parameters
 python scripts/run_essential_web_v1.py \
@@ -511,9 +511,9 @@ python scripts/run_essential_web_v1.py \
 
 | Script | Shards | Experiments | Device | Steps | Time | Use Case |
 |--------|--------|-------------|--------|-------|------|----------|
-| `demo_run_quick.sh` | 2 | 20 | CPU | 3 (tiny) | ~1-2min | CI, smoke test |
-| `demo_run_npu.sh` | 100 | 20 | 8x NPU | 25000 (full) | ~10-20min | NPU validation, 论文配置 |
-| `demo_run_full.sh` | 2000 | 3000 | GPU/NPU | 25000 (full) | ~15h (8x) | Production |
+| `demo_run_cpu.sh` | 3 | 20 | CPU | 3 (tiny) | ~1-2min | CI, smoke test |
+| `demo_run_quick.sh` | 20 | 8 | 8x NPU | 10 (tiny) | ~3-5min | 轻量级验证 |
+| `demo_run_full.sh` | 100 | 50 | GPU/NPU | 1000 (tiny) | ~2-4h | 中等规模验证 |
 
 ## Key Dependencies
 

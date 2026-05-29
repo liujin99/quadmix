@@ -244,8 +244,12 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         self._memory_cache_lru: List[int] = []  # sids in access order (head = LRU)
 
     def _tokenize_texts(self, texts: List[str]) -> torch.Tensor:
-        """Tokenize a list of texts into [M, block_size] int64 tensor."""
-        B = 500  # batch size for tokenizer
+        """Tokenize a list of texts into [M, block_size] int64 tensor.
+
+        Single-threaded batch mode — called from within worker processes
+        in _tokenize_shard_parallel, so don't spawn subprocesses here.
+        """
+        B = 500
         all_ids = []
         for i in range(0, len(texts), B):
             batch = texts[i:i + B]
@@ -538,25 +542,23 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         else:
             print(f"[BatchTokenize] {total_miss_rows:,} miss rows across {len(shard_miss_info)} shards")
 
-        # ── Step 3: Batch read parquet + tokenize (each shard ONCE) ───────
+        # ── Step 3: Batch read parquet + tokenize (ALL shards in parallel) ──
         if shard_miss_info:
             read_t0 = time.time()
-            for sid, (shard_path, miss_rows_arr) in shard_miss_info.items():
-                # Read all miss rows from parquet in ONE call
-                df_shard = pd.read_parquet(
-                    shard_path,
-                    columns=["row_in_shard", "text"],
-                    filters=[("row_in_shard", "in", miss_rows_arr.tolist())],
-                )
-                df_shard = df_shard.sort_values("row_in_shard")
-                texts = df_shard["text"].astype(str).tolist()
-                parsed_rows = df_shard["row_in_shard"].to_numpy(dtype=np.int64)
 
-                # Tokenize batch
-                tokenize_t0 = time.time()
-                miss_tokens = self._tokenize_texts(texts).numpy().astype(np.int32)
-                tokenize_time = time.time() - tokenize_t0
+            # Build shard tasks list
+            shard_tasks = [
+                (sid, shard_path, miss_rows_arr.tolist())
+                for sid, (shard_path, miss_rows_arr) in shard_miss_info.items()
+            ]
 
+            # Parallel tokenize across ALL shards
+            parallel_results = _tokenize_shard_parallel(
+                shard_tasks, self.tokenizer.name_or_path, self.block_size
+            )
+
+            # Process results
+            for sid, parsed_rows, miss_tokens, io_time, tokenize_time, total_time in parallel_results:
                 # Add to memory_cache
                 self._memory_cache_add_rows(sid, parsed_rows, miss_tokens)
 
@@ -567,10 +569,10 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                     # Fallback: immediate write (blocking)
                     self._cache_add_rows(sid, parsed_rows, torch.from_numpy(miss_tokens))
 
-                print(f"  [Shard {sid}] {len(texts):,} docs tokenized ({tokenize_time:.1f}s)")
+                print(f"  [Shard {sid}] {len(parsed_rows):,} docs (IO {io_time:.1f}s, tok {tokenize_time:.1f}s, total {total_time:.1f}s)")
 
             read_time = time.time() - read_t0
-            print(f"[BatchTokenize] Parquet read + tokenize: {read_time:.1f}s")
+            print(f"[BatchTokenize] Parquet read + tokenize (parallel): {read_time:.1f}s")
 
         # ── Step 4: Pack each exp's tokens from memory_cache ───────────────
         exp_token_paths: Dict[int, str] = {}
@@ -994,7 +996,12 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         val_mask = self._val_loss_mask[:val_n, :bs].to(device)
 
         with torch.no_grad():
-            val_bs = min(1024, val_n)  # 1M model is tiny, maximize throughput
+            # Cap val batch size to avoid OOM on NPU.
+            # bottleneck: lm_head produces logits (B, T, vocab)
+            # tinyllama_1M: T=2048, vocab=50432 → B * 2048 * 50432 * 4 bytes
+            # → B=50 → ~20GiB logits; B=100 → ~40GiB
+            # attention matmul: B * n_head * T * T * 4 → B=50 → ~6.7GiB (OK)
+            val_bs = min(50, val_n)
             per_doc_losses = []
             for start in range(0, len(val_tokens), val_bs):
                 end = min(start + val_bs, len(val_tokens))
@@ -1530,21 +1537,40 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         dispatcher_thread.start()
 
         # ── 3. Collector Thread ────────────────
+        alive_workers = {"count": num_workers}
+
         def collector_thread_func():
             """Collect results from result queue."""
             nonlocal completed_count
             while completed_count < n_exp:
                 try:
                     result = result_queue.get(timeout=1.0)
-                    if result is not None:
-                        eid = result.metadata["experiment_id"]
-                        all_results[eid] = result
-                        completed_count += 1
+                    if result is None:
+                        # Worker finished (normal shutdown or crash)
+                        alive_workers["count"] -= 1
+                        if alive_workers["count"] <= 0 and completed_count < n_exp:
+                            # All workers done but not all results received
+                            missing = [i for i in range(n_exp) if all_results[i] is None]
+                            print(f"[Collector] Workers exited; {completed_count}/{n_exp} results, "
+                                  f"{len(missing)} missing (exps: {missing})")
+                            # Fill missing with inf loss so pipeline can continue
+                            for eid in missing:
+                                all_results[eid] = ProxyResult(
+                                    parameters=params_list[eid],
+                                    validation_loss=float('inf'),
+                                    metadata={"experiment_id": eid, "error": "worker_crash"}
+                                )
+                                completed_count += 1
+                            break
+                        continue
+                    eid = result.metadata["experiment_id"]
+                    all_results[eid] = result
+                    completed_count += 1
 
-                        elapsed = time.time() - t_start
-                        eta = (n_exp - completed_count) * elapsed / max(1, completed_count)
-                        if completed_count % 50 == 0 or completed_count == n_exp:
-                            print(f"[Collector] {completed_count}/{n_exp} done ({elapsed:.0f}s, ETA: {eta:.0f}s)")
+                    elapsed = time.time() - t_start
+                    eta = (n_exp - completed_count) * elapsed / max(1, completed_count)
+                    if completed_count % 50 == 0 or completed_count == n_exp:
+                        print(f"[Collector] {completed_count}/{n_exp} done ({elapsed:.0f}s, ETA: {eta:.0f}s)")
                 except:
                     pass
 
@@ -1587,6 +1613,197 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             print(f"[SharedMem] Cleaned up {len(shared_meta)} shared memory blocks")
 
         return all_results
+
+
+def _io_read_shard(
+        sid: int,
+        shard_path: str,
+        miss_rows: List[int],
+) -> Tuple[int, np.ndarray, List[str], float]:
+    """Stage 1 worker: read one shard's parquet, return (sid, rows, texts, io_time)."""
+    import pandas as pd
+    io_t0 = time.time()
+    df_shard = pd.read_parquet(
+        shard_path,
+        columns=["row_in_shard", "text"],
+        filters=[("row_in_shard", "in", miss_rows)],
+    )
+    df_shard = df_shard.sort_values("row_in_shard")
+    texts = df_shard["text"].astype(str).tolist()
+    parsed_rows = df_shard["row_in_shard"].to_numpy(dtype=np.int64)
+    io_time = time.time() - io_t0
+    return (sid, parsed_rows, texts, io_time)
+
+
+def _tokenize_shard_parallel(
+        shard_tasks: List[Tuple[int, str, List[int]]],
+        tokenizer_path: str,
+        block_size: int,
+) -> List[Tuple[int, np.ndarray, np.ndarray, float, float, float]]:
+    """Two-stage parallel tokenize:
+      Stage 1: IO — read all shards in parallel (1 process per shard)
+      Stage 2: Tokenize — split ALL texts into fine-grained chunks,
+                run many worker processes (~96 on 190-core machine)
+      Returns list of (sid, rows, tokens_int32, io_time, tok_time, total_time).
+    """
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    n_shards = len(shard_tasks)
+    num_cpus = mp.cpu_count() or 8
+
+    # ── Stage 1: Parallel IO ─────────────────────────────────────
+    io_t0 = time.time()
+    io_results = {}  # sid -> (parsed_rows, texts, io_time)
+    with ProcessPoolExecutor(max_workers=n_shards) as executor:
+        futures = {}
+        for sid, shard_path, miss_rows in shard_tasks:
+            fut = executor.submit(_io_read_shard, sid, shard_path, miss_rows)
+            futures[fut] = sid
+        for fut in as_completed(futures):
+            sid, parsed_rows, texts, io_time = fut.result()
+            io_results[sid] = (parsed_rows, texts, io_time)
+    io_total = time.time() - io_t0
+    print(f"  [ParallelTokenize] Stage 1 IO: {n_shards} shards read in {io_total:.1f}s")
+
+    # ── Stage 2: Fine-grained parallel tokenize ──────────────────
+    # Collect all texts across shards, preserving shard membership
+    # Each item: (sid, text_index, text)
+    flat_items: List[Tuple[int, int, str]] = []
+    for sid in sorted(io_results.keys()):
+        parsed_rows, texts, io_time = io_results[sid]
+        for idx, text in enumerate(texts):
+            flat_items.append((sid, idx, text))
+
+    total_docs = len(flat_items)
+
+    # Optimal worker count: encode_batch is internally multi-threaded
+    # so fewer processes avoid oversubscription. On 190-core machine:
+    #   16 workers, each using ~10 internal threads = ~160 cores utilized
+    env_workers = int(os.environ.get("TOKENIZE_WORKERS", "0"))
+    if env_workers >= 1:
+        n_workers = env_workers
+    else:
+        n_workers = min(16, total_docs // 5000, num_cpus)
+        n_workers = max(4, n_workers)
+
+    chunk_size = max(1000, total_docs // n_workers)
+    n_chunks = (total_docs + chunk_size - 1) // chunk_size
+
+    # Split into chunks
+    chunks = []
+    for i in range(0, total_docs, chunk_size):
+        chunk = flat_items[i:i + chunk_size]
+        chunks.append(chunk)
+
+    print(f"  [ParallelTokenize] Stage 2 tokenize: {total_docs:,} docs, "
+          f"{len(chunks)} chunks x ~{chunk_size}, {n_workers} workers")
+
+    tok_t0 = time.time()
+    # Use array-based IPC: returns (meta, np.array) instead of list of tuples
+    # This dramatically reduces serialization overhead (contiguous memory vs 200K Python lists)
+    chunk_results_meta = []  # List of (sid, idx) pairs
+    chunk_results_arrays = []  # List of np.array[N_chunk x block_size]
+    with ProcessPoolExecutor(max_workers=n_workers) as executor:
+        futures = []
+        for chunk in chunks:
+            fut = executor.submit(_tokenize_chunk_to_array, chunk, tokenizer_path, block_size)
+            futures.append(fut)
+        for fut in as_completed(futures):
+            meta, arr = fut.result()
+            chunk_results_meta.extend(meta)
+            chunk_results_arrays.append(arr)
+    tok_total = time.time() - tok_t0
+    print(f"  [ParallelTokenize] Stage 2 tokenize: {total_docs:,} docs in {tok_total:.1f}s "
+          f"({total_docs / tok_total:.0f} docs/s)")
+
+    # ── Reassemble per-shard results ─────────────────────────────
+    # Concatenate all arrays, then group by (sid, idx)
+    # Build index: (sid, idx) -> row in concatenated array
+    all_tokens = np.concatenate(chunk_results_arrays, axis=0)
+    index_map: Dict[Tuple[int, int], int] = {}
+    for row_i, (sid, idx) in enumerate(chunk_results_meta):
+        index_map[(sid, idx)] = row_i
+
+    final_results = []
+    for sid in sorted(io_results.keys()):
+        parsed_rows, texts, io_time = io_results[sid]
+        # Build tokens array in original order
+        indices = [index_map[(sid, idx)] for idx in range(len(texts))]
+        miss_tokens = all_tokens[indices]  # fancy index -> (N, block_size) array
+        # tok_time attributed proportionally (all shards share the tokenize pool)
+        this_tok_time = tok_total  # wall time for the whole pool
+        total_time = io_total + tok_total
+        final_results.append((sid, parsed_rows, miss_tokens, io_time, tok_total, total_time))
+
+    return final_results
+
+
+def _tokenize_chunk_with_meta(
+        chunk: List[Tuple[int, int, str]],
+        tokenizer_path: str,
+        block_size: int,
+) -> List[Tuple[int, int, List[int]]]:
+    """Tokenize a chunk of (sid, idx, text) items. Returns (sid, idx, token_ids).
+
+    Uses the Rust-based tokenizers library directly for max throughput.
+    """
+    from tokenizers import Tokenizer
+
+    tok = Tokenizer.from_pretrained(tokenizer_path)
+
+    # Extract texts in order
+    texts = [item[2] for item in chunk]
+
+    # encode_batch is internally multi-threaded
+    encodings = tok.encode_batch(texts)
+
+    # GPT-NeoX uses EOS token 50256 as pad
+    PAD_TOKEN = 50256
+
+    # Pair back with (sid, idx), truncate/pad to block_size
+    results = []
+    for (sid, idx, _), enc in zip(chunk, encodings):
+        ids = list(enc.ids)
+        # Truncate
+        if len(ids) > block_size:
+            ids = ids[:block_size]
+        # Pad (avoid slow per-element append)
+        if len(ids) < block_size:
+            ids = ids + [PAD_TOKEN] * (block_size - len(ids))
+        results.append((sid, idx, ids))
+    return results
+
+
+def _tokenize_chunk_to_array(
+        chunk: List[Tuple[int, int, str]],
+        tokenizer_path: str,
+        block_size: int,
+) -> Tuple[List[Tuple[int, int]], np.ndarray]:
+    """Tokenize a chunk, returning compact numpy array instead of per-doc lists.
+
+    Returns ((sid, idx) pairs, np.array[N x block_size, dtype=int32]).
+    This reduces IPC overhead from ~1.6GB of Python objects to ~1.6GB of contiguous
+    shared memory that gets pickled once.
+    """
+    from tokenizers import Tokenizer
+
+    tok = Tokenizer.from_pretrained(tokenizer_path)
+    texts = [item[2] for item in chunk]
+    encodings = tok.encode_batch(texts)
+
+    PAD_TOKEN = 50256
+    N = len(chunk)
+    # Pre-allocate with padding
+    tokens_array = np.full((N, block_size), PAD_TOKEN, dtype=np.int32)
+
+    meta = []
+    for (i, (sid, idx, _)), enc in zip(enumerate(chunk), encodings):
+        ids = list(enc.ids)
+        n = min(len(ids), block_size)
+        tokens_array[i, :n] = ids[:n]
+        meta.append((sid, idx))
+
+    return meta, tokens_array
 
 
 def _worker_dynamic_loop(
@@ -1702,6 +1919,14 @@ def _worker_dynamic_loop(
                 ef.write(f"[Worker {worker_id}] CRASH: {top_err}\n")
                 ef.write(traceback.format_exc())
             print(f"[Worker {worker_id}] ERROR -> {err_path}", flush=True)
+        except:
+            pass
+        # Put error results for any tasks that were not completed,
+        # so collector doesn't hang waiting forever.
+        # We don't know which specific exp failed (could be any pending),
+        # but at minimum signal completion to unblock the collector.
+        try:
+            result_queue.put(None)
         except:
             pass
         sys.exit(1)

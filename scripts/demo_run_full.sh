@@ -1,26 +1,38 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────────
-# Demo: QuaDMix Full — 完整论文配置，验证算法正确性 & 有效性
+# Demo: QuaDMix Full — 中等规模验证，适合 NPU 集群
 # ──────────────────────────────────────────────────────────────
-# 目标：完全按照 arXiv:2504.16511 的配置运行
+# 目标：100 shards (~7.9B tokens)，50 实验，1000 步
 # 数据不存在则自动下载 + 预处理
 #
-# 需要 GPU（CPU 不可行，每实验 ~5s → >4 小时）
+# 需要 GPU/NPU（CPU 不可行）
 #
 # Usage:
 #   CUDA_VISIBLE_DEVICES=0 bash scripts/demo_run_full.sh
 #
-# 8 张 NPU 并行（需要 NPU 环境 + --npu-devices 参数）：
+# 8 张 NPU 并行：
 #   bash scripts/demo_run_full.sh --device-type npu --npu-devices 8
 #
-# 如需控制下载数据量（默认为 2000 shards，~158B tokens）：
-#   NUM_SHARDS=100 bash scripts/demo_run_full.sh
+# 自定义规模：
+#   NUM_SHARDS=200 bash scripts/demo_run_full.sh
+#   NUM_EXPERIMENTS=100 bash scripts/demo_run_full.sh
 #
 # 最终输出数据集大小（target_tokens，单位 B）：
 #   bash scripts/demo_run_full.sh --target-tokens 10  # 输出 ~10B tokens
+#
+# 缓存控制：
+#   CLEAN_PREPROCESSED=1 — 强制清理预处理目录后重新预处理
+#   CLEAN_PREPROCESSED=0 — 强制不清理（默认 auto：旧 shard 多于当前时自动清理）
+#   CLEAN_TOKEN_CACHE=0  — 不清理 token cache（默认清理）
+#
 # ──────────────────────────────────────────────────────────────
 
 set -euo pipefail
+
+# ── 使用 conda nano 环境（包含 pyarrow 等依赖）─────────────
+if command -v conda &>/dev/null; then
+    eval "$(conda shell.bash hook 2>/dev/null)" && conda activate nano
+fi
 
 QUADMIX_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 export PATH="$HOME/.local/bin:$PATH"
@@ -64,7 +76,8 @@ fi
 # 每 shard ≈ 79M tokens (char//4) / 246 MB 原始 parquet
 # 完整 3291 shards ≈ 260B tokens / 791 GB
 # 如果通过环境变量 $NUM_SHARDS 控制下载量：
-NUM_SHARDS="${NUM_SHARDS:-2000}"
+NUM_SHARDS="${NUM_SHARDS:-100}"
+NUM_EXPERIMENTS="${NUM_EXPERIMENTS:-50}"
 TOKEN_ESTIMATE=$(( NUM_SHARDS * 79000000 ))
 TOKEN_ESTIMATE_B=$(echo "scale=1; $TOKEN_ESTIMATE / 1000000000" | bc 2>/dev/null || echo "~$(( TOKEN_ESTIMATE / 1000000000 ))")
 echo "  [配置] 将使用 ~$NUM_SHARDS shards（~$TOKEN_ESTIMATE_B B tokens）"
@@ -99,10 +112,53 @@ if [ $NEED_DOWNLOAD -eq 1 ]; then
     echo ""
 fi
 
-# 检查是否需要预处理（shard 数量变化或首次运行）
-if [ $NEED_DOWNLOAD -eq 1 ] || [ ! -f "$PREPROCESSED_DIR/shard_index.json" ]; then
+# ── 缓存清理 + 预处理 ──────────────────────────────────────────────
+# CLEAN_PREPROCESSED: 强制清理 preprocessed/ 目录（默认自动检测）
+#   - 旧 shard 数量 > 当前 NUM_SHARDS 时自动清理（防止旧文件残留）
+#   - 设为 1 强制清理，设为 0 强制不清
+# CLEAN_TOKEN_CACHE:  清理 token_cache/ 目录（默认清理）
+CLEAN_PREPROCESSED="${CLEAN_PREPROCESSED:-auto}"
+CLEAN_TOKEN_CACHE="${CLEAN_TOKEN_CACHE:-1}"
+RUN_PREPROCESS=0
+
+TOKEN_CACHE_DIR="$QUADMIX_TEMP_DIR/token_cache"
+
+# 自动检测 shard 数量是否变化（减少时需要清理旧文件）
+NEED_CLEAN_PREPROCESSED=0
+if [ "$CLEAN_PREPROCESSED" = "1" ]; then
+    NEED_CLEAN_PREPROCESSED=1
+elif [ "$CLEAN_PREPROCESSED" = "0" ]; then
+    NEED_CLEAN_PREPROCESSED=0
+elif [ -f "$PREPROCESSED_DIR/shard_index.json" ]; then
+    OLD_SHARDS=$(python3 -c "import json; print(json.load(open('$PREPROCESSED_DIR/shard_index.json'))['num_shards'])" 2>/dev/null || echo 0)
+    if [ "$OLD_SHARDS" -gt "$NUM_SHARDS" ]; then
+        NEED_CLEAN_PREPROCESSED=1
+        echo ""
+        echo "  [警告] 旧预处理有 $OLD_SHARDS 个 shard，当前只需 $NUM_SHARDS 个"
+        echo "         将自动清理旧预处理目录防止残留文件干扰"
+    fi
+fi
+
+# 是否需要预处理：清理预处理目录 或 索引不存在
+if [ $NEED_CLEAN_PREPROCESSED -eq 1 ]; then
+    RUN_PREPROCESS=1
+elif [ ! -f "$PREPROCESSED_DIR/shard_index.json" ]; then
+    RUN_PREPROCESS=1
+fi
+
+if [ $RUN_PREPROCESS -eq 1 ]; then
+    echo ""
     echo "╔══ 预处理数据 ═══╗"
     echo ""
+    if [ $NEED_CLEAN_PREPROCESSED -eq 1 ] && [ -d "$PREPROCESSED_DIR" ]; then
+        echo "  [清理] 预处理目录: $PREPROCESSED_DIR"
+        rm -rf "$PREPROCESSED_DIR"
+    fi
+    if [ "$CLEAN_TOKEN_CACHE" = "1" ] && [ -d "$TOKEN_CACHE_DIR" ]; then
+        echo "  [清理] token cache 目录: $TOKEN_CACHE_DIR"
+        rm -rf "$TOKEN_CACHE_DIR"
+    fi
+    mkdir -p "$PREPROCESSED_DIR"
     echo "  运行多 shard 预处理脚本..."
     python3 "$QUADMIX_DIR/scripts/preprocess_essential_web_v1_sharded.py" \
         --input-dir "$RAW_DATA_DIR" \
@@ -111,37 +167,38 @@ if [ $NEED_DOWNLOAD -eq 1 ] || [ ! -f "$PREPROCESSED_DIR/shard_index.json" ]; th
     echo ""
     echo "╚══════════════════════════════════════╝"
     echo ""
+elif [ "$CLEAN_TOKEN_CACHE" = "1" ] && [ -d "$TOKEN_CACHE_DIR" ]; then
+    echo "  [清理] token cache 目录: $TOKEN_CACHE_DIR"
+    rm -rf "$TOKEN_CACHE_DIR"
 fi
 
 OUTPUT_DIR="${OUTPUT_DIR:-$QUADMIX_DIR/result/demo_full_$(date +%Y%m%d_%H%M%S)}"
 
 echo "═══════════════════════════════════════════"
-echo "  QuaDMix Demo — Full"
-echo "  完整论文配置 (arXiv:2504.16511)"
+echo "  QuaDMix Demo — Full (中等规模)"
+echo "  100 shards, $NUM_EXPERIMENTS 实验, 1000 步"
 echo "═══════════════════════════════════════════"
 cat << PARAMS
 
   Output:  $OUTPUT_DIR
 
   ┌────────────────────────────┬──────────────┐
-  │ 参数                       │  论文值      │
+  │ 参数                       │  值          │
   ├────────────────────────────┼──────────────┤
-  │ 实验数                     │       3,000  │
-  │ 搜索点                     │     100,000  │
-  │ Top-K 平均                 │          10  │
-  │ seq_len (block_size)       │       2,048  │
-  │ 文档数                     │   全量 167K  │
-  │ 训练步数                   │      25,000  │
-  │ 全局 batch size            │         512  │
-  │ 微批大小                   │           4  │
-  │ 验证集文档数               │       1,000  │
-  │ 排名参考集大小             │      10,000  │
+  │ Shards                     │        $NUM_SHARDS  │
+  │ 实验数                     │ $NUM_EXPERIMENTS  │
+  │ 搜索点                     │       5,000  │
+  │ Top-K 平均                 │           5  │
+  │ seq_len (block_size)       │       2,048  │ ← 论文值
+  │ 训练步数                   │       1,000  │ ← 中等规模
+  │ 全局 batch size            │         512  │ ← 论文值
+  │ 微批大小                   │           4  │ ← 论文值
+  │ 验证集文档数               │       1,000  │ ← 论文值
+  │ 排名参考集大小             │      10,000  │ ← 论文值
   │ 代理模型                   │  tinyllama_1M│
-  │                            │ (1.3M non-emb│
-  │                            │  RMSNorm+    │
-  │                            │  SwiGLU)    │
   └────────────────────────────┴──────────────┘
 
+  ⏱ 预计耗时: ~2.5-4 小时 ($NUM_EXPERIMENTS exp × ~3-5min/exp on NPU)
 PARAMS
 
 if [ -z "$CUDA_VISIBLE_DEVICES" ]; then
@@ -154,7 +211,7 @@ if [ -z "$CUDA_VISIBLE_DEVICES" ]; then
         echo "  ⚠ 当前为 CPU 模式，预计耗时 >4 小时！"
         echo "     建议: CUDA_VISIBLE_DEVICES=0 bash scripts/demo_run_full.sh"
         echo ""
-        echo "     CPU 试跑: bash scripts/demo_run_quick.sh  # 快速验证流程"
+        echo "     CPU 试跑: bash scripts/demo_run_cpu.sh  # 快速验证流程"
         echo ""
     fi
 else
@@ -164,14 +221,15 @@ fi
 
 python3 "$QUADMIX_DIR/scripts/run_essential_web_v1.py" \
     --preprocessed-dir "$PREPROCESSED_DIR" \
-    --full \
+    --num-experiments "$NUM_EXPERIMENTS" \
+    --num-search 5000 \
+    --top-k 5 \
     --block-size 2048 \
-    --tiny-steps 0 \
+    --tiny-steps 1000 \
     --micro-batch-size 4 \
     --global-batch-size 512 \
     --val-limit 1000 \
     --rank-ref-size 10000 \
-    --top-k 10 \
     --output "$OUTPUT_DIR" \
     $DEVICE_ARG \
     "$@" || exit $?

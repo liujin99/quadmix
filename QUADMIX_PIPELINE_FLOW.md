@@ -482,31 +482,38 @@ temp/
 
 ## 六、Shell 包装脚本
 
-### demo_run_quick.sh
+### demo_run_cpu.sh
 
 ```
-参数: 20 experiments, 200 search, block_size=64 (num-experiments 改为 20，LightGBM 需要足够样本)
+参数: 20 experiments, 200 search, block_size=64 (CPU 快速验证)
 时间: ~1-2分钟 (CPU)
 用途: 快速验证架构是否正确
 注: 无 doc_limit，proxy experiments 使用完整数据池
 ```
 
+### demo_run_quick.sh
+
+```
+参数: 8 experiments, 1000 search, block_size=2048, tiny_steps=10
+时间: ~3-5分钟 (8x NPU)
+用途: 轻量级验证，端到端流程测试
+```
+
 ### demo_run_full.sh
 
 ```
-参数: 3000 experiments, 100000 search, block_size=2048
-时间: 需 GPU/NPU (连续 3000 次代理模型训练)
-用途: 论文配置，真实优化
+参数: 50 experiments, 5000 search, block_size=2048, tiny_steps=1000
+时间: ~2-4h (GPU/NPU)
+用途: 中等规模验证
 
 多卡并行 (--npu-devices N):
   动态任务队列架构：
     - Worker 完成任务后立即领取下一个，无批次边界
     - 快的 Worker 自然做更多实验
     - CPU tokenize 线程独立运行，与 NPU 训练重叠
-  耗时: 单卡 ~100h → 8x NPU ~15h (约 8x 加速)
 ```
 
-两个脚本都会自动：
+三个脚本都会自动：
 1. 检查数据是否存在（`data/essential-web/`）
 2. 检查预处理是否完成（`temp/preprocessed/shard_index.json`）
 3. 缺失则自动下载 + 预处理

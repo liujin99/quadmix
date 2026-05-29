@@ -449,8 +449,8 @@ class QuaDMixPipeline:
 
         # Get total tokens estimate (from metadata_manager if available)
         total_tokens_est = None
-        if metadata_manager is not None:
-            total_tokens_est = metadata_manager.get_total_tokens_estimate()
+        if mm is not None:
+            total_tokens_est = mm.get_total_tokens_estimate()
         elif token_counts is not None:
             total_tokens_est = int(np.sum(token_counts))
 
