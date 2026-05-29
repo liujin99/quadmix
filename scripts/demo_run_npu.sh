@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────────
-# Demo: QuaDMix 8x NPU — 中等规模测试，适合 NPU 集群验证
+# Demo: QuaDMix 8x NPU — 小规模快速测试，适合 NPU 集群验证
 # ──────────────────────────────────────────────────────────────
-# 目标：100 shards (~7.9B tokens)，8 NPU 并行，验证多卡调度
+# 目标：20 shards (~1.6B tokens)，8 NPU 并行，500 步快速验证
 # 数据不存在则自动下载 + 预处理
 #
 # Usage:
@@ -58,8 +58,8 @@ fi
 
 # ── 下载规模控制 ──────────────────────────────────
 # 每 shard ≈ 79M tokens (char//4) / 246 MB 原始 parquet
-# 100 shards ≈ 7.9B tokens / 24.6 GB
-NUM_SHARDS="${NUM_SHARDS:-100}"
+# 20 shards ≈ 1.6B tokens / 4.9 GB
+NUM_SHARDS="${NUM_SHARDS:-20}"
 TOKEN_ESTIMATE=$(( NUM_SHARDS * 79000000 ))
 TOKEN_ESTIMATE_B=$(echo "scale=1; $TOKEN_ESTIMATE / 1000000000" | bc 2>/dev/null || echo "~$(( TOKEN_ESTIMATE / 1000000000 ))")
 
@@ -122,7 +122,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-$QUADMIX_DIR/result/demo_8xnpu_$(date +%Y%m%d_%H%M%S)}
 
 echo "═══════════════════════════════════════════"
 echo "  QuaDMix Demo — 8x NPU"
-echo "  正式训练配置验证 (100 shards, 8 NPU)"
+echo "  快速验证 (20 shards, 500 steps)"
 echo "═══════════════════════════════════════════"
 cat << PARAMS
 
@@ -133,11 +133,11 @@ cat << PARAMS
   ├────────────────────────────┼──────────────┤
   │ Shards                     │        $NUM_SHARDS  │
   │ NPU 设备                   │         $NPU_DEVICES  │
-  │ 实验数                     │          20  │
+  │ 实验数                     │          10  │
   │ 搜索点                     │       1,000  │
   │ Top-K 平均                 │           3  │
   │ seq_len (block_size)       │       2,048  │ ← 论文值
-  │ 训练步数                   │      25,000  │ ← 论文值 (完整训练)
+  │ 训练步数                   │         500  │ ← 快速验证
   │ 全局 batch size            │         512  │ ← 论文值
   │ 微批大小                   │           4  │ ← 论文值
   │ 验证集文档数               │       1,000  │ ← 论文值
@@ -145,8 +145,8 @@ cat << PARAMS
   │ 代理模型                   │  tinyllama_1M│
   └────────────────────────────┴──────────────┘
 
-  ⏱ 预计耗时: ~10-20 分钟 (20 exp × ~3-5min/exp on NPU)
-  ⚠ 注意: 使用完整训练配置 (25000 steps)，非 tiny 模式
+  ⏱ 预计耗时: ~3-5 分钟 (10 exp × 500 steps on NPU)
+  ⚠ 快速验证模式 (500 steps)，完整训练用 --tiny-steps 0
 PARAMS
 
 # 检查 NPU 环境
@@ -169,7 +169,7 @@ python3 "$QUADMIX_DIR/scripts/run_essential_web_v1.py" \
     --num-search 1000 \
     --top-k 3 \
     --block-size 2048 \
-    --tiny-steps 0 \
+    --tiny-steps 500 \
     --micro-batch-size 4 \
     --global-batch-size 512 \
     --val-limit 1000 \

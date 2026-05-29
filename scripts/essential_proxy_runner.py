@@ -50,10 +50,12 @@ DEFAULT_TEMP_DIR = os.environ.get(
 )
 DEFAULT_TOKEN_CACHE_DIR = os.path.join(DEFAULT_TEMP_DIR, "token_cache")
 
+
 # ── Shared memory helpers (avoids re-reading 15GB+ metadata per worker) ──────
 
 class SharedArrayInfo:
     """Descriptor for a numpy array in shared memory — pickle-safe for mp."""
+
     def __init__(self, name: str, shape: tuple, dtype: str, nbytes: int):
         self.name = name
         self.shape = shape
@@ -70,9 +72,15 @@ def ndarray_to_shared(arr: np.ndarray, prefix: str) -> SharedArrayInfo:
 
 
 def shared_to_ndarray(info: SharedArrayInfo) -> np.ndarray:
-    """Map shared memory back to numpy array (read-only is fine)."""
+    """Map shared memory back to numpy array.
+
+    IMPORTANT: Return a COPY to avoid segfault when numpy operations
+    (slicing, normalization) access shared memory buffer in spawn children.
+    """
     shm = mp.shared_memory.SharedMemory(name=info.name)
-    return np.ndarray(shape=info.shape, dtype=np.dtype(info.dtype), buffer=shm.buf)
+    arr = np.ndarray(shape=info.shape, dtype=np.dtype(info.dtype), buffer=shm.buf)
+    # Copy data to local memory to avoid shared memory segfault
+    return arr.copy()
 
 
 class EssentialWebProxyRunner(BaseProxyRunner):
@@ -309,7 +317,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         self._memory_cache_lru.append(sid)  # Most recently used
 
         # Evict LRU entries if over limit
-        max_bytes = int(self.memory_cache_max_gb * 1024**3)
+        max_bytes = int(self.memory_cache_max_gb * 1024 ** 3)
         while self._memory_cache_bytes > max_bytes and self._memory_cache_lru:
             victim_sid = self._memory_cache_lru.pop(0)  # Least recently used
             if victim_sid in self._memory_cache:
@@ -1362,7 +1370,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 if hasattr(self, '_normalized_quality') and self._normalized_quality is not None:
                     shared_meta["normalized_quality"] = ndarray_to_shared(
                         self._normalized_quality, f"nq_{os.getpid()}")
-                total_gb = sum(v.nbytes for v in shared_meta.values()) / (1024**3)
+                total_gb = sum(v.nbytes for v in shared_meta.values()) / (1024 ** 3)
                 print(f"[SharedMem] Packed {total_gb:.1f} GB metadata for {num_workers} workers")
             except Exception as e:
                 print(f"[SharedMem] WARNING: shared memory setup failed ({e}), "
@@ -1429,11 +1437,11 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                     )
                     batch_count += 1
 
-                    # Mark each exp as ready (immediate dispatch)
-                    for exp_id in batch_ids:
-                        with ready_cond:
+                    # Mark all batch exps as ready in ONE lock acquisition
+                    with ready_cond:
+                        for exp_id in batch_ids:
                             ready_events[exp_id] = True
-                        ready_cond.notify_all()  # wake dispatcher
+                        ready_cond.notify_all()  # wake dispatcher + main wait loop
 
                     print(f"[TokenizeThread] Batch {batch_count}: {len(batch_ids)} exps ready ({pos}-{end_pos - 1})")
 
@@ -1442,8 +1450,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                     import traceback
                     traceback.print_exc()
                     # Mark all exps in this batch as failed
-                    for exp_id in batch_ids:
-                        with ready_cond:
+                    with ready_cond:
+                        for exp_id in batch_ids:
                             ready_events[exp_id] = False
                         ready_cond.notify_all()
 
@@ -1452,7 +1460,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
             # Signal AsyncWrite thread to finish
             async_write_queue.put(None)
-            print(f"[TokenizeThread] All {n_exp} experiments tokenized in {batch_count} batches ({time.time() - t_start:.1f}s)")
+            print(
+                f"[TokenizeThread] All {n_exp} experiments tokenized in {batch_count} batches ({time.time() - t_start:.1f}s)")
 
         tokenize_thread = threading.Thread(target=tokenize_thread_func, daemon=True)
         tokenize_thread.start()
@@ -1467,7 +1476,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 ready_count = sum(1 for i in range(first_batch_end) if ready_events.get(i, False))
             if ready_count == first_batch_end:
                 break
-            if time.time() - wait_start > 300:  # 5 min timeout
+            if time.time() - wait_start > 900:  # 15 min timeout
                 with ready_cond:
                     for i in range(first_batch_end):
                         status = ready_events.get(i, None)
@@ -1560,6 +1569,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         for p in worker_processes:
             p.join(timeout=5.0)
+            print(f"[DynamicParallel] Worker {p.pid} exitcode={p.exitcode}")
 
         elapsed = time.time() - t_start
         print(f"\n[DynamicParallel] All {n_exp} experiments complete ({elapsed:.0f}s ≈ {elapsed / 60:.1f}min)")
@@ -1591,93 +1601,110 @@ def _worker_dynamic_loop(
     Uses shared memory for metadata arrays when available, avoiding
     per-worker 15GB+ parquet reload. Falls back to disk loading gracefully.
     """
-    from quadmix.data.metadata_manager import ShardMetadataManager
+    # Write marker to stderr on function entry
+    with open(f"/tmp/worker_{worker_id}_entry.log", "w") as ef:
+        ef.write(f"[Worker {worker_id}] FUNCTION ENTERED at {time.time()}")
+    try:
+        from quadmix.data.metadata_manager import ShardMetadataManager
 
-    # ── Metadata loading: shared memory or disk ──────────────────
-    shared_dl = config_dict.get("shared_domain_labels")
-    shared_qs = config_dict.get("shared_quality_scores")
-    shared_cc = config_dict.get("shared_doc_char_counts")
-    shared_nq = config_dict.get("shared_normalized_quality")
-    per_shard_info = config_dict.get("per_shard_info")
+        # ── Metadata loading: shared memory or disk ──────────────────
+        shared_dl = config_dict.get("shared_domain_labels")
+        shared_qs = config_dict.get("shared_quality_scores")
+        shared_cc = config_dict.get("shared_doc_char_counts")
+        shared_nq = config_dict.get("shared_normalized_quality")
+        per_shard_info = config_dict.get("per_shard_info")
 
-    use_shared = (shared_dl is not None and shared_qs is not None
-                  and shared_cc is not None and per_shard_info is not None)
+        use_shared = (shared_dl is not None and shared_qs is not None
+                      and shared_cc is not None and per_shard_info is not None)
 
-    if use_shared:
-        t0 = time.time()
-        # Map shared memory arrays (zero-copy, no disk read)
-        domain_labels = shared_to_ndarray(shared_dl)
-        quality_scores = shared_to_ndarray(shared_qs)
-        doc_char_counts = shared_to_ndarray(shared_cc)
+        if use_shared:
+            t0 = time.time()
+            # Map shared memory arrays (zero-copy, no disk read)
+            domain_labels = shared_to_ndarray(shared_dl)
+            quality_scores = shared_to_ndarray(shared_qs)
+            doc_char_counts = shared_to_ndarray(shared_cc)
 
-        # Reconstruct shard_starts from per_shard_info
-        shard_starts_arr = np.array(
-            [s["start_idx"] for s in per_shard_info], dtype=np.int64
-        )
+            # Reconstruct shard_starts from per_shard_info
+            shard_starts_arr = np.array(
+                [s["start_idx"] for s in per_shard_info], dtype=np.int64
+            )
 
-        mgr = ShardMetadataManager.from_shared(
-            domain_labels=domain_labels,
-            quality_scores=quality_scores,
-            doc_char_counts=doc_char_counts,
-            per_shard_info=per_shard_info,
-            shard_starts=shard_starts_arr,
-            preprocessed_dir=config_dict.get("preprocessed_dir", ""),
-        )
-        print(f"[Worker {worker_id}] Mapped {len(domain_labels):,} docs from shared memory "
-              f"({time.time() - t0:.1f}s vs ~60s disk reload)")
-    else:
-        # Fallback: reload from disk (backward compatible)
-        if config_dict.get("preprocessed_dir"):
-            mgr = ShardMetadataManager(config_dict["preprocessed_dir"])
+            mgr = ShardMetadataManager.from_shared(
+                domain_labels=domain_labels,
+                quality_scores=quality_scores,
+                doc_char_counts=doc_char_counts,
+                per_shard_info=per_shard_info,
+                shard_starts=shard_starts_arr,
+                preprocessed_dir=config_dict.get("preprocessed_dir", ""),
+            )
+            print(f"[Worker {worker_id}] Mapped {len(domain_labels):,} docs from shared memory "
+                  f"({time.time() - t0:.1f}s vs ~60s disk reload)")
         else:
-            mgr = None  # Legacy mode, no sharded metadata needed
+            # Fallback: reload from disk (backward compatible)
+            if config_dict.get("preprocessed_dir"):
+                mgr = ShardMetadataManager(config_dict["preprocessed_dir"])
+            else:
+                mgr = None  # Legacy mode, no sharded metadata needed
 
-    runner = EssentialWebProxyRunner(
-        config=config_dict["config"],
-        metadata_manager=mgr,
-        val_data_path=config_dict["val_data_path"],
-        output_dir=config_dict["output_dir"],
-        device_type=device_type,
-        npu_device_id=worker_id,  # Bind to specific NPU card
-        model_variant=config_dict["model_variant"],
-        global_batch_size=config_dict["global_batch_size"],
-        micro_batch_size=config_dict["micro_batch_size"],
-        max_step=config_dict["max_step"],
-        warmup_steps=config_dict["warmup_steps"],
-        learning_rate=config_dict["learning_rate"],
-        weight_decay=config_dict["weight_decay"],
-        grad_clip=config_dict["grad_clip"],
-        tiny_steps=config_dict["tiny_steps"],
-        doc_limit=config_dict["doc_limit"],
-        test_block_size=config_dict["test_block_size"],
-        rank_ref_size=config_dict["rank_ref_size"],
-        val_doc_limit=config_dict["val_doc_limit"],
-        token_cache_dir=config_dict["token_cache_dir"],
-    )
+        runner = EssentialWebProxyRunner(
+            config=config_dict["config"],
+            metadata_manager=mgr,
+            val_data_path=config_dict["val_data_path"],
+            output_dir=config_dict["output_dir"],
+            device_type=device_type,
+            npu_device_id=worker_id,  # Bind to specific NPU card
+            model_variant=config_dict["model_variant"],
+            global_batch_size=config_dict["global_batch_size"],
+            micro_batch_size=config_dict["micro_batch_size"],
+            max_step=config_dict["max_step"],
+            warmup_steps=config_dict["warmup_steps"],
+            learning_rate=config_dict["learning_rate"],
+            weight_decay=config_dict["weight_decay"],
+            grad_clip=config_dict["grad_clip"],
+            tiny_steps=config_dict["tiny_steps"],
+            doc_limit=config_dict["doc_limit"],
+            test_block_size=config_dict["test_block_size"],
+            rank_ref_size=config_dict["rank_ref_size"],
+            val_doc_limit=config_dict["val_doc_limit"],
+            token_cache_dir=config_dict["token_cache_dir"],
+        )
 
-    completed = 0
-    while True:
-        task = task_queue.get()  # Blocking pull
+        completed = 0
+        while True:
+            task = task_queue.get()  # Blocking pull
 
-        if task is None:
-            # Termination signal
-            print(f"[Worker {worker_id}] Shutdown, completed {completed} experiments")
-            break
+            if task is None:
+                # Termination signal
+                print(f"[Worker {worker_id}] Shutdown, completed {completed} experiments")
+                break
 
-        exp_id, params, selected_idx = task
-        print(f"[Worker {worker_id}] Running exp {exp_id}")
+            exp_id, params, selected_idx = task
+            print(f"[Worker {worker_id}] Running exp {exp_id}")
 
-        r = runner.run_experiment(params, experiment_id=exp_id, selected_idx=selected_idx)
-        result_queue.put(r)
-        completed += 1
+            r = runner.run_experiment(params, experiment_id=exp_id, selected_idx=selected_idx)
+            result_queue.put(r)
+            completed += 1
 
-        # Clean up temporary token file
-        exp_token_path = runner._get_exp_token_path(exp_id)
-        if os.path.exists(exp_token_path):
-            os.remove(exp_token_path)
-            print(f"[Worker {worker_id}] Cleaned temp file for exp {exp_id}")
+            # Clean up temporary token file
+            exp_token_path = runner._get_exp_token_path(exp_id)
+            if os.path.exists(exp_token_path):
+                os.remove(exp_token_path)
+                print(f"[Worker {worker_id}] Cleaned temp file for exp {exp_id}")
 
-    result_queue.put(None)  # Signal completion to collector
+        result_queue.put(None)  # Signal completion to collector
+
+
+    except Exception as top_err:
+        import sys, traceback
+        err_path = f"/tmp/worker_{worker_id}_error.log"
+        try:
+            with open(err_path, "w") as ef:
+                ef.write(f"[Worker {worker_id}] CRASH: {top_err}\n")
+                ef.write(traceback.format_exc())
+            print(f"[Worker {worker_id}] ERROR -> {err_path}", flush=True)
+        except:
+            pass
+        sys.exit(1)
 
 
 def test_runner_sharded():
