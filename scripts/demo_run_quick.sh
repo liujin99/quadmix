@@ -2,7 +2,7 @@
 # ──────────────────────────────────────────────────────────────
 # Demo: QuaDMix 8x NPU — 小规模快速测试，适合 NPU 集群验证
 # ──────────────────────────────────────────────────────────────
-# 目标：20 shards (~1.6B tokens)，8 NPU 并行，500 步快速验证
+# 目标：20 shards (~1.6B tokens)，8 NPU 并行，5000 步快速验证
 # 数据不存在则自动下载 + 预处理
 #
 # Usage:
@@ -158,7 +158,8 @@ if [ $RUN_PREPROCESS -eq 1 ]; then
     fi
     if [ "$CLEAN_TOKEN_CACHE" = "1" ] && [ -d "$TOKEN_CACHE_DIR" ]; then
         echo "  [清理] token cache 目录: $TOKEN_CACHE_DIR"
-        rm -rf "$TOKEN_CACHE_DIR"
+        rm -f "$TOKEN_CACHE_DIR"/*.pt 2>/dev/null || true
+        rm -rf "$TOKEN_CACHE_DIR" 2>/dev/null || true
     fi
     mkdir -p "$PREPROCESSED_DIR"
     echo "  运行多 shard 预处理脚本..."
@@ -172,14 +173,15 @@ if [ $RUN_PREPROCESS -eq 1 ]; then
 elif [ "$CLEAN_TOKEN_CACHE" = "1" ] && [ -d "$TOKEN_CACHE_DIR" ]; then
     # 不需要预处理但需要清理 token cache
     echo "  [清理] token cache 目录: $TOKEN_CACHE_DIR"
-    rm -rf "$TOKEN_CACHE_DIR"
+    rm -f "$TOKEN_CACHE_DIR"/*.pt 2>/dev/null || true
+    rm -rf "$TOKEN_CACHE_DIR" 2>/dev/null || true
 fi
 
 OUTPUT_DIR="${OUTPUT_DIR:-$QUADMIX_DIR/result/demo_8xnpu_$(date +%Y%m%d_%H%M%S)}"
 
 echo "═══════════════════════════════════════════"
 echo "  QuaDMix Demo — 8x NPU"
-echo "  最小验证 (20 shards, 10 steps)"
+echo "  快速测试 (20 shards, 5000 steps)"
 echo "═══════════════════════════════════════════"
 cat << PARAMS
 
@@ -193,17 +195,17 @@ cat << PARAMS
   │ 实验数                     │          10  │
   │ 搜索点                     │       1,000  │
   │ Top-K 平均                 │           3  │
-  │ seq_len (block_size)       │       2,048  │ ← 论文值
-  │ 训练步数                   │          10  │ ← 最小快速验证
-  │ 全局 batch size            │         256  │ ← 最小验证
-  │ 微批大小                   │           4  │ ← 论文值
-  │ 验证集文档数               │       1,000  │ ← 论文值
-  │ 排名参考集大小             │      10,000  │ ← 论文值
+  │ seq_len (block_size)       │       2,048  │
+  │ 训练步数                   │       5,000  │
+  │ 全局 batch size            │          64  │
+  │ 微批大小                   │           4  │ (ga=16)
+  │ warmup                     │         4%   │
+  │ 验证集                     │   全量 10k   │
+  │ 排名参考集大小             │      10,000  │
   │ 代理模型                   │  tinyllama_1M│
   └────────────────────────────┴──────────────┘
 
-  ⏱ 预计耗时: ~3-5 分钟 (8 exp × 10 steps on NPU)
-  ⚠ 最小快速验证模式 (10 steps)，完整训练用 --tiny-steps 0
+  ⏱ 预计耗时: ~1.5h (8 exp × 5000 steps on NPU)
 PARAMS
 
 # 检查 NPU 环境
@@ -226,10 +228,9 @@ python3 "$QUADMIX_DIR/scripts/run_essential_web_v1.py" \
     --num-search 1000 \
     --top-k 3 \
     --block-size 2048 \
-    --tiny-steps 10 \
+    --tiny-steps 5000 \
     --micro-batch-size 4 \
-    --global-batch-size 256 \
-    --val-limit 1000 \
+    --global-batch-size 64 \
     --rank-ref-size 10000 \
     --output "$OUTPUT_DIR" \
     $DEVICE_ARG \

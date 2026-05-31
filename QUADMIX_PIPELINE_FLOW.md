@@ -161,17 +161,56 @@ Step 3 — 创建模型:
   ProxyModel(2层, 8头, 256d, 50432vocab, RMSNorm+SwiGLU)
   14,222,592 total / 1,312,000 non-emb params
 
-Step 4 — 训练 (RegMix 风格):
+Step 4 — 训练 (RegMix 风格 permutation shuffle):
   AdamW(β=(0.9,0.95), lr=4e-4, wd=0.1)
-  cosine LR + linear warmup + grad clip 1.0
+  cosine LR + linear warmup (warmup_fraction=4% of actual steps) + grad clip 1.0
 
-Step 5 — 验证 (assistant-only loss):
-  per_doc = Σ(loss × mask) / Σ(mask)
-  val_loss = mean(per_doc)
+  训练循环改进:
+    - 数据保留 CPU，per-batch 移到 device（减少 HBM 压力）
+    - Epoch-level permutation shuffle（无放回遍历所有 block）
+    - warmup_steps = max(1, int(num_steps × 0.04))
+    - checkpoint_interval（默认 1000 步）记录中间 val_loss
+
+  ```
+  total_blocks = flat_train.size(0) - block_size
+  perm = epoch_rng.permutation(total_blocks)  # numpy on CPU
+  epoch_pos = 0, epoch = 0
+
+  while iter_ct < max_iters:
+      if epoch_pos >= total_blocks:
+          perm = get_epoch_permutation()  # reshuffle
+          epoch_pos = 0
+          epoch += 1
+
+      block_starts_buf[i] = perm[epoch_pos]
+      epoch_pos += 1
+
+      # CPU advanced indexing → move to device
+      idx_cpu = block_starts_buf.cpu().unsqueeze(1) + arange(block_size+1)
+      batch = flat_train[idx_cpu].to(device)
+
+      # ... forward/backward/step ...
+
+      # Checkpoint: record val_loss every N steps
+      if checkpoint_interval > 0 and step_ct % checkpoint_interval == 0:
+          ckpt_val = _run_validation(model, device)
+          _ckpt_results[step_ct] = ckpt_val
+  ```
+
+Step 5 — 验证 (assistant-only loss, 全量 10k):
+  _run_validation(model, device):
+    val_n = len(val_token_ids)  # 全量 10k，不再限制
+    val_bs = min(16, val_n)     # NPU OOM 防护
+    per_doc = Σ(loss × mask) / Σ(mask)
+    val_loss = mean(per_doc)
+    model.train()  # restore training mode
+    return val_loss
 
 Step 6 — 保存:
    save selected_indices.npy
-   save meta.json (λ,ω,η,ε, αₘ, val_loss)
+   save meta.json (λ,ω,η,ε, αₘ, val_loss, checkpoint_steps)
+   save checkpoint_trajectory.json (如果 checkpoint_interval > 0)
+   del model, optimizer + gc.collect() + torch.npu.empty_cache()
 ```
 
 #### mmap Cache 原理
@@ -213,6 +252,13 @@ del data  # 释放 mmap 引用
 train_regressor():
     X = [p.flatten() for p in proxy_results]   # [n_exp, 95]
     y = [r.validation_loss for r in results]   # [n_exp]
+
+    # 过滤 inf/nan（防止非有限 val_loss 污染 LightGBM）
+    valid_mask = np.isfinite(y)
+    if not np.all(valid_mask):
+        print(f"WARNING: filtering {(~valid_mask).sum()} non-finite val_loss")
+        X = [x for x, v in zip(X, valid_mask) if v]
+        y = y[valid_mask]
 
     # 划分
     train_idx, val_idx = random_split()
@@ -363,8 +409,9 @@ result/<experiment_name>/
 ├── fig2_quality_weights.png       (70K+)  # 质量权重图
 └── proxy_experiments/
     ├── exp_0000/
-    │   ├── meta.json              (1K+)   # 含完整参数 + val_loss
-    │   └── selected_indices.npy   (var)   # 采样索引
+    │   ├── meta.json              (1K+)   # 含完整参数 + val_loss + checkpoint_steps
+    │   ├── selected_indices.npy   (var)   # 采样索引
+    │   └── checkpoint_trajectory.json     # 训练中 val_loss 变化轨迹
     └── exp_0001/ ...
 ```
 
@@ -494,16 +541,20 @@ temp/
 ### demo_run_quick.sh
 
 ```
-参数: 8 experiments, 1000 search, block_size=2048, tiny_steps=10
-时间: ~3-5分钟 (8x NPU)
-用途: 轻量级验证，端到端流程测试
+参数: 8 experiments, 1000 search, block_size=2048, tiny_steps=5000
+      global_batch_size=64, micro_batch_size=4 (grad_acc=16)
+      warmup_fraction=4%, 验证集全量 10k, checkpoint_interval=1000
+时间: ~1.5小时 (8x NPU)
+用途: 快速测试，端到端流程验证
 ```
 
 ### demo_run_full.sh
 
 ```
-参数: 50 experiments, 5000 search, block_size=2048, tiny_steps=1000
-时间: ~2-4h (GPU/NPU)
+参数: 96 experiments, 5000 search, block_size=2048, tiny_steps=5000
+      global_batch_size=64, micro_batch_size=4 (grad_acc=16)
+      warmup_fraction=4%, 验证集全量 10k, checkpoint_interval=1000
+时间: ~2h (8x NPU)
 用途: 中等规模验证
 
 多卡并行 (--npu-devices N):
@@ -549,8 +600,8 @@ temp/
 | Eq.3 sigmoid 采样 | ✅ S(¯r) = (2/(1+e^{-λ(ω-¯r)}))^η + ε | `sampler.py` |
 | Alg.1 参数采样 | ✅ U(0,1)→归一化→rescale→θ | `param_sampler.py` |
 | proxy 模型 1M params | ✅ tinyllama_1M (1.31M non-emb) | `proxy_model.py` |
-| RegMix 训练 | ✅ cosine LR, AdamW, grad clip 1.0 | `proxy_runner` |
-| assistant-only loss | ✅ loss_mask 过滤 user/system token | `proxy_runner` |
+| RegMix 训练 | ✅ cosine LR, AdamW, grad clip 1.0, permutation shuffle, warmup_fraction=4% | `proxy_runner` |
+| assistant-only loss | ✅ loss_mask 过滤 user/system token, 全量 10k | `proxy_runner` |
 | LightGBM 回归 | ✅ 1000 trees, 31 leaves | `optimizer.py` |
 | 100K 搜索 Alg.1 | ✅ `ParameterSampler(seed=9999)` | `optimizer.py` |
 | top-10 平均降方差 | ✅ `np.mean(top_10_flattened)` | `optimizer.py` |

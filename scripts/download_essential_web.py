@@ -333,29 +333,28 @@ def main():
     # ── Step 2: Check what's already downloaded (verify file size) ──
     print(f"[2/3] Checking existing files in {output_dir}...")
 
-    # Build expected size map from remote file list
-    expected_sizes = {}
-    for f in files:
-        fname = os.path.basename(f["path"])
-        expected_sizes[fname] = f["size"]
+    # Build local index: remote file → shard_XXXXX.parquet
+    # Each remote file gets a sequential shard index based on its position
+    remote_to_shard = {}
+    for idx, f in enumerate(files):
+        shard_name = f"shard_{idx:05d}.parquet"
+        remote_to_shard[f["path"]] = (shard_name, f["size"])
 
     complete = set()
     if os.path.isdir(output_dir):
-        for fname in os.listdir(output_dir):
-            if fname.endswith(".parquet"):
-                local_path = os.path.join(output_dir, fname)
+        for remote_path, (shard_name, expected_size) in remote_to_shard.items():
+            local_path = os.path.join(output_dir, shard_name)
+            if os.path.exists(local_path):
                 local_size = os.path.getsize(local_path)
-                expected = expected_sizes.get(fname, None)
+                if local_size >= expected_size * 0.99:  # Allow 1% tolerance
+                    complete.add(shard_name)
 
-                if expected is None:
-                    # File not in remote list (keep but don't count)
-                    pass
-                elif local_size >= expected * 0.99:  # Allow 1% tolerance
-                    # File is complete (or nearly complete)
-                    complete.add(fname)
-
-    # Need to download: missing + incomplete (download_file will resume)
-    need = [f for f in files if os.path.basename(f["path"]) not in complete]
+    # Need to download: shard_XXXXX.parquet missing or incomplete
+    need = []
+    for f in files:
+        shard_name, expected_size = remote_to_shard[f["path"]]
+        if shard_name not in complete:
+            need.append(f)
     have = len(complete)
 
     if have >= args.num_files:
@@ -369,8 +368,8 @@ def main():
     # Check for partial files that will be resumed
     partial_count = 0
     for f in need:
-        fname = os.path.basename(f["path"])
-        local_path = os.path.join(output_dir, fname)
+        shard_name, _ = remote_to_shard[f["path"]]
+        local_path = os.path.join(output_dir, shard_name)
         if os.path.exists(local_path):
             partial_count += 1
 
@@ -395,13 +394,14 @@ def main():
         futures = {}
         for i, f in enumerate(need):
             url = HF_RESOLVE.format(repo=REPO_ID, path=f["path"])
-            dest = os.path.join(output_dir, os.path.basename(f["path"]))
+            shard_name, _ = remote_to_shard[f["path"]]
+            dest = os.path.join(output_dir, shard_name)
             size_mb = f["size"] / (1024 * 1024)
             expected_size = f["size"]  # Pass for resume support
             future = executor.submit(download_func, url, dest, i, len(need), size_mb,
                                      expected_size=expected_size,
                                      show_progress=not args.quiet)
-            futures[future] = os.path.basename(f["path"])
+            futures[future] = shard_name
 
         for future in as_completed(futures):
             success, fname = future.result()

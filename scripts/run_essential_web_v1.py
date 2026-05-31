@@ -123,10 +123,14 @@ def build_parser():
                    help="Micro batch size per forward pass")
     p.add_argument("--global-batch-size", type=int, default=8,
                    help="Effective global batch size (grad acc = global/micro)")
-    p.add_argument("--val-limit", type=int, default=500,
-                   help="Validation docs to evaluate")
     p.add_argument("--rank-ref-size", type=int, default=10000,
                    help="Reference subset size for rank estimation")
+    p.add_argument("--checkpoint-steps", type=str, default=None,
+                   help="[DEPRECATED] Use --checkpoint-interval instead.")
+    p.add_argument("--checkpoint-interval", type=int, default=1000,
+                   help="Record val_loss every N steps during proxy training "
+                        "(default: 1000, 0 = disable). "
+                        "Results saved to each exp dir as checkpoint_trajectory.json.")
     p.add_argument("--val-path", type=str, default=None,
                    help="Path to validation .pt file "
                         "(default: auto-download from liujin99/quadmix-openhermes-10k to project data/)")
@@ -142,6 +146,9 @@ def create_proxy_runner(config, args, output_dir, metadata_manager):
     val_path = args.val_path or DEFAULT_VAL_PATH
     val_path = ensure_val_data(val_path)
 
+    # Parse checkpoint interval
+    checkpoint_interval = args.checkpoint_interval if args.checkpoint_interval else 1000
+
     runner = EssentialWebProxyRunner(
         config=config,
         metadata_manager=metadata_manager,
@@ -155,8 +162,8 @@ def create_proxy_runner(config, args, output_dir, metadata_manager):
         doc_limit=None,  # Always use full data pool for proxy experiments
         test_block_size=args.block_size,
         rank_ref_size=args.rank_ref_size,
-        val_doc_limit=args.val_limit,
         token_cache_dir=os.path.join(QUADMIX_TEMP_DIR, "token_cache"),
+        checkpoint_interval=checkpoint_interval,
     )
     return runner
 
@@ -228,9 +235,9 @@ def main():
     proxy_runner = create_proxy_runner(config, args, output_dir, metadata_manager)
 
     print(f"\n[Setup] Proxy runner: {n_exp} experiments, "
-          f"{args.tiny_steps} steps each, "
-          f"val_limit={args.val_limit} docs"
-          f"{', ' + str(args.npu_devices) + ' NPU devices' if args.npu_devices > 1 else ''}")
+         f"{args.tiny_steps} steps each, "
+         f"val=full (all 10k docs)"
+         f"{', ' + str(args.npu_devices) + ' NPU devices' if args.npu_devices > 1 else ''}")
 
     pipeline.run(
         data_path=args.preprocessed_dir,

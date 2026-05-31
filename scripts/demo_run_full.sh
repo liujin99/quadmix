@@ -2,7 +2,7 @@
 # ──────────────────────────────────────────────────────────────
 # Demo: QuaDMix Full — 中等规模验证，适合 NPU 集群
 # ──────────────────────────────────────────────────────────────
-# 目标：100 shards (~7.9B tokens)，50 实验，1000 步
+# 目标：20 shards (~1.6B tokens)，50 实验，5000 步
 # 数据不存在则自动下载 + 预处理
 #
 # 需要 GPU/NPU（CPU 不可行）
@@ -76,8 +76,8 @@ fi
 # 每 shard ≈ 79M tokens (char//4) / 246 MB 原始 parquet
 # 完整 3291 shards ≈ 260B tokens / 791 GB
 # 如果通过环境变量 $NUM_SHARDS 控制下载量：
-NUM_SHARDS="${NUM_SHARDS:-100}"
-NUM_EXPERIMENTS="${NUM_EXPERIMENTS:-50}"
+NUM_SHARDS="${NUM_SHARDS:-20}"
+NUM_EXPERIMENTS="${NUM_EXPERIMENTS:-96}"
 TOKEN_ESTIMATE=$(( NUM_SHARDS * 79000000 ))
 TOKEN_ESTIMATE_B=$(echo "scale=1; $TOKEN_ESTIMATE / 1000000000" | bc 2>/dev/null || echo "~$(( TOKEN_ESTIMATE / 1000000000 ))")
 echo "  [配置] 将使用 ~$NUM_SHARDS shards（~$TOKEN_ESTIMATE_B B tokens）"
@@ -156,7 +156,8 @@ if [ $RUN_PREPROCESS -eq 1 ]; then
     fi
     if [ "$CLEAN_TOKEN_CACHE" = "1" ] && [ -d "$TOKEN_CACHE_DIR" ]; then
         echo "  [清理] token cache 目录: $TOKEN_CACHE_DIR"
-        rm -rf "$TOKEN_CACHE_DIR"
+        rm -f "$TOKEN_CACHE_DIR"/*.pt 2>/dev/null || true
+        rm -rf "$TOKEN_CACHE_DIR" 2>/dev/null || true
     fi
     mkdir -p "$PREPROCESSED_DIR"
     echo "  运行多 shard 预处理脚本..."
@@ -176,7 +177,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-$QUADMIX_DIR/result/demo_full_$(date +%Y%m%d_%H%M%S)}"
 
 echo "═══════════════════════════════════════════"
 echo "  QuaDMix Demo — Full (中等规模)"
-echo "  100 shards, $NUM_EXPERIMENTS 实验, 1000 步"
+echo "  $NUM_SHARDS shards, $NUM_EXPERIMENTS 实验, 5000 步"
 echo "═══════════════════════════════════════════"
 cat << PARAMS
 
@@ -189,23 +190,25 @@ cat << PARAMS
   │ 实验数                     │ $NUM_EXPERIMENTS  │
   │ 搜索点                     │       5,000  │
   │ Top-K 平均                 │           5  │
-  │ seq_len (block_size)       │       2,048  │ ← 论文值
-  │ 训练步数                   │       1,000  │ ← 中等规模
-  │ 全局 batch size            │         512  │ ← 论文值
-  │ 微批大小                   │           4  │ ← 论文值
-  │ 验证集文档数               │       1,000  │ ← 论文值
-  │ 排名参考集大小             │      10,000  │ ← 论文值
+  │ seq_len (block_size)       │       2,048  │
+  │ 训练步数                   │       5,000  │
+  │ 全局 batch size            │          64  │
+  │ 微批大小                   │           4  │ (ga=16)
+  │ warmup                     │         4%   │
+  │ 验证集                     │   全量 10k   │
+  │ 排名参考集大小             │      10,000  │
   │ 代理模型                   │  tinyllama_1M│
   └────────────────────────────┴──────────────┘
 
-  ⏱ 预计耗时: ~2.5-4 小时 ($NUM_EXPERIMENTS exp × ~3-5min/exp on NPU)
+  ⏱ 预计耗时: ~$(( NUM_EXPERIMENTS / 8 + 1 ))h ($NUM_EXPERIMENTS exp, 8 NPU 并行)
 PARAMS
 
 if [ -z "$CUDA_VISIBLE_DEVICES" ]; then
     # Check for NPU (Ascend)
     if command -v npu-smi &> /dev/null; then
-        DEVICE_ARG="--device-type npu"
-        echo "  ✓ NPU 已启用 (Ascend)"
+        NPU_DEVICES="${NPU_DEVICES:-8}"
+        DEVICE_ARG="--device-type npu --npu-devices $NPU_DEVICES"
+        echo "  ✓ NPU 已启用 (Ascend, $NPU_DEVICES 卡)"
     else
         DEVICE_ARG=""
         echo "  ⚠ 当前为 CPU 模式，预计耗时 >4 小时！"
@@ -225,10 +228,9 @@ python3 "$QUADMIX_DIR/scripts/run_essential_web_v1.py" \
     --num-search 5000 \
     --top-k 5 \
     --block-size 2048 \
-    --tiny-steps 1000 \
+    --tiny-steps 5000 \
     --micro-batch-size 4 \
-    --global-batch-size 512 \
-    --val-limit 1000 \
+    --global-batch-size 64 \
     --rank-ref-size 10000 \
     --output "$OUTPUT_DIR" \
     $DEVICE_ARG \

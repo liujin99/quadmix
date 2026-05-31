@@ -108,7 +108,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             global_batch_size: int = 512,
             micro_batch_size: int = 4,
             max_step: int = 25000,
-            warmup_steps: int = 1000,
+            warmup_fraction: float = 0.04,  # warmup as fraction of actual steps (default 4% = RegMix default)
             learning_rate: float = 4e-4,
             weight_decay: float = 0.1,
             grad_clip: float = 1.0,
@@ -117,9 +117,9 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             doc_limit: Optional[int] = None,
             test_block_size: Optional[int] = None,
             rank_ref_size: int = 10000,
-            val_doc_limit: int = 500,
             token_cache_dir: str = DEFAULT_TOKEN_CACHE_DIR,
             memory_cache_max_gb: float = 16.0,  # LRU eviction threshold
+            checkpoint_interval: int = 1000,  # Record val_loss every N steps
     ):
         self.config = config
         self.metadata_manager = metadata_manager
@@ -133,14 +133,15 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         self.tiny_steps = tiny_steps
         self.doc_limit = doc_limit
         self.rank_ref_size = rank_ref_size
-        self.val_doc_limit = val_doc_limit
         self.token_cache_dir = token_cache_dir
+        self.checkpoint_interval = checkpoint_interval
 
         # RegMix training config
         self.global_batch_size = global_batch_size
         self.micro_batch_size = micro_batch_size
         self.max_step = max_step
-        self.warmup_steps = warmup_steps
+        self.warmup_fraction = warmup_fraction
+        self.warmup_steps = 0  # computed at runtime from actual steps
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
         self.grad_clip = grad_clip
@@ -874,15 +875,20 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         return ranks
 
     def run_experiment(
-            self, params: ParameterSet, experiment_id: int = 0,
-            selected_idx: Optional[np.ndarray] = None,  # ← 新增：外部傳入選中文檔索引
+        self,
+        params: ParameterSet,
+        experiment_id: int = 0,
+        selected_idx: Optional[np.ndarray] = None,
+        checkpoint_interval: Optional[int] = None,
     ) -> ProxyResult:
         """Train one proxy model. Validates on openhermes-10k.
-
-        If selected_idx is provided, skips Eq.1-3 sampling (pre-computed mode).
         """
         from quadmix.core.proxy_model import ProxyModel
         from quadmix.npu.device import DeviceManager, DeviceType
+
+        # Use instance-level checkpoint_interval if not explicitly provided
+        if checkpoint_interval is None:
+            checkpoint_interval = self.checkpoint_interval
 
         os.makedirs(self.output_dir, exist_ok=True)
         exp_dir = os.path.join(self.output_dir, f"exp_{experiment_id:04d}")
@@ -895,6 +901,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         device = device_mgr.get_device()
 
         # ---- 0. Compute quality ranks (Eq.1+Eq.2) + sample ----
+        selected_idx: Optional[np.ndarray] = None
         if selected_idx is None:
             # Original flow: Eq.1-3 + Bernoulli inside run_experiment
             quality_ranks = self._compute_ranks_for_params(params, experiment_id)
@@ -921,7 +928,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
               f"(from {len(self._train_idx):,})")
 
         # ---- 1. Load / tokenize training data on demand ----
-        train_tokens = self._load_tokens_for_experiment(selected_idx, exp_id=experiment_id).to(device)
+        train_tokens = self._load_tokens_for_experiment(selected_idx, exp_id=experiment_id)
+        # Keep on CPU to avoid HBM pressure — move to device per-batch
 
         # ---- 2. Create model ----
         model = ProxyModel(config=self.model_config).to(device)
@@ -935,28 +943,71 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             betas=(0.9, 0.95), weight_decay=self.weight_decay, fused=False,
         )
 
-        # ---- 4. Training data preparation ----
-        flat_train = train_tokens.reshape(-1)
+        # ---- 4. Training data preparation (RegMix-style: permutation shuffle) ----
+        # Keep flat_train on CPU — move batch to device per iteration
+        flat_train = train_tokens.reshape(-1).cpu()
+        del train_tokens  # Free memory immediately
         num_steps = self.tiny_steps if self.tiny_steps > 0 else self.max_step
         grad_acc = self.gradient_accumulation_steps
         max_iters = num_steps * grad_acc
         tok_per_step = self.micro_batch_size * self.block_size
 
-        # ---- 5. Training loop (RegMix-style) ----
+        # Compute warmup_steps from fraction of actual training steps
+        warmup_steps = max(1, int(num_steps * self.warmup_fraction))
+        self.warmup_steps = warmup_steps  # for _lr_schedule
+
+        # Compute total blocks available (each block = block_size + 1 tokens)
+        total_blocks = max(1, flat_train.size(0) - self.block_size)
+
+        # Build a permutation of all block indices (like RegMix PackedDataset)
+        # Use numpy on CPU to avoid huge GPU tensor for randperm
+        epoch_rng = np.random.default_rng(experiment_id + 42)
+
+        def get_epoch_permutation():
+            return epoch_rng.permutation(total_blocks)
+
+        perm = get_epoch_permutation()
+        epoch_pos = 0  # current position in permutation
+        epoch = 0
+
+        # Pre-allocate: device tensor for indices (reused each iter)
+        block_starts_buf = torch.empty(self.micro_batch_size, dtype=torch.long, device=device)
+        block_offsets_dev = torch.arange(self.block_size + 1, device=device)
+
+        # ---- 5. Training loop (RegMix-style: permutation shuffle, no replacement) ----
         model.train()
         total_loss = 0.0
+        self._ckpt_results = {}  # step -> val_loss
         iter_ct = 0
         step_ct = 0
         log_int = max(1, num_steps // 5)
         t_start = time.time()
 
         print(f"  [Exp {experiment_id:04d}] Training {num_steps} steps "
-              f"(grad_acc={grad_acc}, micro_batch={self.micro_batch_size})...")
+              f"(grad_acc={grad_acc}, warmup={warmup_steps} steps ({self.warmup_fraction*100:.0f}%), "
+              f"micro_batch={self.micro_batch_size}, "
+              f"blocks={total_blocks}, epochs~{math.ceil(max_iters / total_blocks)})"
+              f"{', checkpoint every ' + str(checkpoint_interval) + ' steps' if checkpoint_interval > 0 else ''})...")
 
         while iter_ct < max_iters:
-            max_st = max(1, flat_train.size(0) - self.block_size - 1)
-            st = torch.randint(0, max_st, (self.micro_batch_size,))
-            batch = torch.stack([flat_train[s:s + self.block_size + 1] for s in st])
+            # Check if we need a new epoch (reshuffle)
+            if epoch_pos >= total_blocks:
+                perm = get_epoch_permutation()
+                epoch_pos = 0
+                epoch += 1
+
+            # Take micro_batch_size blocks from the permutation
+            for i in range(self.micro_batch_size):
+                if epoch_pos >= total_blocks:
+                    perm = get_epoch_permutation()
+                    epoch_pos = 0
+                    epoch += 1
+                block_starts_buf[i] = perm[epoch_pos]
+                epoch_pos += 1
+
+            # advanced indexing on CPU, then move to device
+            idx_cpu = block_starts_buf.cpu().unsqueeze(1) + torch.arange(self.block_size + 1).unsqueeze(0)
+            batch = flat_train[idx_cpu].to(device)  # (micro_bs, block_size+1)
             inp = batch[:, :self.block_size].contiguous()
             tgt = batch[:, 1:self.block_size + 1].contiguous()
 
@@ -977,6 +1028,14 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 optimizer.zero_grad()
                 step_ct += 1
 
+                # Checkpoint: record val_loss every checkpoint_interval steps
+                # Skip if this is the final step — validation will run after training loop
+                if checkpoint_interval > 0 and step_ct % checkpoint_interval == 0 and step_ct < num_steps:
+                    ckpt_val = self._run_validation(model, device)
+                    self._ckpt_results[step_ct] = ckpt_val
+                    elapsed_ckpt = time.time() - t_start
+                    print(f"    [CHECKPOINT step={step_ct}] val_loss={ckpt_val:.4f} ({elapsed_ckpt:.0f}s)")
+
             total_loss += loss.item()
             iter_ct += 1
 
@@ -988,40 +1047,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                       f"lr={lr:.2e}, {tok_per_step * step_ct / elapsed:.0f} tok/s, "
                       f"ETA: {rem:.0f}s")
 
-        # ---- 6. Validation: assistant-only loss ----
-        model.eval()
-        bs = self.block_size
-        val_n = min(self.val_doc_limit, len(self._val_token_ids))
-        val_tokens = self._val_token_ids[:val_n, :bs].to(device)
-        val_mask = self._val_loss_mask[:val_n, :bs].to(device)
-
-        with torch.no_grad():
-            # Cap val batch size to avoid OOM on NPU.
-            # bottleneck: lm_head produces logits (B, T, vocab)
-            # tinyllama_1M: T=2048, vocab=50432 → B * 2048 * 50432 * 4 bytes
-            # → B=50 → ~20GiB logits; B=100 → ~40GiB
-            # attention matmul: B * n_head * T * T * 4 → B=50 → ~6.7GiB (OK)
-            val_bs = min(50, val_n)
-            per_doc_losses = []
-            for start in range(0, len(val_tokens), val_bs):
-                end = min(start + val_bs, len(val_tokens))
-                ids_in = val_tokens[start:end, :-1]
-                ids_tgt = val_tokens[start:end, 1:]
-                mask_tgt = val_mask[start:end, 1:]
-
-                logits = model(ids_in)
-                loss = F.cross_entropy(
-                    logits.view(-1, self.model_config.vocab_size),
-                    ids_tgt.reshape(-1),
-                    reduction="none",
-                )
-                loss = loss.view(ids_tgt.shape)
-
-                assistant_count = mask_tgt.float().sum(dim=1).clamp(min=1)
-                per_doc = (loss * mask_tgt.float()).sum(dim=1) / assistant_count
-                per_doc_losses.append(per_doc)
-
-            val_loss = float(torch.cat(per_doc_losses).mean())
+        # ---- 6. Validation: assistant-only loss (full validation set) ----
+        val_loss = self._run_validation(model, device)
 
         # ---- 7. Save metadata ----
         np.save(os.path.join(exp_dir, "selected_indices.npy"), selected_idx)
@@ -1035,7 +1062,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             "val_ppl": float(np.exp(val_loss)),
             "num_steps": step_ct,
             "sampled_docs": len(selected_idx),
-            "val_docs": val_n,
+            "val_docs": len(self._val_token_ids),
             "assistant_loss": True,
             "params_lambda": [sc.lambda_ for sc in params.sampling_configs],
             "params_omega": [sc.omega for sc in params.sampling_configs],
@@ -1043,13 +1070,65 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             "params_epsilon": [sc.epsilon for sc in params.sampling_configs],
             "global_weights": params.merge_config.global_weights.tolist(),
             "domain_weights": params.merge_config.domain_weights.tolist(),
+            "checkpoint_steps": dict(self._ckpt_results) if hasattr(self, '_ckpt_results') else {},
         }
         with open(os.path.join(exp_dir, "meta.json"), "w") as f:
             json.dump(meta, f, indent=2)
+
+        # Save checkpoint trajectory as standalone JSON in exp result dir
+        ckpt_results = dict(self._ckpt_results) if hasattr(self, '_ckpt_results') else {}
+        if ckpt_results:
+            ckpt_trajectory = {
+                "experiment_id": experiment_id,
+                "checkpoint_interval": checkpoint_interval,
+                "num_steps": step_ct,
+                "final_val_loss": val_loss,
+                "checkpoints": {str(k): v for k, v in sorted(ckpt_results.items())},
+            }
+            ckpt_path = os.path.join(exp_dir, "checkpoint_trajectory.json")
+            with open(ckpt_path, "w") as f:
+                json.dump(ckpt_trajectory, f, indent=2)
+
         print(f"  [Exp {experiment_id:04d}] Done. train_loss={avg_train:.4f}, "
               f"val_loss={val_loss:.4f} (ppl={np.exp(val_loss):.1f})")
+        # ── Free NPU memory (torch-npu doesn't release HBM on del) ──
+        del model, optimizer
+        if device.type == "npu":
+            import gc
+            gc.collect()
+            torch.npu.empty_cache()
 
         return ProxyResult(parameters=params, validation_loss=val_loss, metadata=meta)
+
+    def _run_validation(self, model, device) -> float:
+        """Run validation on full validation set, return val_loss."""
+        import torch.nn.functional as F
+        model.eval()
+        bs = self.block_size
+        val_n = len(self._val_token_ids)
+        val_tokens = self._val_token_ids[:val_n, :bs].to(device)
+        val_mask = self._val_loss_mask[:val_n, :bs].to(device)
+        with torch.no_grad():
+            val_bs = min(16, val_n)
+            per_doc_losses = []
+            for start in range(0, len(val_tokens), val_bs):
+                end = min(start + val_bs, len(val_tokens))
+                ids_in = val_tokens[start:end, :-1]
+                ids_tgt = val_tokens[start:end, 1:]
+                mask_tgt = val_mask[start:end, 1:]
+                logits = model(ids_in)
+                loss = F.cross_entropy(
+                    logits.view(-1, self.model_config.vocab_size),
+                    ids_tgt.reshape(-1),
+                    reduction="none",
+                )
+                loss = loss.view(ids_tgt.shape)
+                assistant_count = mask_tgt.float().sum(dim=1).clamp(min=1)
+                per_doc = (loss * mask_tgt.float()).sum(dim=1) / assistant_count
+                per_doc_losses.append(per_doc)
+            val_loss = float(torch.cat(per_doc_losses).mean())
+        model.train()  # restore training mode
+        return val_loss
 
     def _lr_schedule(self, it: int, max_iters: int) -> float:
         """Cosine LR with linear warmup."""
@@ -1241,7 +1320,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             "global_batch_size": self.global_batch_size,
             "micro_batch_size": self.micro_batch_size,
             "max_step": self.max_step,
-            "warmup_steps": self.warmup_steps,
+            "warmup_fraction": self.warmup_fraction,
             "learning_rate": self.learning_rate,
             "weight_decay": self.weight_decay,
             "grad_clip": self.grad_clip,
@@ -1249,7 +1328,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             "doc_limit": self.doc_limit,
             "test_block_size": self.block_size,
             "rank_ref_size": self.rank_ref_size,
-            "val_doc_limit": self.val_doc_limit,
+            "checkpoint_interval": self.checkpoint_interval,
             "token_cache_dir": self.token_cache_dir,
             # Shared memory descriptors (None if not using shared memory)
             "shared_domain_labels": shared_metadata.get("domain_labels") if shared_metadata else None,
@@ -1874,7 +1953,7 @@ def _worker_dynamic_loop(
             global_batch_size=config_dict["global_batch_size"],
             micro_batch_size=config_dict["micro_batch_size"],
             max_step=config_dict["max_step"],
-            warmup_steps=config_dict["warmup_steps"],
+            warmup_fraction=config_dict.get("warmup_fraction", 0.04),
             learning_rate=config_dict["learning_rate"],
             weight_decay=config_dict["weight_decay"],
             grad_clip=config_dict["grad_clip"],
@@ -1882,8 +1961,8 @@ def _worker_dynamic_loop(
             doc_limit=config_dict["doc_limit"],
             test_block_size=config_dict["test_block_size"],
             rank_ref_size=config_dict["rank_ref_size"],
-            val_doc_limit=config_dict["val_doc_limit"],
             token_cache_dir=config_dict["token_cache_dir"],
+            checkpoint_interval=config_dict.get("checkpoint_interval", 1000),
         )
 
         completed = 0
@@ -1898,9 +1977,16 @@ def _worker_dynamic_loop(
             exp_id, params, selected_idx = task
             print(f"[Worker {worker_id}] Running exp {exp_id}")
 
-            r = runner.run_experiment(params, experiment_id=exp_id, selected_idx=selected_idx)
+            r = runner.run_experiment(params, experiment_id=exp_id, selected_idx=selected_idx,
+                                      checkpoint_interval=config_dict.get("checkpoint_interval", 1000))
             result_queue.put(r)
             completed += 1
+
+            # Free NPU HBM between experiments (torch-npu lazy allocation)
+            import gc
+            gc.collect()
+            if device_type == "npu":
+                torch.npu.empty_cache()
 
             # Clean up temporary token file
             exp_token_path = runner._get_exp_token_path(exp_id)

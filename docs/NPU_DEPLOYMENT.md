@@ -235,7 +235,7 @@ bash scripts/demo_run_cpu.sh
 
 成功标志：控制台打印完成信息并在 `result/` 下生成结果目录。
 
-### 4.2 轻量级验证（8 实验，8x NPU，10 步）
+### 4.2 快速测试（8 实验，8x NPU，5000 步）
 
 验证 NPU 多卡并行 + 端到端流程：
 
@@ -244,13 +244,16 @@ cd $QUADMIX_DIR
 bash scripts/demo_run_quick.sh
 ```
 
-**轻量级配置**：
+**快速测试配置**：
 - 20 shards (~1.6B tokens)
 - 8 实验，1000 搜索点
-- block_size=2048，tiny_steps=10（快速验证）
-- global_batch_size=256，micro_batch_size=4
+- block_size=2048，tiny_steps=5000
+- global_batch_size=64，micro_batch_size=4 (grad_acc=16)
+- warmup_fraction=4%（运行时计算）
+- 验证集全量 10k docs
+- checkpoint_interval=1000 步
 
-**耗时预期**：每实验 ~30 秒，总计 ~3-5 分钟。
+**耗时预期**：每实验 ~10 分钟，8 NPU 并行总计 ~1.5 小时。
 
 **已验证环境**：
 - 8x Ascend 910B3, 64GB VRAM each
@@ -270,7 +273,7 @@ NPU_DEVICES=4 bash scripts/demo_run_quick.sh
 HF_ENDPOINT=https://hf-mirror.com bash scripts/demo_run_quick.sh
 ```
 
-### 4.3 中等规模验证（50 实验，GPU/NPU，1000 步）
+### 4.3 中等规模验证（96 实验，8x NPU，5000 步）
 
 ```bash
 cd $QUADMIX_DIR
@@ -283,11 +286,12 @@ python scripts/run_essential_web_v1.py \
     --preprocessed-dir temp/preprocessed \
     --full \
     --block-size 2048 \
-    --tiny-steps 0 \
+    --tiny-steps 5000 \
     --micro-batch-size 4 \
-    --global-batch-size 512 \
-    --val-limit 1000 \
+    --global-batch-size 64 \
+    --checkpoint-interval 1000 \
     --device-type npu \
+    --npu-devices 8 \
     --output result/full_npu_run
 ```
 
@@ -385,6 +389,11 @@ for i in range(torch.npu.device_count()):
 [Worker 0] Exp 0000: Training on NPU:0... cache: 0/488K hits
 [Worker 1] Exp 0001: Training on NPU:1... cache: 0/492K hits
 ...
+[Worker 0] Exp 0000: Training 5000 steps (grad_acc=16, warmup=200 steps (4%), micro_batch=4, blocks=...
+...
+    [CHECKPOINT step=1000] val_loss=3.12 (45s)
+    [CHECKPOINT step=2000] val_loss=2.98 (90s)
+...
 [Worker 0] Exp 0000: Done. train_loss=3.12, val_loss=2.89 (ppl=18.0)
 [Worker 0] Exp 0008: Training on NPU:0... cache: 410K/495K hits
 
@@ -396,11 +405,13 @@ for i in range(torch.npu.device_count()):
 **关键信号：**
 - `Pre-normalized 5 quality criteria` → Eq.1 优化已生效（~10s one-time）
 - `PreSample 3000/3000 done (600s)` → 预采样阶段 ~100 min（而非 ~500 min）
+- `Training 5000 steps (grad_acc=16, warmup=200 steps (4%)` → RegMix 风格训练已生效
+- `[CHECKPOINT step=1000] val_loss=3.12` → 训练中 checkpoint trajectory 记录正常
 - `cache: 0/488K hits` → 首次运行，正在生成 token cache
 - `cache: 488K/488K hits` → 全部 cache hit，最快速度
 - `cache: 410K/495K hits` → 部分来自之前实验的 cache（同批次共享）
 - `loss=3.12` → 训练正常收敛
-- `val_loss=2.89` → 验证集 loss，越低越好
+- `val_loss=2.89` → 验证集 loss（全量 10k docs），越低越好
 
 ### 5.2 常见问题
 
@@ -451,8 +462,9 @@ result/quadmix_20250525_143022/
 ├── fig2_quality_weights.png       # 质量信号权重图
 └── proxy_experiments/             # 每个实验的详细结果
     ├── exp_0000/
-    │   ├── meta.json              # (α_m, λ_m, ω_m, η_m, ε_m) + val_loss
-    │   └── selected_indices.npy   # 该实验采样文档的全局索引
+    │   ├── meta.json              # (α_m, λ_m, ω_m, η_m, ε_m) + val_loss + checkpoint_steps
+    │   ├── selected_indices.npy   # 该实验采样文档的全局索引
+    │   └── checkpoint_trajectory.json  # 训练中 val_loss 变化轨迹（可选）
     └── exp_0001/ ...
 ```
 

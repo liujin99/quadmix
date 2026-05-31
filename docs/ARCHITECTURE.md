@@ -52,7 +52,8 @@ quadmix/
 │       └── proxy_experiments/
 │           ├── exp_0000/
 │           │   ├── meta.json
-│           │   └── selected_indices.npy
+│           │   ├── selected_indices.npy
+│           │   └── checkpoint_trajectory.json
 │           └── exp_0001/ ...
 ├── temp/                       # Intermediate data (deletable)
 │   ├── preprocessed/              # Preprocessed parquet shards
@@ -335,6 +336,7 @@ run_batch(params)  # Original sequential mode, no precompute
 
 ### Stage 5: LightGBM Regression
 - Train regressor R(θ) → predicted val_loss
+- **inf/nan filtering**: Non-finite val_loss values are filtered out before training to prevent surrogate model corruption
 
 ### Stage 6: Optimal Search
 - 100K random parameters → predict loss → top-10 average → θ*
@@ -511,9 +513,11 @@ python scripts/run_essential_web_v1.py \
 
 | Script | Shards | Experiments | Device | Steps | Time | Use Case |
 |--------|--------|-------------|--------|-------|------|----------|
-| `demo_run_cpu.sh` | 3 | 20 | CPU | 3 (tiny) | ~1-2min | CI, smoke test |
-| `demo_run_quick.sh` | 20 | 8 | 8x NPU | 10 (tiny) | ~3-5min | 轻量级验证 |
-| `demo_run_full.sh` | 100 | 50 | GPU/NPU | 1000 (tiny) | ~2-4h | 中等规模验证 |
+| `demo_run_cpu.sh` | CPU | 3 shards | 20 | 3 (tiny) | ~1-2min | CI, smoke test |
+| `demo_run_quick.sh` | 8x NPU | 20 shards | 8 | 5000 (tiny) | ~1.5h | 快速测试 |
+| `demo_run_full.sh` | 8x NPU | 20 shards | 96 | 5000 (tiny) | ~2h | 中等规模验证 |
+
+All demos use full validation set (10k docs), warmup_fraction=4%, checkpoint_interval=1000.
 
 ## Key Dependencies
 
@@ -529,13 +533,15 @@ python scripts/run_essential_web_v1.py \
 
 ## Important Notes
 
-1. **Validation set** (`openhermes_10k_assistant_tokenized.pt`, 176MB) auto-downloads from HuggingFace `liujin99/quadmix-openhermes-10k` on first run. Assistant-only loss mask.
+1. **Validation set** (`openhermes_10k_assistant_tokenized.pt`, 176MB) auto-downloads from HuggingFace `liujin99/quadmix-openhermes-10k` on first run. Full 10k docs used (no val_doc_limit). Assistant-only loss mask.
 
-2. **Pre-existing bugfix**: `src/quadmix/pipeline/optimizer.py` had missing `ParameterSet`, `QuaDMixConfig`, `ProxyResult` imports — fixed during multi-device implementation.
+2. **Training**: RegMix-style permutation shuffle, warmup_fraction=4%, checkpoint_interval=1000 steps.
 
-3. **Non-official**: This is a clean-room implementation of QuaDMix (ByteDance, 2025). Not an official release.
+3. **Pre-existing bugfix**: `src/quadmix/pipeline/optimizer.py` had missing `ParameterSet`, `QuaDMixConfig`, `ProxyResult` imports — fixed during multi-device implementation.
 
-4. **NPU deployment**: See `docs/NPU_DEPLOYMENT.md` for detailed NPU setup instructions.
+4. **Non-official**: This is a clean-room implementation of QuaDMix (ByteDance, 2025). Not an official release.
+
+5. **NPU deployment**: See `docs/NPU_DEPLOYMENT.md` for detailed NPU setup instructions.
 
 ## Design Philosophy
 
@@ -954,7 +960,83 @@ Confirmed `causal_mask` is already registered as `register_buffer` — no code c
 
 #### P3-12: Validation Batch Size
 
-Increased `val_bs` from 200 to `min(1024, val_n)`. 1M proxy model is ~50 MB — can handle much larger batches.
+Reduced `val_bs` to `min(16, val_n)` for NPU OOM prevention with full 10k validation set. The 1M proxy model is ~50 MB, but logits tensor `(B, T, vocab)` at T=2048, vocab=50432 requires ~400MB per sample — B=16 keeps total under 8GB.
+
+### Training Loop Improvements (2025-05-31)
+
+#### RegMix-Style Permutation Shuffle
+
+**Problem**: Original training used `torch.randint` per step (with replacement), causing some blocks to be seen multiple times while others were never seen.
+
+**Solution**: Epoch-level permutation (RegMix PackedDataset style). All blocks are visited exactly once per epoch, then reshuffled.
+
+```python
+# OLD: random sampling with replacement
+st = torch.randint(0, max_st, (micro_batch_size,))
+batch = torch.stack([flat_train[s:s + block_size + 1] for s in st])
+
+# NEW: permutation shuffle, no replacement
+total_blocks = flat_train.size(0) - block_size
+perm = epoch_rng.permutation(total_blocks)  # numpy on CPU
+# Iterate through perm, reshuffle when exhausted
+block_starts_buf[i] = perm[epoch_pos]
+epoch_pos += 1
+```
+
+**Impact**: More uniform data coverage, aligns with RegMix paper methodology.
+
+#### Warmup Fraction (Runtime-Computed)
+
+**Problem**: Fixed `warmup_steps=1000` was inappropriate for tiny_steps=3 (CPU demo) or tiny_steps=5000 (NPU production).
+
+**Solution**: `warmup_fraction=0.04` (4%, RegMix default). Computed at runtime: `warmup_steps = max(1, int(num_steps * 0.04))`.
+
+#### Full Validation Set
+
+**Problem**: `val_doc_limit` truncated validation to 50-1000 docs, introducing evaluation noise.
+
+**Solution**: Removed `val_doc_limit` parameter entirely. All 10k validation docs used. Extracted `_run_validation()` method for reuse during training (checkpoint) and after training (final).
+
+```python
+def _run_validation(self, model, device) -> float:
+    val_bs = min(16, val_n)  # NPU OOM prevention
+    # ... full validation set evaluation
+    return val_loss
+```
+
+#### Checkpoint Trajectory
+
+**New feature**: `checkpoint_interval` parameter (default 1000 steps). Records val_loss during training for trajectory analysis.
+
+```python
+# During training loop:
+if checkpoint_interval > 0 and step_ct % checkpoint_interval == 0:
+    ckpt_val = self._run_validation(model, device)
+    self._ckpt_results[step_ct] = ckpt_val
+
+# Saved to exp dir:
+checkpoint_trajectory.json = {
+    "experiment_id": 0,
+    "checkpoint_interval": 1000,
+    "num_steps": 5000,
+    "final_val_loss": 2.89,
+    "checkpoints": {"1000": 3.12, "2000": 2.98, ...}
+}
+```
+
+#### NPU Memory Management
+
+**Problem**: torch-npu lazy HBM allocation caused memory accumulation across experiments.
+
+**Solution**: Explicit cleanup after each experiment:
+```python
+del model, optimizer
+if device.type == "npu":
+    import gc; gc.collect()
+    torch.npu.empty_cache()
+```
+
+Also applied in worker loop between experiments.
 
 ### Analyzed and Deferred (2 items)
 

@@ -134,7 +134,8 @@ if [ $RUN_PREPROCESS -eq 1 ]; then
     fi
     if [ "$CLEAN_TOKEN_CACHE" = "1" ] && [ -d "$TOKEN_CACHE_DIR" ]; then
         echo "  [清理] token cache 目录: $TOKEN_CACHE_DIR"
-        rm -rf "$TOKEN_CACHE_DIR"
+        rm -f "$TOKEN_CACHE_DIR"/*.pt 2>/dev/null || true
+    rm -rf "$TOKEN_CACHE_DIR" 2>/dev/null || true
     fi
     mkdir -p "$PREPROCESSED_DIR"
     echo "  运行多 shard 预处理脚本..."
@@ -147,7 +148,8 @@ if [ $RUN_PREPROCESS -eq 1 ]; then
     echo ""
 elif [ "$CLEAN_TOKEN_CACHE" = "1" ] && [ -d "$TOKEN_CACHE_DIR" ]; then
     echo "  [清理] token cache 目录: $TOKEN_CACHE_DIR"
-    rm -rf "$TOKEN_CACHE_DIR"
+    rm -f "$TOKEN_CACHE_DIR"/*.pt 2>/dev/null || true
+    rm -rf "$TOKEN_CACHE_DIR" 2>/dev/null || true
 fi
 
 OUTPUT_DIR="${OUTPUT_DIR:-$QUADMIX_DIR/result/demo_quick_$(date +%Y%m%d_%H%M%S)}"
@@ -169,8 +171,8 @@ cat << PARAMS
   │ seq_len (block_size)       │      64  │
   │ 训练步数 (tiny_steps)      │       3  │
   │ 全局 batch size            │       8  │
-  │ 微批大小                   │       2  │
-  │ 验证集文档数               │      50  │
+  │ 微批大小                   │       2  │ (ga=4)
+  │ 验证集                     │ 全量 10k │
   │ 排名参考集大小             │     200  │
   └────────────────────────────┴──────────┘
 
@@ -186,7 +188,6 @@ python3 "$QUADMIX_DIR/scripts/run_essential_web_v1.py" \
     --tiny-steps 3 \
     --micro-batch-size 2 \
     --global-batch-size 8 \
-    --val-limit 50 \
     --rank-ref-size 200 \
     --output "$OUTPUT_DIR" \
     "$@" || exit $?

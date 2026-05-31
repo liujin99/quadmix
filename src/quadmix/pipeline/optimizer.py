@@ -234,6 +234,14 @@ class QuaDMixOptimizer:
         params_list = [r.parameters for r in self._proxy_results]
         losses = np.array([r.validation_loss for r in self._proxy_results], dtype=np.float64)
 
+        # Filter out inf/nan values
+        valid_mask = np.isfinite(losses)
+        if not np.all(valid_mask):
+            invalid_count = (~valid_mask).sum()
+            print(f"[QuaDMixOptimizer] WARNING: filtering {invalid_count} experiments with non-finite val_loss")
+            params_list = [p for p, v in zip(params_list, valid_mask) if v]
+            losses = losses[valid_mask]
+
         # Split into train/validation (skip split if too few samples)
         n_total = len(params_list)
         if n_total < 10:

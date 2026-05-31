@@ -21,8 +21,9 @@ For each θ:
   Eq.2: Rank ¯q within domain (subsample reference) → ¯r
   Eq.3: S(¯r) = sigmoid(λ(ω-¯r))^η + ε → Bernoulli sample
   Train 1M param proxy model → val_loss (assistant-only)
+  (RegMix-style: permutation shuffle, warmup_fraction=4%)
   ↓
-LightGBM: R(θ) → predicted loss
+LightGBM: R(θ) → predicted loss (inf/nan filtered)
   ↓
 Search: Alg.1 × 100K → predict → top-10 average → θ*
   ↓
@@ -107,26 +108,32 @@ python scripts/run_essential_web_v1.py \
 | NPU | 8x Ascend 910B3, 64GB VRAM each |
 | 内存 | 1500 GB |
 | CPU | ARM 192 vCPUs |
-| 验证脚本 | `demo_run_quick.sh` (8 experiments, 10 steps) |
-| 验证结果 | ✓ 轻量级验证跑通，多卡并行调度正常 |
+| 验证脚本 | `demo_run_quick.sh` (8 experiments, 5000 steps) |
+| 验证结果 | ✓ RegMix 风格训练 + 全量验证集 + checkpoint trajectory |
 
 验证日志：
 - 并行 tokenize (Stage 1 IO + Stage 2 tokenize) 正常执行
 - 8 workers 动态任务队列调度正常
 - val_loss 计算正常（tinyllama_1M proxy model）
+- Permutation shuffle 训练循环正常（无放回 epoch 遍历）
+- Checkpoint trajectory 每 1000 步记录 val_loss
 
 **验证通过的修复点：**
 - `shared_to_ndarray()` 返回 `.copy()` — 解决 spawn 子进程 shared memory segfault
 - `notify_all()` 移入 `with ready_cond:` — 解决信号丢失竞态
-- val batch size 1024→50 — 避免 NPU OOM
+- val batch size → 16 — 避免 NPU OOM（全量 10k 验证集）
+- NPU HBM 显式释放 — 实验间 `gc.collect()` + `torch.npu.empty_cache()`
+- Optimizer inf/nan 过滤 — 防止非有限 val_loss 污染 LightGBM
 
 ## Demo Scripts
 
-| 脚本 | 设备 | 数据量 | 实验 | 步数 | 耗时 | 用途 |
-|------|------|--------|------|------|------|------|
-| `demo_run_cpu.sh` | CPU | 3 shards | 20 | 3 | ~1-2min | CI / 流程验证 |
-| `demo_run_quick.sh` | 8x NPU | 20 shards | 8 | 10 | ~3-5min | **轻量级验证** |
-| `demo_run_full.sh` | GPU/NPU | 100 shards | 50 | 1000 | ~2-4h | 中等规模验证 |
+| 脚本 | 设备 | 数据量 | 实验 | 步数 | Batch | 耗时 | 用途 |
+|------|------|--------|------|------|-----|------|------|
+| `demo_run_cpu.sh` | CPU | 3 shards | 20 | 3 | 8/2 | ~1-2min | CI / 流程验证 |
+| `demo_run_quick.sh` | 8x NPU | 20 shards | 8 | 5000 | 64/4 | ~1.5h | **快速测试** |
+| `demo_run_full.sh` | 8x NPU | 20 shards | 96 | 5000 | 64/4 | ~2h | 中等规模验证 |
+
+所有 demo 使用全量验证集（10k docs）、warmup_fraction=4%、checkpoint_interval=1000。
 
 ## Architecture Highlights
 
@@ -177,8 +184,9 @@ result/<experiment_name>/
 ├── fig2_quality_weights.png       # Quality signal weights
 └── proxy_experiments/             # Per-experiment results
     ├── exp_0000/
-    │   ├── meta.json                # Full parameters + val_loss
-    │   └── selected_indices.npy     # Selected document indices
+    │   ├── meta.json                # Full parameters + val_loss + checkpoint_steps
+    │   ├── selected_indices.npy     # Selected document indices
+    │   └── checkpoint_trajectory.json  # val_loss at checkpoint intervals
     └── exp_0001/ ...
 ```
 
