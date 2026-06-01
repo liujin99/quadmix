@@ -63,7 +63,7 @@ def extract_quality_signals(quality_signals):
     if not isinstance(fasttext, dict):
         return np.zeros(len(FASTTEXT_FIELDS), dtype=np.float32)
     return np.array([
-        fasttext.get(field, 0.0) or 0.0
+        -(fasttext.get(field, 0.0) or 0.0)
         for field in FASTTEXT_FIELDS
     ], dtype=np.float32)
 
