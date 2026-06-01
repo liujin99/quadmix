@@ -83,14 +83,13 @@ def _make_fig1(orig_dist, opt_dist, output_dir):
 
 # ── Figure 2 ──
 
-def _make_fig2(global_weights, domain_weights, num_domains, num_criteria, output_dir):
+def _make_fig2(domain_weights, num_domains, num_criteria, output_dir):
     _setup_style()
-    data = np.zeros((num_domains + 1, num_criteria))
+    data = np.zeros((num_domains, num_criteria))
     for m in range(num_domains):
         start = m * num_criteria
         data[m] = domain_weights[start:start + num_criteria]
-    data[num_domains] = global_weights
-    labels = DOMAIN_SHORT + ["Global"]
+    labels = DOMAIN_SHORT
 
     fig, ax = plt.subplots(figsize=(9, 4.5))
     x = np.arange(len(labels))
@@ -206,12 +205,11 @@ def generate_report(
     opt_domain = domain_labels[optimal_selected_indices]
     opt_dist = np.bincount(opt_domain[opt_domain >= 0], minlength=num_domains).astype(np.float64)
     opt_dist /= max(1, opt_dist.sum())
-    global_w = optimal_params.merge_config.global_weights
     domain_w = optimal_params.merge_config.domain_weights
 
     # Save figures
     fig1_file = _make_fig1(orig_dist, opt_dist, output_dir)
-    fig2_file = _make_fig2(global_w, domain_w, num_domains, num_criteria, output_dir)
+    fig2_file = _make_fig2(domain_w, num_domains, num_criteria, output_dir)
 
     sel_tokens = token_counts[optimal_selected_indices].sum()
 

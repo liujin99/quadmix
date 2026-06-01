@@ -104,10 +104,10 @@ class ParameterSet:
     def flatten(self) -> npt.NDArray[np.float64]:
         """
         Flatten parameters into a 1D array for regression input.
-        Order: [global_weights, domain_weights, sampling_params...]
+        Order: [domain_weights, sampling_params...]
+        Total: (N + 4) x M  (per Algorithm 1, no global_weights)
         """
         parts = [
-            self.merge_config.global_weights,
             self.merge_config.domain_weights,
         ]
         for sc in self.sampling_configs:
@@ -123,11 +123,12 @@ class ParameterSet:
     ) -> "ParameterSet":
         """Reconstruct ParameterSet from flattened array."""
         offset = 0
-        global_weights = array[offset:offset + num_criteria]
-        offset += num_criteria
 
         domain_weights = array[offset:offset + num_criteria * num_domains]
         offset += num_criteria * num_domains
+
+        # global_weights are not in flattened array (intermediate in Algorithm 1)
+        global_weights = np.ones(num_criteria, dtype=np.float64) / num_criteria
 
         merge_config = MergedQualityConfig(
             global_weights=global_weights,
@@ -149,8 +150,8 @@ class ParameterSet:
 
     @property
     def flat_dim(self) -> int:
-        """Total dimension of flattened parameter vector."""
-        return (num_criteria := self.num_criteria) + num_criteria * self.num_domains + 4 * self.num_domains
+        """Total dimension of flattened parameter vector: (N + 4) x M."""
+        return (self.num_criteria + 4) * self.num_domains
 
 
 @dataclass

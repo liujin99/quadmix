@@ -89,6 +89,9 @@ class ParameterSampler:
                 epsilon=rescaled_epsilon,
             ))
 
+        # global_weights stores the sampled ã for reference/debugging only.
+        # It is an intermediate value in Algorithm 1, NOT part of the
+        # optimizable parameter vector θ. flatten/unflatten ignores it.
         merge_config = MergedQualityConfig(
             global_weights=np.array(a_norm, dtype=np.float64),
             domain_weights=np.array(domain_weights_list, dtype=np.float64),

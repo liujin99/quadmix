@@ -145,10 +145,7 @@ class RegressionModel:
             importances = self._model.feature_importances_
             names = []
             N, M = self._num_criteria, self._num_domains
-            # Global weights
-            for n in range(N):
-                names.append(f"global_weight_criterion_{n}")
-            # Domain weights
+            # Domain weights (no global weights — they are intermediate in Algorithm 1)
             for m in range(M):
                 for n in range(N):
                     names.append(f"alpha_{m}_{n}")
