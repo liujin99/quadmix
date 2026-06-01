@@ -200,6 +200,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         mgr = self.metadata_manager
         self._domain_labels = mgr.domain_labels
         self._quality_scores = mgr.quality_scores
+        self._token_counts = mgr.estimate_token_counts()
         self._num_docs = mgr.num_docs
         self._train_idx = np.arange(self._num_docs)
 
@@ -854,8 +855,11 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             alpha_m = params.merge_config.get_final_weights(m)
             merged_scores[indices] = self._normalized_quality[indices] @ alpha_m
 
-        # Eq.2: Subset-based rank estimation per domain
+        # Eq.2: Subset-based rank estimation per domain (token-weighted)
+        # Paper: "calculate the size of the set by adding up the number of
+        # tokens for all samples within the set"
         ranks = np.zeros(self._num_docs, dtype=np.float64)
+        has_tokens = hasattr(self, '_token_counts') and self._token_counts is not None
         for m in range(M):
             indices = self._domain_indices.get(m)
             if indices is None:
@@ -867,10 +871,22 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
             k = min(self.rank_ref_size, n_domain)
             ref_idx = rng.choice(n_domain, k, replace=False)
-            ref_scores = np.sort(domain_scores[ref_idx])
+            ref_scores_unsorted = domain_scores[ref_idx]
+            sort_order = np.argsort(ref_scores_unsorted)
+            ref_scores = ref_scores_unsorted[sort_order]
 
             positions = np.searchsorted(ref_scores, domain_scores, side='right')
-            ranks[indices] = positions.astype(np.float64) / k
+
+            if has_tokens:
+                ref_tokens = self._token_counts[indices[ref_idx]][sort_order].astype(np.float64)
+                cum_tokens = np.concatenate(([0.0], np.cumsum(ref_tokens)))
+                total_ref_tokens = cum_tokens[-1]
+                if total_ref_tokens > 0:
+                    ranks[indices] = cum_tokens[positions] / total_ref_tokens
+                else:
+                    ranks[indices] = positions.astype(np.float64) / k
+            else:
+                ranks[indices] = positions.astype(np.float64) / k
 
         return ranks
 

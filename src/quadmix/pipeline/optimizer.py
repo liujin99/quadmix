@@ -94,6 +94,9 @@ class RegressionModel:
         losses: npt.NDArray[np.float64],
         num_domains: int,
         num_criteria: int,
+        eval_params_list: Optional[List[ParameterSet]] = None,
+        eval_losses: Optional[npt.NDArray[np.float64]] = None,
+        early_stopping_rounds: int = 50,
     ) -> "RegressionModel":
         """
         Train the regression model on proxy experiment results.
@@ -103,6 +106,9 @@ class RegressionModel:
             losses: Corresponding validation losses. Shape: (n_experiments,).
             num_domains: Number of domains M.
             num_criteria: Number of quality criteria N.
+            eval_params_list: Optional validation parameter configurations.
+            eval_losses: Optional validation losses.
+            early_stopping_rounds: Early stopping patience (LightGBM only).
 
         Returns:
             Self (fitted model).
@@ -118,7 +124,20 @@ class RegressionModel:
         self._num_criteria = num_criteria
 
         self._build_model()
-        self._model.fit(X, y)
+
+        if (self.model_type == "lightgbm" and eval_params_list is not None
+                and eval_losses is not None and len(eval_params_list) > 0):
+            X_val = np.array([p.flatten() for p in eval_params_list])
+            y_val = np.array(eval_losses)
+            import lightgbm as lgb
+            self._model.fit(
+                X, y,
+                eval_set=[(X_val, y_val)],
+                callbacks=[lgb.early_stopping(stopping_rounds=early_stopping_rounds, verbose=False)],
+            )
+        else:
+            self._model.fit(X, y)
+
         self._is_fitted = True
         return self
 
@@ -269,6 +288,8 @@ class QuaDMixOptimizer:
             train_losses,
             num_domains=self.config.num_domains,
             num_criteria=self.config.num_quality_criteria,
+            eval_params_list=val_params if n_val > 0 else None,
+            eval_losses=val_losses if n_val > 0 else None,
         )
 
         # Evaluate (handle tiny experiment counts)
