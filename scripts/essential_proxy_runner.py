@@ -970,9 +970,11 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         epoch_pos = 0  # current position in permutation
         epoch = 0
 
-        # Pre-allocate: device tensor for indices (reused each iter)
-        block_starts_buf = torch.empty(self.micro_batch_size, dtype=torch.long, device=device)
-        block_offsets_dev = torch.arange(self.block_size + 1, device=device)
+        # Pre-allocate: NPU buffers for batched transfer
+        # Transfer grad_acc micro-batches at once per optimizer step to reduce host->device latency
+        accum_bs = self.micro_batch_size * grad_acc  # e.g. 4*16=64
+        batch_buf = torch.empty(accum_bs, self.block_size + 1, dtype=torch.long, device=device)
+        block_starts_buf = torch.empty(accum_bs, dtype=torch.long)  # CPU staging
 
         # ---- 5. Training loop (RegMix-style: permutation shuffle, no replacement) ----
         model.train()
@@ -990,14 +992,11 @@ class EssentialWebProxyRunner(BaseProxyRunner):
               f"{', checkpoint every ' + str(checkpoint_interval) + ' steps' if checkpoint_interval > 0 else ''})...")
 
         while iter_ct < max_iters:
-            # Check if we need a new epoch (reshuffle)
-            if epoch_pos >= total_blocks:
-                perm = get_epoch_permutation()
-                epoch_pos = 0
-                epoch += 1
+            micro_in_step = iter_ct % grad_acc
+            mb_start = micro_in_step * self.micro_batch_size
+            mb_end = mb_start + self.micro_batch_size
 
-            # Take micro_batch_size blocks from the permutation
-            for i in range(self.micro_batch_size):
+            for i in range(mb_start, mb_end):
                 if epoch_pos >= total_blocks:
                     perm = get_epoch_permutation()
                     epoch_pos = 0
@@ -1005,9 +1004,21 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 block_starts_buf[i] = perm[epoch_pos]
                 epoch_pos += 1
 
-            # advanced indexing on CPU, then move to device
-            idx_cpu = block_starts_buf.cpu().unsqueeze(1) + torch.arange(self.block_size + 1).unsqueeze(0)
-            batch = flat_train[idx_cpu].to(device)  # (micro_bs, block_size+1)
+            # Batch transfer at step boundary: collect all grad_acc micro-batches
+            if micro_in_step == 0:
+                for i in range(mb_end, accum_bs):
+                    if epoch_pos >= total_blocks:
+                        perm = get_epoch_permutation()
+                        epoch_pos = 0
+                        epoch += 1
+                    block_starts_buf[i] = perm[epoch_pos]
+                    epoch_pos += 1
+                # Now transfer the full accum batch to device at once
+                idx_cpu = block_starts_buf.unsqueeze(1) + torch.arange(self.block_size + 1).unsqueeze(0)
+                batch_buf.copy_(flat_train[idx_cpu])
+
+            # Extract this micro-batch slice on device
+            batch = batch_buf[mb_start:mb_end]
             inp = batch[:, :self.block_size].contiguous()
             tgt = batch[:, 1:self.block_size + 1].contiguous()
 
