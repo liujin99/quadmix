@@ -949,15 +949,30 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         # ---- 2. Create model ----
         model = ProxyModel(config=self.model_config).to(device)
+        
+        # Compile model for kernel fusion (PyTorch 2.0+)
+        if hasattr(torch, 'compile'):
+            try:
+                model = torch.compile(model, mode='max-autotune')
+                print(f"  [Exp {experiment_id:04d}] Model compiled with torch.compile")
+            except Exception as e:
+                print(f"  [Exp {experiment_id:04d}] torch.compile failed: {e}, using eager mode")
+        
         non_emb = model.count_params(non_embedding_only=True)
         print(f"  [Exp {experiment_id:04d}] Model on {device}: "
               f"{model.count_params():,} total, {non_emb:,} non-emb")
 
         # ---- 3. Optimizer ----
-        optimizer = torch.optim.AdamW(
-            model.parameters(), lr=self.learning_rate,
-            betas=(0.9, 0.95), weight_decay=self.weight_decay, fused=False,
-        )
+        try:
+            optimizer = torch.optim.AdamW(
+                model.parameters(), lr=self.learning_rate,
+                betas=(0.9, 0.95), weight_decay=self.weight_decay, fused=True,
+            )
+        except RuntimeError:
+            optimizer = torch.optim.AdamW(
+                model.parameters(), lr=self.learning_rate,
+                betas=(0.9, 0.95), weight_decay=self.weight_decay, fused=False,
+            )
 
         # ---- 4. Training data preparation (RegMix-style: permutation shuffle) ----
         # Remove padding and insert EOS between documents to avoid cross-document contamination
@@ -972,7 +987,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 real_tokens_list.append(real_doc)
                 real_tokens_list.append(torch.tensor([eos_id], dtype=doc.dtype))
         
-        flat_train = torch.cat(real_tokens_list).cpu()
+        flat_train = torch.cat(real_tokens_list).to(device)
         del train_tokens, real_tokens_list  # Free memory immediately
         num_steps = self.tiny_steps if self.tiny_steps > 0 else self.max_step
         grad_acc = self.gradient_accumulation_steps
@@ -1001,7 +1016,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         # Transfer grad_acc micro-batches at once per optimizer step to reduce host->device latency
         accum_bs = self.micro_batch_size * grad_acc  # e.g. 4*16=64
         batch_buf = torch.empty(accum_bs, self.block_size + 1, dtype=torch.long, device=device)
-        block_starts_buf = torch.empty(accum_bs, dtype=torch.long)  # CPU staging
+        block_starts_buf = torch.empty(accum_bs, dtype=torch.long, device=device)  # NPU staging
+        arange_buf = torch.arange(self.block_size + 1, dtype=torch.long, device=device)  # Pre-compute on device
 
         # ---- 5. Training loop (RegMix-style: permutation shuffle, no replacement) ----
         model.train()
@@ -1023,26 +1039,24 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             mb_start = micro_in_step * self.micro_batch_size
             mb_end = mb_start + self.micro_batch_size
 
-            for i in range(mb_start, mb_end):
-                if epoch_pos >= total_blocks:
-                    perm = get_epoch_permutation()
-                    epoch_pos = 0
-                    epoch += 1
-                block_starts_buf[i] = perm[epoch_pos]
-                epoch_pos += 1
-
             # Batch transfer at step boundary: collect all grad_acc micro-batches
             if micro_in_step == 0:
-                for i in range(mb_end, accum_bs):
+                # Prepare block_starts on CPU first
+                block_starts_cpu = np.empty(accum_bs, dtype=np.int64)
+                for i in range(accum_bs):
                     if epoch_pos >= total_blocks:
                         perm = get_epoch_permutation()
                         epoch_pos = 0
                         epoch += 1
-                    block_starts_buf[i] = perm[epoch_pos]
+                    block_starts_cpu[i] = perm[epoch_pos]
                     epoch_pos += 1
-                # Now transfer the full accum batch to device at once
-                idx_cpu = block_starts_buf.unsqueeze(1) + torch.arange(self.block_size + 1).unsqueeze(0)
-                batch_buf.copy_(flat_train[idx_cpu])
+                
+                # Transfer to device once
+                block_starts_buf.copy_(torch.from_numpy(block_starts_cpu).to(device))
+                
+                # Index on device
+                idx_device = block_starts_buf.unsqueeze(1) + arange_buf.unsqueeze(0)
+                batch_buf.copy_(flat_train[idx_device])
 
             # Extract this micro-batch slice on device
             batch = batch_buf[mb_start:mb_end]
