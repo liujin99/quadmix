@@ -129,21 +129,21 @@
 
 ### P1 — 重大问题
 
-#### A2. 质量评分器数量不同 (N=5 vs N=3)
-- **论文**: N=3 (AskLLM, Fineweb-Edu, DCLM)，使用模型推理
-- **代码**: N=5 (dclm, fineweb_edu_approx, english, eai_general_math, eai_open_web_math)，使用 FastText 预计算信号
-- **影响**: 缺少 AskLLM 等语义级评分，参数空间维度不同
+#### A2. 质量评分器数量不同 (N=5 vs N=3) — 非问题（设计选择）
+- **论文**: N=3 (AskLLM, Fineweb-Edu, DCLM)，基于 RefinedWeb 数据集
+- **代码**: N=5 (dclm, fineweb_edu_approx, english, eai_general_math, eai_open_web_math)，基于 essential-web 数据集
+- **决定**: 使用 essential-web 提供的标签，有什么用什么
 
-#### A3. 域分类器不同 (M=10 vs M=26)
-- **论文**: M=26 (Deberta V3 分类器，细粒度域)
-- **代码**: M=10 (EAI Dewey Decimal level_1，粗粒度)
-- **影响**: 参数维度 182 vs 90，域内多样性控制粒度降低
+#### A3. 域分类器不同 (M=10 vs M=26) — 非问题（设计选择）
+- **论文**: M=26 (Deberta V3 分类器)，基于 RefinedWeb 数据集
+- **代码**: M=10 (EAI Dewey Decimal level_1)，基于 essential-web 数据集
+- **决定**: 使用 essential-web 提供的域分类，有什么用什么
 
-#### A4. Proxy 训练 token 数远少于论文
+#### A4. Proxy 训练 token 数略少于论文
 - **论文**: 1B tokens per experiment (1 H100 GPU hour)
-- **代码**: ~41M tokens (tiny_steps=5000, batch=4, block=2048)
-- **影响**: 少约 25 倍，proxy 模型收敛质量差，回归模型准确性降低
-- **方案**: 增加 tiny_steps 或 block_size，或接受精度损失
+- **代码**: ~655M tokens (tiny_steps=5000, global_batch=64, block=2048)
+- **计算**: 5000 steps × 64 (global_batch) × 2048 (block_size) = 655M
+- **影响**: 约为论文的 65%，差距不大，可接受
 
 ### P2 — 中等问题
 
@@ -152,10 +152,10 @@
 - **问题**: 论文 Eq.2 使用 token 数量加权计算百分位，proxy 实验使用文档数等权
 - **影响**: 排名精度降低，与论文不一致
 
-#### A6. 数据集不同
+#### A6. 数据集不同 — 非问题（设计选择）
 - **论文**: RefinedWeb (570B tokens)
 - **代码**: essential-web-v1 (~808 GB)
-- **影响**: 质量分布和域分布差异大，结果不可直接对比
+- **决定**: 基于 essential-web 数据集实现算法，不要求与论文结果直接对比
 
 #### A7. 缺少 QuaDMix-BMK 变体
 - **论文**: 两种变体 (QuaDMix-OH + QuaDMix-BMK)
@@ -200,10 +200,12 @@
 
 ### 工程层面
 
-#### B6. Token 计数使用估算而非实际值
-- **文件**: `src/quadmix/data/metadata_manager.py:estimate_token_counts()` (L266-270)
-- **问题**: `char_count // 4` 估算，论文用实际 token 数
-- **影响**: 短文档排名精度降低
+#### B6. Token 计数使用估算而非实际值 — 不做
+- **原因**:
+  1. 分词器不同结果不同，无标准答案
+  2. 40T 数据池全量 tokenize 只为计数，开销大
+  3. 同域内英文文档误差方向一致，相对排名几乎不变
+  4. 业界主流数据集（RefinedWeb、FineWeb、DCLM、essential-web）均不提供 token 数标签，论文大概率也是估算
 
 #### B7. 验证集 loss 计算方式未明确
 - **文件**: `scripts/essential_proxy_runner.py:_run_validation()` (L1114-1142)

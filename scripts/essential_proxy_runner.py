@@ -960,9 +960,20 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         )
 
         # ---- 4. Training data preparation (RegMix-style: permutation shuffle) ----
-        # Keep flat_train on CPU — move batch to device per iteration
-        flat_train = train_tokens.reshape(-1).cpu()
-        del train_tokens  # Free memory immediately
+        # Remove padding and insert EOS between documents to avoid cross-document contamination
+        pad_id = self.tokenizer.pad_token_id
+        eos_id = self.tokenizer.eos_token_id
+        real_tokens_list = []
+        for i in range(len(train_tokens)):
+            doc = train_tokens[i]
+            real_mask = doc != pad_id
+            real_doc = doc[real_mask]
+            if len(real_doc) > 0:
+                real_tokens_list.append(real_doc)
+                real_tokens_list.append(torch.tensor([eos_id], dtype=doc.dtype))
+        
+        flat_train = torch.cat(real_tokens_list).cpu()
+        del train_tokens, real_tokens_list  # Free memory immediately
         num_steps = self.tiny_steps if self.tiny_steps > 0 else self.max_step
         grad_acc = self.gradient_accumulation_steps
         max_iters = num_steps * grad_acc
