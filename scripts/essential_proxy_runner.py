@@ -1007,6 +1007,10 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         # ---- 2. Create model ----
         with PerfTimer.section("create_model", _timer_prefix):
             model = ProxyModel(config=self.model_config).to(device)
+            # Use bf16 on NPU to reduce memory and accelerate training
+            if device.type == "npu":
+                model = model.to(torch.bfloat16)
+                print(f"  [Exp {experiment_id:04d}] Model converted to bf16 for NPU")
 
         # Compile model for kernel fusion (CPU/CUDA only, not NPU)
         if self.device_type != "npu" and hasattr(torch, 'compile'):
