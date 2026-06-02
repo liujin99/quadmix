@@ -1141,6 +1141,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             )
 
             is_acc = (iter_ct + 1) % grad_acc != 0
+            if device.type == "npu":
+                torch.npu.empty_cache()
             (loss / grad_acc).backward()
 
             if not is_acc:
