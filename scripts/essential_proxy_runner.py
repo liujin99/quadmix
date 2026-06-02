@@ -1085,6 +1085,10 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 # Checkpoint: record val_loss every checkpoint_interval steps
                 # Skip if this is the final step — validation will run after training loop
                 if checkpoint_interval > 0 and step_ct % checkpoint_interval == 0 and step_ct < num_steps:
+                    if device.type == "npu":
+                        torch.npu.empty_cache()
+                    elif device.type == "cuda":
+                        torch.cuda.empty_cache()
                     ckpt_val = self._run_validation(model, device)
                     self._ckpt_results[step_ct] = ckpt_val
                     elapsed_ckpt = time.time() - t_start
@@ -1101,10 +1105,21 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                       f"lr={lr:.2e}, {tok_per_step * step_ct / elapsed:.0f} tok/s, "
                       f"ETA: {rem:.0f}s")
 
-        # ---- 6. Validation: assistant-only loss (full validation set) ----
+        # ---- 6. Free training resources before validation ----
+        del flat_train, batch_buf, block_starts_buf, arange_buf, optimizer, perm
+        if device.type == "npu":
+            import gc as _gc
+            _gc.collect()
+            torch.npu.empty_cache()
+        elif device.type == "cuda":
+            import gc as _gc
+            _gc.collect()
+            torch.cuda.empty_cache()
+
+        # ---- 7. Validation: assistant-only loss (full validation set) ----
         val_loss = self._run_validation(model, device)
 
-        # ---- 7. Save metadata ----
+        # ---- 8. Save metadata ----
         np.save(os.path.join(exp_dir, "selected_indices.npy"), selected_idx)
         avg_train = total_loss / step_ct if step_ct > 0 else 0
 
@@ -1285,14 +1300,14 @@ class EssentialWebProxyRunner(BaseProxyRunner):
     def tokenize_all_needed(self, all_selected: List[np.ndarray]):
         """Tokenize all documents needed by all experiments (union).
 
-        For CPU/sequential mode: one-shot tokenize → all subsequent exps get cache hits.
+        One-shot parallel tokenize → all subsequent exps get cache hits.
 
         Process:
           1. Collect union of all needed docs across all experiments
           2. Group by shard
           3. For each shard:
-             - Check existing cache
-             - Tokenize missing rows
+             - Check existing cache (memory + disk)
+             - Tokenize missing rows (parallel)
              - Write to shard cache
           4. No temporary files (exps read directly from shard cache)
 
@@ -1300,14 +1315,12 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             all_selected: List of selected_indices from precompute_samples()
         """
         if self._mode != "sharded":
-            # Legacy mode: already tokenized upfront
             print("[TokenizeAll] Legacy mode: tokens already loaded")
             return
 
         mgr = self.metadata_manager
         t0 = time.time()
 
-        # Collect union of all needed docs
         all_unique = np.unique(np.concatenate(all_selected))
         shard_groups = mgr.global_to_shard_rows(all_unique)
 
@@ -1316,32 +1329,38 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         print(f"\n[TokenizeAll] Union: {len(all_unique):,} unique docs across {len(shard_groups)} shards")
 
-        for sid, (shard_path, local_rows) in shard_groups.items():
-            cache_path = self._get_shard_token_path(sid)
-            cached_rows = self._cached_shard_rows(sid)
+        shard_miss_info = []
+        shard_miss_meta = {}
 
-            # Split into hit and miss
-            hit_rows = [r for r in local_rows if int(r) in cached_rows]
-            miss_rows = [r for r in local_rows if int(r) not in cached_rows]
+        for sid, (shard_path, local_rows) in shard_groups.items():
+            cached_rows = self._cached_shard_rows(sid)
+            memory_cached = self._memory_cache_get_rows(sid)
+
+            local_rows_int = [int(r) for r in local_rows]
+            hit_rows = [r for r in local_rows_int if r in cached_rows or r in memory_cached]
+            miss_rows = [r for r in local_rows_int if r not in cached_rows and r not in memory_cached]
 
             total_cached += len(hit_rows)
 
             if miss_rows:
-                miss_rows_arr = np.array(miss_rows, dtype=np.int64)
-                df_shard = pd.read_parquet(
-                    shard_path,
-                    columns=["row_in_shard", "text"],
-                    filters=[("row_in_shard", "in", miss_rows_arr.tolist())],
-                )
-                df_shard = df_shard.sort_values("row_in_shard")
-                texts = df_shard["text"].astype(str).tolist()
-                parsed_rows = df_shard["row_in_shard"].to_numpy(dtype=np.int64)
+                miss_rows_arr = np.array(sorted(miss_rows), dtype=np.int64)
+                shard_miss_info.append((sid, shard_path, miss_rows_arr.tolist()))
+                shard_miss_meta[sid] = len(miss_rows)
 
-                miss_tokens = self._tokenize_texts(texts)
-                self._cache_add_rows(sid, parsed_rows, miss_tokens)
-                total_tokenized += len(texts)
+        if shard_miss_info:
+            print(f"[TokenizeAll] {sum(shard_miss_meta.values()):,} miss rows across {len(shard_miss_info)} shards, parallel tokenizing...")
 
-                print(f"  [Shard {sid}] tokenized {len(texts):,} docs, hit {len(hit_rows):,} from cache")
+            parallel_results = _tokenize_shard_parallel(
+                shard_miss_info, self.tokenizer.name_or_path, self.block_size
+            )
+
+            for sid, parsed_rows, miss_tokens, io_time, tokenize_time, total_time in parallel_results:
+                self._memory_cache_add_rows(sid, parsed_rows, miss_tokens)
+                self._cache_add_rows(sid, parsed_rows, torch.from_numpy(miss_tokens))
+                total_tokenized += len(parsed_rows)
+                print(f"  [Shard {sid}] tokenized {len(parsed_rows):,} docs (IO {io_time:.1f}s, tok {tokenize_time:.1f}s)")
+        else:
+            print(f"[TokenizeAll] All {len(shard_groups)} shards fully cached, 0 miss rows")
 
         elapsed = time.time() - t0
         print(f"[TokenizeAll] Done: {total_tokenized:,} new docs tokenized, "
@@ -1812,14 +1831,16 @@ def _tokenize_shard_parallel(
 
     total_docs = len(flat_items)
 
-    # Optimal worker count: encode_batch is internally multi-threaded
-    # so fewer processes avoid oversubscription. On 192-core machine:
-    #   48 workers, each using ~4 internal threads = ~192 cores utilized
+    # Optimal worker count: encode_batch uses rayon internally (multi-threaded).
+    # Set RAYON_NUM_THREADS per worker to avoid oversubscription.
+    # workers × threads_per_worker ≈ num_cpus
     env_workers = int(os.environ.get("TOKENIZE_WORKERS", "0"))
+    env_threads = int(os.environ.get("TOKENIZE_THREADS_PER_WORKER", "0"))
+    threads_per_worker = env_threads if env_threads >= 1 else 4
     if env_workers >= 1:
         n_workers = env_workers
     else:
-        n_workers = min(48, total_docs // 5000, num_cpus)
+        n_workers = min(num_cpus // threads_per_worker, total_docs // 5000)
         n_workers = max(4, n_workers)
 
     chunk_size = max(1000, total_docs // n_workers)
@@ -1832,7 +1853,7 @@ def _tokenize_shard_parallel(
         chunks.append(chunk)
 
     print(f"  [ParallelTokenize] Stage 2 tokenize: {total_docs:,} docs, "
-          f"{len(chunks)} chunks x ~{chunk_size}, {n_workers} workers")
+          f"{len(chunks)} chunks x ~{chunk_size}, {n_workers} workers x {threads_per_worker} threads")
 
     tok_t0 = time.time()
     # Use array-based IPC: returns (meta, np.array) instead of list of tuples
@@ -1842,7 +1863,7 @@ def _tokenize_shard_parallel(
     with ProcessPoolExecutor(max_workers=n_workers) as executor:
         futures = []
         for chunk in chunks:
-            fut = executor.submit(_tokenize_chunk_to_array, chunk, tokenizer_path, block_size)
+            fut = executor.submit(_tokenize_chunk_to_array, chunk, tokenizer_path, block_size, threads_per_worker)
             futures.append(fut)
         for fut in as_completed(futures):
             meta, arr = fut.result()
@@ -1914,6 +1935,7 @@ def _tokenize_chunk_to_array(
         chunk: List[Tuple[int, int, str]],
         tokenizer_path: str,
         block_size: int,
+        threads_per_worker: int = 4,
 ) -> Tuple[List[Tuple[int, int]], np.ndarray]:
     """Tokenize a chunk, returning compact numpy array instead of per-doc lists.
 
@@ -1921,6 +1943,10 @@ def _tokenize_chunk_to_array(
     This reduces IPC overhead from ~1.6GB of Python objects to ~1.6GB of contiguous
     shared memory that gets pickled once.
     """
+    import os as _os
+    _os.environ["RAYON_NUM_THREADS"] = str(threads_per_worker)
+    _os.environ["OMP_NUM_THREADS"] = str(threads_per_worker)
+
     from tokenizers import Tokenizer
 
     tok = Tokenizer.from_pretrained(tokenizer_path)
