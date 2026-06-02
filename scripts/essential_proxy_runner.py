@@ -1874,7 +1874,7 @@ def _tokenize_shard_parallel(
                 run many worker processes (~96 on 190-core machine)
       Returns list of (sid, rows, tokens_int32, io_time, tok_time, total_time).
     """
-    from concurrent.futures import ProcessPoolExecutor, as_completed
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     n_shards = len(shard_tasks)
     num_cpus = mp.cpu_count() or 8
@@ -1887,7 +1887,7 @@ def _tokenize_shard_parallel(
     io_t0 = time.time()
     io_results = {}  # sid -> (parsed_rows, texts, io_time)
     with PerfTimer.section("stage1_io", "parallel_tokenize"):
-        with ProcessPoolExecutor(max_workers=io_workers) as executor:
+        with ThreadPoolExecutor(max_workers=io_workers) as executor:
             futures = {}
             for sid, shard_path, miss_rows in shard_tasks:
                 fut = executor.submit(_io_read_shard, sid, shard_path, miss_rows)
@@ -1910,15 +1910,16 @@ def _tokenize_shard_parallel(
     total_docs = len(flat_items)
 
     # Optimal worker count: encode_batch uses rayon internally (multi-threaded).
-    # Set RAYON_NUM_THREADS per worker to avoid oversubscription.
-    # workers × threads_per_worker ≈ num_cpus
+    # With ThreadPoolExecutor, set RAYON_NUM_THREADS=1 to avoid oversubscription.
+    # Each thread processes a chunk sequentially, total parallelism = n_workers.
+    os.environ["RAYON_NUM_THREADS"] = "1"
+    os.environ["OMP_NUM_THREADS"] = "1"
+
     env_workers = int(os.environ.get("TOKENIZE_WORKERS", "0"))
-    env_threads = int(os.environ.get("TOKENIZE_THREADS_PER_WORKER", "0"))
-    threads_per_worker = env_threads if env_threads >= 1 else 4
     if env_workers >= 1:
         n_workers = env_workers
     else:
-        n_workers = min(num_cpus // threads_per_worker, total_docs // 5000)
+        n_workers = min(96, num_cpus)
         n_workers = max(4, n_workers)
 
     chunk_size = max(1000, total_docs // n_workers)
@@ -1931,7 +1932,7 @@ def _tokenize_shard_parallel(
         chunks.append(chunk)
 
     print(f"  [ParallelTokenize] Stage 2 tokenize: {total_docs:,} docs, "
-          f"{len(chunks)} chunks x ~{chunk_size}, {n_workers} workers x {threads_per_worker} threads")
+          f"{len(chunks)} chunks x ~{chunk_size}, {n_workers} threads")
 
     tok_t0 = time.time()
     # Use array-based IPC: returns (meta, np.array) instead of list of tuples
@@ -1939,10 +1940,10 @@ def _tokenize_shard_parallel(
     chunk_results_meta = []  # List of (sid, idx) pairs
     chunk_results_arrays = []  # List of np.array[N_chunk x block_size]
     with PerfTimer.section("stage2_tokenize", "parallel_tokenize"):
-        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
             futures = []
             for chunk in chunks:
-                fut = executor.submit(_tokenize_chunk_to_array, chunk, tokenizer_path, block_size, threads_per_worker)
+                fut = executor.submit(_tokenize_chunk_to_array, chunk, tokenizer_path, block_size, 1)
                 futures.append(fut)
             for fut in as_completed(futures):
                 meta, arr = fut.result()
