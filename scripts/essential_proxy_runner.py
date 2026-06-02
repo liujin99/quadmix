@@ -544,9 +544,11 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         # ── Step 1: Collect all shard rows needed by this batch ───────────
         # shard_to_exp_rows[sid] = {exp_id: [row_in_shard, ...]}
         shard_to_exp_rows: Dict[int, Dict[int, List[int]]] = {}
+        exp_to_shard_groups: Dict[int, Dict] = {}  # Cache for Step 4
 
         for exp_id, selected_idx in zip(batch_exp_ids, batch_selected):
             shard_groups = mgr.global_to_shard_rows(selected_idx)
+            exp_to_shard_groups[exp_id] = shard_groups  # Cache for reuse
             for sid, (shard_path, local_rows) in shard_groups.items():
                 if sid not in shard_to_exp_rows:
                     shard_to_exp_rows[sid] = {}
@@ -642,7 +644,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         pack_t0 = time.time()
 
         for exp_id, selected_idx in zip(batch_exp_ids, batch_selected):
-            shard_groups = mgr.global_to_shard_rows(selected_idx)
+            shard_groups = exp_to_shard_groups[exp_id]  # Reuse cached result
             all_tokens = []
 
             for sid, (shard_path, local_rows) in shard_groups.items():
@@ -1847,6 +1849,18 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         return all_results
 
 
+# Module-level tokenizer cache to avoid repeated loading
+_tokenizer_cache: Dict[str, "Tokenizer"] = {}
+
+
+def _get_tokenizer(tokenizer_path: str) -> "Tokenizer":
+    """Get or create a cached tokenizer instance (per-process cache)."""
+    if tokenizer_path not in _tokenizer_cache:
+        from tokenizers import Tokenizer
+        _tokenizer_cache[tokenizer_path] = Tokenizer.from_pretrained(tokenizer_path)
+    return _tokenizer_cache[tokenizer_path]
+
+
 def _io_read_shard(
         sid: int,
         shard_path: str,
@@ -1867,55 +1881,60 @@ def _io_read_shard(
     return (sid, parsed_rows, texts, io_time)
 
 
+def _process_shard_full(
+        sid: int,
+        shard_path: str,
+        miss_rows: List[int],
+        tokenizer_path: str,
+        block_size: int,
+) -> Tuple[int, np.ndarray, np.ndarray, float, float, float]:
+    """Process one shard: IO + tokenize in sequence.
+    
+    This enables pipelining: as soon as one shard's IO completes, its tokenize starts
+    immediately without waiting for other shards.
+    
+    Returns (sid, parsed_rows, tokens_array, io_time, tok_time, total_time).
+    """
+    # Stage 1: IO
+    io_t0 = time.time()
+    import pandas as pd
+    df_shard = pd.read_parquet(
+        shard_path,
+        columns=["row_in_shard", "text"],
+        filters=[("row_in_shard", "in", miss_rows)],
+    )
+    df_shard = df_shard.sort_values("row_in_shard")
+    texts = df_shard["text"].astype(str).tolist()
+    parsed_rows = df_shard["row_in_shard"].to_numpy(dtype=np.int64)
+    io_time = time.time() - io_t0
+    
+    # Stage 2: Tokenize
+    tok_t0 = time.time()
+    chunk = [(sid, idx, text) for idx, text in enumerate(texts)]
+    meta, tokens_array = _tokenize_chunk_to_array(chunk, tokenizer_path, block_size, 1)
+    tok_time = time.time() - tok_t0
+    
+    return (sid, parsed_rows, tokens_array, io_time, tok_time, io_time + tok_time)
+
+
 def _tokenize_shard_parallel(
         shard_tasks: List[Tuple[int, str, List[int]]],
         tokenizer_path: str,
         block_size: int,
 ) -> List[Tuple[int, np.ndarray, np.ndarray, float, float, float]]:
-    """Two-stage parallel tokenize:
-      Stage 1: IO — read all shards in parallel (1 process per shard)
-      Stage 2: Tokenize — split ALL texts into fine-grained chunks,
-                run many worker processes (~96 on 190-core machine)
-      Returns list of (sid, rows, tokens_int32, io_time, tok_time, total_time).
+    """Parallel tokenize with pipeline: each shard does IO + tokenize together.
+    
+    This avoids the serial bottleneck where Stage 1 must complete before Stage 2 starts.
+    Instead, as soon as one shard's IO completes, its tokenize starts immediately.
+    
+    Returns list of (sid, rows, tokens_int32, io_time, tok_time, total_time).
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     n_shards = len(shard_tasks)
     num_cpus = mp.cpu_count() or 8
 
-    # ── Stage 1: Parallel IO ─────────────────────────────────────
-    # Limit IO workers to avoid OOM on large shard counts.
-    # Each worker holds one shard's text in memory (~200MB parquet → ~1GB text).
-    # On 192-core / 1.5TB machine, 64 workers is safe (64GB RAM for IO).
-    io_workers = min(n_shards, 64)
-    io_t0 = time.time()
-    io_results = {}  # sid -> (parsed_rows, texts, io_time)
-    with PerfTimer.section("stage1_io", "parallel_tokenize"):
-        with ThreadPoolExecutor(max_workers=io_workers) as executor:
-            futures = {}
-            for sid, shard_path, miss_rows in shard_tasks:
-                fut = executor.submit(_io_read_shard, sid, shard_path, miss_rows)
-                futures[fut] = sid
-            for fut in as_completed(futures):
-                sid, parsed_rows, texts, io_time = fut.result()
-                io_results[sid] = (parsed_rows, texts, io_time)
-    io_total = time.time() - io_t0
-    print(f"  [ParallelTokenize] Stage 1 IO: {n_shards} shards read in {io_total:.1f}s")
-
-    # ── Stage 2: Fine-grained parallel tokenize ──────────────────
-    # Collect all texts across shards, preserving shard membership
-    # Each item: (sid, text_index, text)
-    flat_items: List[Tuple[int, int, str]] = []
-    for sid in sorted(io_results.keys()):
-        parsed_rows, texts, io_time = io_results[sid]
-        for idx, text in enumerate(texts):
-            flat_items.append((sid, idx, text))
-
-    total_docs = len(flat_items)
-
-    # Optimal worker count: encode_batch uses rayon internally (multi-threaded).
-    # With ThreadPoolExecutor, set RAYON_NUM_THREADS=1 to avoid oversubscription.
-    # Each thread processes a chunk sequentially, total parallelism = n_workers.
+    # Set thread limits to avoid oversubscription
     os.environ["RAYON_NUM_THREADS"] = "1"
     os.environ["OMP_NUM_THREADS"] = "1"
 
@@ -1926,58 +1945,25 @@ def _tokenize_shard_parallel(
         n_workers = min(96, num_cpus)
         n_workers = max(4, n_workers)
 
-    chunk_size = max(1000, total_docs // n_workers)
-    n_chunks = (total_docs + chunk_size - 1) // chunk_size
+    print(f"  [ParallelTokenize] {n_shards} shards, {n_workers} threads (pipeline mode)")
 
-    # Split into chunks
-    chunks = []
-    for i in range(0, total_docs, chunk_size):
-        chunk = flat_items[i:i + chunk_size]
-        chunks.append(chunk)
-
-    print(f"  [ParallelTokenize] Stage 2 tokenize: {total_docs:,} docs, "
-          f"{len(chunks)} chunks x ~{chunk_size}, {n_workers} threads")
-
-    tok_t0 = time.time()
-    # Use array-based IPC: returns (meta, np.array) instead of list of tuples
-    # This dramatically reduces serialization overhead (contiguous memory vs 200K Python lists)
-    chunk_results_meta = []  # List of (sid, idx) pairs
-    chunk_results_arrays = []  # List of np.array[N_chunk x block_size]
-    with PerfTimer.section("stage2_tokenize", "parallel_tokenize"):
+    t0 = time.time()
+    results = []
+    with PerfTimer.section("pipeline_tokenize", "parallel_tokenize"):
         with ThreadPoolExecutor(max_workers=n_workers) as executor:
-            futures = []
-            for chunk in chunks:
-                fut = executor.submit(_tokenize_chunk_to_array, chunk, tokenizer_path, block_size, 1)
-                futures.append(fut)
+            futures = [
+                executor.submit(_process_shard_full, sid, shard_path, miss_rows, tokenizer_path, block_size)
+                for sid, shard_path, miss_rows in shard_tasks
+            ]
             for fut in as_completed(futures):
-                meta, arr = fut.result()
-                chunk_results_meta.extend(meta)
-                chunk_results_arrays.append(arr)
-    tok_total = time.time() - tok_t0
-    print(f"  [ParallelTokenize] Stage 2 tokenize: {total_docs:,} docs in {tok_total:.1f}s "
-          f"({total_docs / tok_total:.0f} docs/s)")
+                results.append(fut.result())
+    
+    total_time = time.time() - t0
+    total_docs = sum(len(r[1]) for r in results)
+    print(f"  [ParallelTokenize] {total_docs:,} docs in {total_time:.1f}s "
+          f"({total_docs / total_time:.0f} docs/s)")
 
-    # ── Reassemble per-shard results ─────────────────────────────
-    # Concatenate all arrays, then group by (sid, idx)
-    # Build index: (sid, idx) -> row in concatenated array
-    with PerfTimer.section("reassemble", "parallel_tokenize"):
-        all_tokens = np.concatenate(chunk_results_arrays, axis=0)
-        index_map: Dict[Tuple[int, int], int] = {}
-        for row_i, (sid, idx) in enumerate(chunk_results_meta):
-            index_map[(sid, idx)] = row_i
-
-        final_results = []
-        for sid in sorted(io_results.keys()):
-            parsed_rows, texts, io_time = io_results[sid]
-            # Build tokens array in original order
-            indices = [index_map[(sid, idx)] for idx in range(len(texts))]
-            miss_tokens = all_tokens[indices]  # fancy index -> (N, block_size) array
-            # tok_time attributed proportionally (all shards share the tokenize pool)
-            this_tok_time = tok_total  # wall time for the whole pool
-            total_time = io_total + tok_total
-            final_results.append((sid, parsed_rows, miss_tokens, io_time, tok_total, total_time))
-
-    return final_results
+    return results
 
 
 def _tokenize_chunk_with_meta(
@@ -1989,9 +1975,7 @@ def _tokenize_chunk_with_meta(
 
     Uses the Rust-based tokenizers library directly for max throughput.
     """
-    from tokenizers import Tokenizer
-
-    tok = Tokenizer.from_pretrained(tokenizer_path)
+    tok = _get_tokenizer(tokenizer_path)
 
     # Extract texts in order
     texts = [item[2] for item in chunk]
@@ -2032,9 +2016,7 @@ def _tokenize_chunk_to_array(
     _os.environ["RAYON_NUM_THREADS"] = str(threads_per_worker)
     _os.environ["OMP_NUM_THREADS"] = str(threads_per_worker)
 
-    from tokenizers import Tokenizer
-
-    tok = Tokenizer.from_pretrained(tokenizer_path)
+    tok = _get_tokenizer(tokenizer_path)
     texts = [item[2] for item in chunk]
     encodings = tok.encode_batch(texts)
 

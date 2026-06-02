@@ -81,7 +81,7 @@ fi
 # 每 shard ≈ 79M tokens (char//4) / 246 MB 原始 parquet
 # 完整 3291 shards ≈ 260B tokens / 791 GB
 # 如果通过环境变量 $NUM_SHARDS 控制下载量：
-NUM_SHARDS="${NUM_SHARDS:-20}"
+NUM_SHARDS="${NUM_SHARDS:-100}"
 NUM_EXPERIMENTS="${NUM_EXPERIMENTS:-96}"
 TOKEN_ESTIMATE=$(( NUM_SHARDS * 79000000 ))
 TOKEN_ESTIMATE_B=$(echo "scale=1; $TOKEN_ESTIMATE / 1000000000" | bc 2>/dev/null || echo "~$(( TOKEN_ESTIMATE / 1000000000 ))")
