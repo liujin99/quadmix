@@ -1889,6 +1889,7 @@ def _process_shard_full(
         miss_rows: List[int],
         tokenizer_path: str,
         block_size: int,
+        threads_per_worker: int = 4,
 ) -> Tuple[int, np.ndarray, np.ndarray, float, float, float]:
     """Process one shard: IO + tokenize in sequence.
     
@@ -1897,7 +1898,6 @@ def _process_shard_full(
     
     Returns (sid, parsed_rows, tokens_array, io_time, tok_time, total_time).
     """
-    # Stage 1: IO
     io_t0 = time.time()
     import pandas as pd
     df_shard = pd.read_parquet(
@@ -1910,10 +1910,9 @@ def _process_shard_full(
     parsed_rows = df_shard["row_in_shard"].to_numpy(dtype=np.int64)
     io_time = time.time() - io_t0
     
-    # Stage 2: Tokenize
     tok_t0 = time.time()
     chunk = [(sid, idx, text) for idx, text in enumerate(texts)]
-    meta, tokens_array = _tokenize_chunk_to_array(chunk, tokenizer_path, block_size, 1)
+    meta, tokens_array = _tokenize_chunk_to_array(chunk, tokenizer_path, block_size, threads_per_worker)
     tok_time = time.time() - tok_t0
     
     return (sid, parsed_rows, tokens_array, io_time, tok_time, io_time + tok_time)
@@ -1924,132 +1923,76 @@ def _tokenize_shard_parallel(
         tokenizer_path: str,
         block_size: int,
 ) -> List[Tuple[int, np.ndarray, np.ndarray, float, float, float]]:
-    """Parallel tokenize with separate IO and tokenize thread pools.
-    
-    This avoids GIL serialization:
-    - IO pool: 100 threads read parquet files in parallel (pyarrow releases GIL)
-    - Tokenize pool: 96 threads tokenize in parallel (Rust releases GIL)
-    - Queue connects them: IO results flow to tokenize workers immediately
-    
+    """Parallel tokenize using ProcessPoolExecutor to bypass GIL.
+
+    Each process handles one shard end-to-end (IO + tokenize) with its own
+    Python interpreter and GIL, enabling true CPU parallelism.
+
+    Config:
+      TOKENIZE_WORKERS env var controls process count (default: min(48, cpu_count))
+      RAYON_NUM_THREADS=4 per process → total threads = workers × 4
+
     Returns list of (sid, rows, tokens_int32, io_time, tok_time, total_time).
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    from queue import Queue
+    from concurrent.futures import ProcessPoolExecutor, as_completed
     import threading
 
     n_shards = len(shard_tasks)
     num_cpus = mp.cpu_count() or 8
 
-    # Set thread limits for tokenize workers
-    # Strategy: 48 Python threads × 4 Rust threads = 192 total threads (matches CPU cores)
-    os.environ["RAYON_NUM_THREADS"] = "4"
-    os.environ["OMP_NUM_THREADS"] = "4"
+    threads_per_worker = 4
+    os.environ["RAYON_NUM_THREADS"] = str(threads_per_worker)
+    os.environ["OMP_NUM_THREADS"] = str(threads_per_worker)
 
     env_workers = int(os.environ.get("TOKENIZE_WORKERS", "0"))
     if env_workers >= 1:
-        n_tokenize_workers = env_workers
+        n_workers = env_workers
     else:
-        n_tokenize_workers = min(48, num_cpus)
-        n_tokenize_workers = max(4, n_tokenize_workers)
+        n_workers = min(48, num_cpus)
+        n_workers = max(4, n_workers)
 
-    n_io_workers = n_shards  # One thread per shard for IO
+    print(f"  [ParallelTokenize] {n_shards} shards, {n_workers} processes "
+          f"× {threads_per_worker} Rust threads = {n_workers * threads_per_worker} total threads")
 
-    print(f"  [ParallelTokenize] {n_shards} shards, {n_io_workers} IO threads + {n_tokenize_workers} tokenize threads (4 Rust threads each, total {n_tokenize_workers * 4} threads)")
-
-    # Queue for IO → Tokenize communication
-    io_queue = Queue()
-    
-    # Results storage
     results = []
-    results_lock = threading.Lock()
-    
-    # Progress tracking
-    io_completed = [0]
-    tok_completed = [0]
-
-    def io_worker(sid, shard_path, miss_rows):
-        """Read parquet and put result in queue."""
-        try:
-            result = _io_read_shard(sid, shard_path, miss_rows)
-            io_queue.put(result)
-            with results_lock:
-                io_completed[0] += 1
-                # Print progress every 10 shards
-                if io_completed[0] % 10 == 0 or io_completed[0] == n_shards:
-                    elapsed = time.time() - t0
-                    speed = io_completed[0] / elapsed if elapsed > 0 else 0
-                    eta = (n_shards - io_completed[0]) / speed if speed > 0 else 0
-                    print(f"  [IO Progress] {io_completed[0]}/{n_shards} shards "
-                          f"({io_completed[0]*100//n_shards}%), "
-                          f"{speed:.1f} shards/s, ETA {eta:.0f}s")
-        except Exception as e:
-            print(f"  [IO Error] shard {sid}: {e}")
-            io_queue.put(None)  # Signal error
-
-    def tokenize_worker():
-        """Take IO results from queue and tokenize."""
-        while True:
-            item = io_queue.get()
-            
-            # Check for termination signal
-            if item is None:
-                io_queue.put(None)  # Pass signal to next worker
-                break
-            
-            sid, parsed_rows, texts, io_time = item
-            
-            # Tokenize
-            tok_t0 = time.time()
-            chunk = [(sid, idx, text) for idx, text in enumerate(texts)]
-            meta, tokens_array = _tokenize_chunk_to_array(chunk, tokenizer_path, block_size, 4)
-            tok_time = time.time() - tok_t0
-            
-            # Store result
-            with results_lock:
-                results.append((sid, parsed_rows, tokens_array, io_time, tok_time, io_time + tok_time))
-                tok_completed[0] += 1
-                
-                # Print progress every 10 shards
-                if tok_completed[0] % 10 == 0 or tok_completed[0] == n_shards:
-                    elapsed = time.time() - t0
-                    speed = tok_completed[0] / elapsed if elapsed > 0 else 0
-                    eta = (n_shards - tok_completed[0]) / speed if speed > 0 else 0
-                    print(f"  [Tokenize Progress] {tok_completed[0]}/{n_shards} shards "
-                          f"({tok_completed[0]*100//n_shards}%), "
-                          f"{speed:.1f} shards/s, ETA {eta:.0f}s")
-
     t0 = time.time()
-    
+
+    completed = [0]
+    lock = threading.Lock()
+
+    def on_done(fut):
+        with lock:
+            completed[0] += 1
+            c = completed[0]
+        if c % 10 == 0 or c == n_shards:
+            elapsed = time.time() - t0
+            speed = c / elapsed if elapsed > 0 else 0
+            eta = (n_shards - c) / speed if speed > 0 else 0
+            print(f"  [Tokenize Progress] {c}/{n_shards} shards "
+                  f"({c*100//n_shards}%), "
+                  f"{speed:.1f} shards/s, ETA {eta:.0f}s")
+
     with PerfTimer.section("parallel_tokenize", "parallel_tokenize"):
-        # Start IO pool
-        io_executor = ThreadPoolExecutor(max_workers=n_io_workers)
-        io_futures = [
-            io_executor.submit(io_worker, sid, shard_path, miss_rows)
-            for sid, shard_path, miss_rows in shard_tasks
-        ]
-        
-        # Start tokenize pool
-        tok_executor = ThreadPoolExecutor(max_workers=n_tokenize_workers)
-        tok_futures = [
-            tok_executor.submit(tokenize_worker)
-            for _ in range(n_tokenize_workers)
-        ]
-        
-        # Wait for all IO to complete
-        for fut in io_futures:
-            fut.result()
-        
-        # Send termination signals (one per tokenize worker)
-        for _ in range(n_tokenize_workers):
-            io_queue.put(None)
-        
-        # Wait for all tokenize to complete
-        for fut in tok_futures:
-            fut.result()
-        
-        io_executor.shutdown(wait=False)
-        tok_executor.shutdown(wait=False)
-    
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            futs = []
+            for sid, shard_path, miss_rows in shard_tasks:
+                fut = executor.submit(
+                    _process_shard_full,
+                    sid, shard_path, miss_rows,
+                    tokenizer_path, block_size, threads_per_worker,
+                )
+                fut.add_done_callback(on_done)
+                futs.append(fut)
+
+            for fut in futs:
+                try:
+                    sid, parsed_rows, tokens_array, io_time, tok_time, total_time = fut.result()
+                    results.append((sid, parsed_rows, tokens_array, io_time, tok_time, total_time))
+                except Exception as e:
+                    print(f"  [Tokenize Error] {e}")
+                    import traceback
+                    traceback.print_exc()
+
     total_time = time.time() - t0
     total_docs = sum(len(r[1]) for r in results)
     print(f"  [ParallelTokenize] {total_docs:,} docs in {total_time:.1f}s "
