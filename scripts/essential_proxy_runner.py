@@ -105,8 +105,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             npu_device_id: int = 0,  # ← 新增
             # RegMix training params
             model_variant: str = "tinyllama_1M",
-            global_batch_size: int = 512,
-            micro_batch_size: int = 64,
+            global_batch_size: int = 64,
+            micro_batch_size: int = 32,
             max_step: int = 25000,
             warmup_fraction: float = 0.04,  # warmup as fraction of actual steps (default 4% = RegMix default)
             learning_rate: float = 4e-4,
@@ -973,20 +973,17 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         )
 
         # ---- 4. Training data preparation (RegMix-style: permutation shuffle) ----
-        # Remove padding and insert EOS between documents to avoid cross-document contamination
         pad_id = self.tokenizer.pad_token_id
         eos_id = self.tokenizer.eos_token_id
+        real_mask = train_tokens != pad_id
+        non_empty = real_mask.any(dim=1)
         real_tokens_list = []
-        for i in range(len(train_tokens)):
-            doc = train_tokens[i]
-            real_mask = doc != pad_id
-            real_doc = doc[real_mask]
-            if len(real_doc) > 0:
-                real_tokens_list.append(real_doc)
-                real_tokens_list.append(torch.tensor([eos_id], dtype=doc.dtype))
-
+        eos_buf = torch.tensor([eos_id], dtype=train_tokens.dtype)
+        for doc in train_tokens[non_empty]:
+            real_tokens_list.append(doc[doc != pad_id])
+            real_tokens_list.append(eos_buf)
         flat_train = torch.cat(real_tokens_list).to(device)
-        del train_tokens, real_tokens_list  # Free memory immediately
+        del train_tokens, real_tokens_list, real_mask, non_empty, eos_buf
         num_steps = self.tiny_steps if self.tiny_steps > 0 else self.max_step
         grad_acc = self.gradient_accumulation_steps
         max_iters = num_steps * grad_acc
@@ -1012,7 +1009,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         # Pre-allocate: NPU buffers for batched transfer
         # Transfer grad_acc micro-batches at once per optimizer step to reduce host->device latency
-        accum_bs = self.micro_batch_size * grad_acc  # e.g. 64*1=64
+        accum_bs = self.micro_batch_size * grad_acc  # e.g. 32*2=64
         batch_buf = torch.empty(accum_bs, self.block_size + 1, dtype=torch.long, device=device)
         block_starts_buf = torch.empty(accum_bs, dtype=torch.long, device=device)  # NPU staging
         arange_buf = torch.arange(self.block_size + 1, dtype=torch.long, device=device)  # Pre-compute on device
@@ -1039,15 +1036,22 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
             # Batch transfer at step boundary: collect all grad_acc micro-batches
             if micro_in_step == 0:
-                # Prepare block_starts on CPU first
-                block_starts_cpu = np.empty(accum_bs, dtype=np.int64)
-                for i in range(accum_bs):
-                    if epoch_pos >= total_blocks:
+                remaining = total_blocks - epoch_pos
+                if remaining >= accum_bs:
+                    block_starts_cpu = perm[epoch_pos:epoch_pos + accum_bs].copy()
+                    epoch_pos += accum_bs
+                else:
+                    block_starts_cpu = np.empty(accum_bs, dtype=np.int64)
+                    block_starts_cpu[:remaining] = perm[epoch_pos:epoch_pos + remaining]
+                    filled = remaining
+                    while filled < accum_bs:
                         perm = get_epoch_permutation()
                         epoch_pos = 0
                         epoch += 1
-                    block_starts_cpu[i] = perm[epoch_pos]
-                    epoch_pos += 1
+                        chunk = min(accum_bs - filled, total_blocks)
+                        block_starts_cpu[filled:filled + chunk] = perm[:chunk]
+                        filled += chunk
+                        epoch_pos = chunk
 
                 # Transfer to device once
                 block_starts_buf.copy_(torch.from_numpy(block_starts_cpu).to(device))
@@ -1159,7 +1163,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         val_tokens = self._val_token_ids[:val_n, :bs].to(device)
         val_mask = self._val_loss_mask[:val_n, :bs].to(device)
         with torch.no_grad():
-            val_bs = min(16, val_n)
+            val_bs = min(64, val_n)
             per_doc_losses = []
             for start in range(0, len(val_tokens), val_bs):
                 end = min(start + val_bs, len(val_tokens))
@@ -1177,7 +1181,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 per_doc = (loss * mask_tgt.float()).sum(dim=1) / assistant_count
                 per_doc_losses.append(per_doc)
             val_loss = float(torch.cat(per_doc_losses).mean())
-        model.train()  # restore training mode
+        model.train()
         return val_loss
 
     def _lr_schedule(self, it: int, max_iters: int) -> float:
