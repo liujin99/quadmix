@@ -3,6 +3,23 @@
 > 2025-05-28 Hermes Agent 审计生成
 > 总计 ~5,460 行 Python，29 源文件 + 5 脚本
 
+## 已完成
+
+### 2026-06-02: ProcessPoolExecutor fork→spawn 避免 COW page fault
+- **文件**: `scripts/essential_proxy_runner.py:_tokenize_shard_parallel()`
+- **问题**: 主进程 RSS 18GB，fork 64 workers 导致 64×18GB=1.15TB COW 虚拟映射，海量 page fault 导致 tokenize 卡死
+- **修复**: 使用 `mp.get_context('spawn')` 替代默认 fork，子进程从零启动不继承主进程内存
+- **影响**: 启动慢 2-3 秒，但避免卡死问题
+
+### 2026-06-02: mmap file handle leak 修复
+- **文件**: `scripts/essential_proxy_runner.py:_cached_shard_rows()` 等 4 处
+- **问题**: `np.load(mmap_mode='r')` 未关闭文件句柄，101 shards 累积 101 个打开的 mmap fd 导致 IO hang
+- **修复**: 移除 `mmap_mode='r'`，直接加载到内存
+
+### 2026-06-02: 综合性能计时系统
+- **文件**: `scripts/essential_proxy_runner.py`, `src/quadmix/pipeline/real_pipeline.py`
+- **内容**: PerfTimer 类 + stage 级计时，实时输出 + 结束汇总
+
 ## P0 — 高影响（预计加速 30-50%）
 
 ### 1. HDF5/LMDB 替代 np.savez 做 token cache

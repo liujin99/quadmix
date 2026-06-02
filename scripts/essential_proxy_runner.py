@@ -1875,6 +1875,7 @@ def _tokenize_shard_parallel(
     """
     from concurrent.futures import ProcessPoolExecutor, as_completed
 
+    spawn_ctx = mp.get_context('spawn')
     n_shards = len(shard_tasks)
     num_cpus = mp.cpu_count() or 8
 
@@ -1886,7 +1887,7 @@ def _tokenize_shard_parallel(
     io_t0 = time.time()
     io_results = {}  # sid -> (parsed_rows, texts, io_time)
     with PerfTimer.section("stage1_io", "parallel_tokenize"):
-        with ProcessPoolExecutor(max_workers=io_workers) as executor:
+        with ProcessPoolExecutor(max_workers=io_workers, mp_context=spawn_ctx) as executor:
             futures = {}
             for sid, shard_path, miss_rows in shard_tasks:
                 fut = executor.submit(_io_read_shard, sid, shard_path, miss_rows)
@@ -1938,7 +1939,7 @@ def _tokenize_shard_parallel(
     chunk_results_meta = []  # List of (sid, idx) pairs
     chunk_results_arrays = []  # List of np.array[N_chunk x block_size]
     with PerfTimer.section("stage2_tokenize", "parallel_tokenize"):
-        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+        with ProcessPoolExecutor(max_workers=n_workers, mp_context=spawn_ctx) as executor:
             futures = []
             for chunk in chunks:
                 fut = executor.submit(_tokenize_chunk_to_array, chunk, tokenizer_path, block_size, threads_per_worker)
