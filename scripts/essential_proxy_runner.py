@@ -1939,19 +1939,20 @@ def _tokenize_shard_parallel(
     num_cpus = mp.cpu_count() or 8
 
     # Set thread limits for tokenize workers
-    os.environ["RAYON_NUM_THREADS"] = "1"
-    os.environ["OMP_NUM_THREADS"] = "1"
+    # Strategy: 48 Python threads × 4 Rust threads = 192 total threads (matches CPU cores)
+    os.environ["RAYON_NUM_THREADS"] = "4"
+    os.environ["OMP_NUM_THREADS"] = "4"
 
     env_workers = int(os.environ.get("TOKENIZE_WORKERS", "0"))
     if env_workers >= 1:
         n_tokenize_workers = env_workers
     else:
-        n_tokenize_workers = min(96, num_cpus)
+        n_tokenize_workers = min(48, num_cpus)
         n_tokenize_workers = max(4, n_tokenize_workers)
 
     n_io_workers = n_shards  # One thread per shard for IO
 
-    print(f"  [ParallelTokenize] {n_shards} shards, {n_io_workers} IO threads + {n_tokenize_workers} tokenize threads")
+    print(f"  [ParallelTokenize] {n_shards} shards, {n_io_workers} IO threads + {n_tokenize_workers} tokenize threads (4 Rust threads each, total {n_tokenize_workers * 4} threads)")
 
     # Queue for IO → Tokenize communication
     io_queue = Queue()
@@ -1998,7 +1999,7 @@ def _tokenize_shard_parallel(
             # Tokenize
             tok_t0 = time.time()
             chunk = [(sid, idx, text) for idx, text in enumerate(texts)]
-            meta, tokens_array = _tokenize_chunk_to_array(chunk, tokenizer_path, block_size, 1)
+            meta, tokens_array = _tokenize_chunk_to_array(chunk, tokenizer_path, block_size, 4)
             tok_time = time.time() - tok_t0
             
             # Store result
