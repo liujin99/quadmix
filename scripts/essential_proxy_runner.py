@@ -106,7 +106,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             # RegMix training params
             model_variant: str = "tinyllama_1M",
             global_batch_size: int = 512,
-            micro_batch_size: int = 4,
+            micro_batch_size: int = 64,
             max_step: int = 25000,
             warmup_fraction: float = 0.04,  # warmup as fraction of actual steps (default 4% = RegMix default)
             learning_rate: float = 4e-4,
@@ -1012,7 +1012,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         # Pre-allocate: NPU buffers for batched transfer
         # Transfer grad_acc micro-batches at once per optimizer step to reduce host->device latency
-        accum_bs = self.micro_batch_size * grad_acc  # e.g. 4*16=64
+        accum_bs = self.micro_batch_size * grad_acc  # e.g. 64*1=64
         batch_buf = torch.empty(accum_bs, self.block_size + 1, dtype=torch.long, device=device)
         block_starts_buf = torch.empty(accum_bs, dtype=torch.long, device=device)  # NPU staging
         arange_buf = torch.arange(self.block_size + 1, dtype=torch.long, device=device)  # Pre-compute on device
@@ -1782,8 +1782,8 @@ def _tokenize_shard_parallel(
     # ── Stage 1: Parallel IO ─────────────────────────────────────
     # Limit IO workers to avoid OOM on large shard counts.
     # Each worker holds one shard's text in memory (~200MB parquet → ~1GB text).
-    # On 192-core machine, 32 workers is safe (32GB RAM for IO).
-    io_workers = min(n_shards, 32)
+    # On 192-core / 1.5TB machine, 64 workers is safe (64GB RAM for IO).
+    io_workers = min(n_shards, 64)
     io_t0 = time.time()
     io_results = {}  # sid -> (parsed_rows, texts, io_time)
     with ProcessPoolExecutor(max_workers=io_workers) as executor:
@@ -1810,12 +1810,12 @@ def _tokenize_shard_parallel(
 
     # Optimal worker count: encode_batch is internally multi-threaded
     # so fewer processes avoid oversubscription. On 192-core machine:
-    #   32 workers, each using ~4 internal threads = ~128 cores utilized
+    #   48 workers, each using ~4 internal threads = ~192 cores utilized
     env_workers = int(os.environ.get("TOKENIZE_WORKERS", "0"))
     if env_workers >= 1:
         n_workers = env_workers
     else:
-        n_workers = min(32, total_docs // 5000, num_cpus)
+        n_workers = min(48, total_docs // 5000, num_cpus)
         n_workers = max(4, n_workers)
 
     chunk_size = max(1000, total_docs // n_workers)
