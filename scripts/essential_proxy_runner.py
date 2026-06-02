@@ -28,6 +28,7 @@ import multiprocessing as mp
 import multiprocessing.shared_memory  # for SharedMemory in ndarray_to_shared
 from functools import partial
 from typing import List, Optional, Dict, Tuple
+from contextlib import contextmanager
 import pandas as pd
 
 import numpy as np
@@ -39,6 +40,66 @@ from quadmix.core.quality_merger import compute_merged_quality_scores
 from quadmix.core.quality_rank import compute_quality_ranks
 from quadmix.core.sampler import compute_sampling_values
 from quadmix.pipeline.proxy_runner import BaseProxyRunner
+
+
+class PerfTimer:
+    """Lightweight performance timer with nesting support."""
+    _timings: Dict[str, List[float]] = {}
+    _stack: List[Tuple[str, float]] = []
+    _enabled: bool = os.environ.get("QUADMIX_PERF_TIMER", "0") == "1"
+
+    @classmethod
+    def enable(cls, enabled: bool = True):
+        cls._enabled = enabled
+
+    @classmethod
+    @contextmanager
+    def section(cls, name: str, prefix: str = ""):
+        """Context manager for timing a section."""
+        if not cls._enabled:
+            yield
+            return
+
+        full_name = f"{prefix}.{name}" if prefix else name
+        start = time.perf_counter()
+        cls._stack.append((full_name, start))
+        try:
+            yield
+        finally:
+            elapsed = time.perf_counter() - start
+            if full_name not in cls._timings:
+                cls._timings[full_name] = []
+            cls._timings[full_name].append(elapsed)
+            cls._stack.pop()
+
+    @classmethod
+    def report(cls, top_n: int = 20) -> str:
+        """Generate performance report."""
+        if not cls._timings:
+            return "[PerfTimer] No timings recorded"
+
+        lines = ["\n" + "=" * 70, "PERFORMANCE REPORT", "=" * 70]
+
+        sorted_items = sorted(
+            cls._timings.items(),
+            key=lambda x: sum(x[1]),
+            reverse=True
+        )[:top_n]
+
+        for name, times in sorted_items:
+            total = sum(times)
+            count = len(times)
+            avg = total / count
+            lines.append(f"{name:50s} | total: {total:7.2f}s | count: {count:4d} | avg: {avg:.3f}s")
+
+        lines.append("=" * 70)
+        return "\n".join(lines)
+
+    @classmethod
+    def reset(cls):
+        """Reset all timings."""
+        cls._timings.clear()
+        cls._stack.clear()
 
 # Default cache/temp directory
 # Override via QUADMIX_TEMP_DIR env var, defaults to ~/.cache/QuaDMix/temp/
@@ -384,8 +445,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         cache_path = self._get_shard_token_path(sid)
         if not os.path.exists(cache_path):
             return set()
-        data = np.load(cache_path, mmap_mode='r')
-        rows = set(int(r) for r in data['rows'])
+        data = np.load(cache_path)
+        rows = set(data['rows'].tolist())
         return rows
 
     def _cache_add_rows(self, sid: int, new_rows: np.ndarray, new_tokens: torch.Tensor):
@@ -526,7 +587,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             # Load disk cache hits into memory_cache (for subsequent batches)
             if hit_in_disk:
                 cache_path = self._get_shard_token_path(sid)
-                data = np.load(cache_path, mmap_mode='r')
+                data = np.load(cache_path)
                 disk_rows = data['rows']
                 disk_tokens = data['tokens']
 
@@ -537,7 +598,6 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
                 # Add to memory_cache
                 self._memory_cache_add_rows(sid, np.array(hit_in_disk, dtype=np.int64), hit_tokens)
-                del data
 
         if total_miss_rows == 0:
             print(f"[BatchTokenize] All {n_shards} shards fully cached, 0 miss rows")
@@ -595,15 +655,13 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                     # Fallback: read from disk cache (should not happen in normal flow)
                     cache_path = self._get_shard_token_path(sid)
                     if os.path.exists(cache_path):
-                        data = np.load(cache_path, mmap_mode='r')
+                        data = np.load(cache_path)
                         disk_rows = data['rows']
                         disk_tokens = data['tokens']
                         row_to_pos = {int(r): i for i, r in enumerate(disk_rows)}
                         for r in miss_rows:
                             if r in row_to_pos:
-                                # Append miss token
                                 pass  # TODO: handle this edge case
-                        del data
 
                 # Reorder tokens to match requested_rows order
                 # tokens[i] corresponds to sorted_hit_rows[i]
@@ -660,8 +718,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             cache_path = self._get_shard_token_path(sid)
 
             if os.path.exists(cache_path):
-                data = np.load(cache_path, mmap_mode='r')
-                token_mmap = data['tokens']
+                data = np.load(cache_path)
+                token_data = data['tokens']
                 row_index = data['rows']
                 row_to_pos = {int(r): i for i, r in enumerate(row_index)}
 
@@ -676,11 +734,11 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                         [row_to_pos[int(r)] for r in hit_rows], dtype=np.int64
                     )
                     hit_tokens = torch.from_numpy(
-                        token_mmap[positions].astype(np.int64)
+                        token_data[positions].astype(np.int64)
                     )
                     self._cache_hits += len(hit_rows)
 
-                del data, token_mmap
+                del data, token_data, row_index
 
                 if miss_rows:
                     self._cache_misses += len(miss_rows)
@@ -944,12 +1002,16 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         print(f"  [Exp {experiment_id:04d}] QuaDMix sampled {len(selected_idx)} docs "
               f"(from {len(self._train_idx):,})")
 
+        _timer_prefix = f"exp{experiment_id:04d}"
+
         # ---- 1. Load / tokenize training data on demand ----
-        train_tokens = self._load_tokens_for_experiment(selected_idx, exp_id=experiment_id)
+        with PerfTimer.section("load_tokens", _timer_prefix):
+            train_tokens = self._load_tokens_for_experiment(selected_idx, exp_id=experiment_id)
         # Keep on CPU to avoid HBM pressure — move to device per-batch
 
         # ---- 2. Create model ----
-        model = ProxyModel(config=self.model_config).to(device)
+        with PerfTimer.section("create_model", _timer_prefix):
+            model = ProxyModel(config=self.model_config).to(device)
 
         # Compile model for kernel fusion (CPU/CUDA only, not NPU)
         if self.device_type != "npu" and hasattr(torch, 'compile'):
@@ -973,17 +1035,18 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         )
 
         # ---- 4. Training data preparation (RegMix-style: permutation shuffle) ----
-        pad_id = self.tokenizer.pad_token_id
-        eos_id = self.tokenizer.eos_token_id
-        real_mask = train_tokens != pad_id
-        non_empty = real_mask.any(dim=1)
-        real_tokens_list = []
-        eos_buf = torch.tensor([eos_id], dtype=train_tokens.dtype)
-        for doc in train_tokens[non_empty]:
-            real_tokens_list.append(doc[doc != pad_id])
-            real_tokens_list.append(eos_buf)
-        flat_train = torch.cat(real_tokens_list).to(device)
-        del train_tokens, real_tokens_list, real_mask, non_empty, eos_buf
+        with PerfTimer.section("data_prep", _timer_prefix):
+            pad_id = self.tokenizer.pad_token_id
+            eos_id = self.tokenizer.eos_token_id
+            real_mask = train_tokens != pad_id
+            non_empty = real_mask.any(dim=1)
+            real_tokens_list = []
+            eos_buf = torch.tensor([eos_id], dtype=train_tokens.dtype)
+            for doc in train_tokens[non_empty]:
+                real_tokens_list.append(doc[doc != pad_id])
+                real_tokens_list.append(eos_buf)
+            flat_train = torch.cat(real_tokens_list).to(device)
+            del train_tokens, real_tokens_list, real_mask, non_empty, eos_buf
         num_steps = self.tiny_steps if self.tiny_steps > 0 else self.max_step
         grad_acc = self.gradient_accumulation_steps
         max_iters = num_steps * grad_acc
@@ -1015,6 +1078,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         arange_buf = torch.arange(self.block_size + 1, dtype=torch.long, device=device)  # Pre-compute on device
 
         # ---- 5. Training loop (RegMix-style: permutation shuffle, no replacement) ----
+        _train_t0 = time.perf_counter()
         model.train()
         total_loss = 0.0
         self._ckpt_results = {}  # step -> val_loss
@@ -1105,67 +1169,73 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                       f"lr={lr:.2e}, {tok_per_step * step_ct / elapsed:.0f} tok/s, "
                       f"ETA: {rem:.0f}s")
 
+        _train_elapsed = time.perf_counter() - _train_t0
+        PerfTimer._timings.setdefault(f"{_timer_prefix}.training_loop", []).append(_train_elapsed)
+
         # ---- 6. Free training resources before validation ----
-        del flat_train, batch_buf, block_starts_buf, arange_buf, optimizer, perm
-        if device.type == "npu":
-            import gc as _gc
-            _gc.collect()
-            torch.npu.empty_cache()
-        elif device.type == "cuda":
-            import gc as _gc
-            _gc.collect()
-            torch.cuda.empty_cache()
+        with PerfTimer.section("free_resources", _timer_prefix):
+            del flat_train, batch_buf, block_starts_buf, arange_buf, optimizer, perm
+            if device.type == "npu":
+                import gc as _gc
+                _gc.collect()
+                torch.npu.empty_cache()
+            elif device.type == "cuda":
+                import gc as _gc
+                _gc.collect()
+                torch.cuda.empty_cache()
 
         # ---- 7. Validation: assistant-only loss (full validation set) ----
-        val_loss = self._run_validation(model, device)
+        with PerfTimer.section("validation", _timer_prefix):
+            val_loss = self._run_validation(model, device)
 
         # ---- 8. Save metadata ----
-        np.save(os.path.join(exp_dir, "selected_indices.npy"), selected_idx)
-        avg_train = total_loss / step_ct if step_ct > 0 else 0
+        with PerfTimer.section("save_metadata", _timer_prefix):
+            avg_train = total_loss / step_ct if step_ct > 0 else 0
 
-        meta = {
-            "experiment_id": experiment_id,
-            "variant": self.model_variant,
-            "train_loss": avg_train,
-            "val_loss": val_loss,
-            "val_ppl": float(np.exp(val_loss)),
-            "num_steps": step_ct,
-            "sampled_docs": len(selected_idx),
-            "val_docs": len(self._val_token_ids),
-            "assistant_loss": True,
-            "params_lambda": [sc.lambda_ for sc in params.sampling_configs],
-            "params_omega": [sc.omega for sc in params.sampling_configs],
-            "params_eta": [sc.eta for sc in params.sampling_configs],
-            "params_epsilon": [sc.epsilon for sc in params.sampling_configs],
-            "global_weights": params.merge_config.global_weights.tolist(),
-            "domain_weights": params.merge_config.domain_weights.tolist(),
-            "checkpoint_steps": dict(self._ckpt_results) if hasattr(self, '_ckpt_results') else {},
-        }
-        with open(os.path.join(exp_dir, "meta.json"), "w") as f:
-            json.dump(meta, f, indent=2)
-
-        # Save checkpoint trajectory as standalone JSON in exp result dir
-        ckpt_results = dict(self._ckpt_results) if hasattr(self, '_ckpt_results') else {}
-        if ckpt_results:
-            ckpt_trajectory = {
+            meta = {
                 "experiment_id": experiment_id,
-                "checkpoint_interval": checkpoint_interval,
+                "variant": self.model_variant,
+                "train_loss": avg_train,
+                "val_loss": val_loss,
+                "val_ppl": float(np.exp(val_loss)),
                 "num_steps": step_ct,
-                "final_val_loss": val_loss,
-                "checkpoints": {str(k): v for k, v in sorted(ckpt_results.items())},
+                "sampled_docs": len(selected_idx),
+                "val_docs": len(self._val_token_ids),
+                "assistant_loss": True,
+                "params_lambda": [sc.lambda_ for sc in params.sampling_configs],
+                "params_omega": [sc.omega for sc in params.sampling_configs],
+                "params_eta": [sc.eta for sc in params.sampling_configs],
+                "params_epsilon": [sc.epsilon for sc in params.sampling_configs],
+                "global_weights": params.merge_config.global_weights.tolist(),
+                "domain_weights": params.merge_config.domain_weights.tolist(),
+                "checkpoint_steps": dict(self._ckpt_results) if hasattr(self, '_ckpt_results') else {},
             }
-            ckpt_path = os.path.join(exp_dir, "checkpoint_trajectory.json")
-            with open(ckpt_path, "w") as f:
-                json.dump(ckpt_trajectory, f, indent=2)
+            np.save(os.path.join(exp_dir, "selected_indices.npy"), selected_idx)
+            with open(os.path.join(exp_dir, "meta.json"), "w") as f:
+                json.dump(meta, f, indent=2)
+
+            ckpt_results = dict(self._ckpt_results) if hasattr(self, '_ckpt_results') else {}
+            if ckpt_results:
+                ckpt_trajectory = {
+                    "experiment_id": experiment_id,
+                    "checkpoint_interval": checkpoint_interval,
+                    "num_steps": step_ct,
+                    "final_val_loss": val_loss,
+                    "checkpoints": {str(k): v for k, v in sorted(ckpt_results.items())},
+                }
+                ckpt_path = os.path.join(exp_dir, "checkpoint_trajectory.json")
+                with open(ckpt_path, "w") as f:
+                    json.dump(ckpt_trajectory, f, indent=2)
 
         print(f"  [Exp {experiment_id:04d}] Done. train_loss={avg_train:.4f}, "
               f"val_loss={val_loss:.4f} (ppl={np.exp(val_loss):.1f})")
         # ── Free NPU memory (torch-npu doesn't release HBM on del) ──
-        del model, optimizer
-        if device.type == "npu":
-            import gc
-            gc.collect()
-            torch.npu.empty_cache()
+        with PerfTimer.section("free_npu", _timer_prefix):
+            del model, optimizer
+            if device.type == "npu":
+                import gc
+                gc.collect()
+                torch.npu.empty_cache()
 
         return ProxyResult(parameters=params, validation_loss=val_loss, metadata=meta)
 
@@ -1245,33 +1315,34 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         print(f"[PreSample] Pre-sampling {n} experiments (Eq.1-3)...")
 
-        for i, params in enumerate(all_params):
-            quality_ranks = self._compute_ranks_for_params(params, i)
-            sv = compute_sampling_values(
-                quality_ranks, self._domain_labels, params
-            )
-            train_sv = sv[self._train_idx]
+        with PerfTimer.section("eq123_sampling", "precompute"):
+            for i, params in enumerate(all_params):
+                quality_ranks = self._compute_ranks_for_params(params, i)
+                sv = compute_sampling_values(
+                    quality_ranks, self._domain_labels, params
+                )
+                train_sv = sv[self._train_idx]
 
-            # Proper fractional sampling (same as _select_documents_vectorized)
-            int_part = np.floor(train_sv).astype(np.int64)
-            frac_part = train_sv - int_part
-            rng = np.random.default_rng(i + 42)
-            random_mask = rng.uniform(size=len(train_sv)) < frac_part
-            repeats = int_part + random_mask.astype(np.int64)
-            selected = self._train_idx[
-                np.repeat(np.arange(len(self._train_idx)), repeats)
-            ]
-            if len(selected) < 10:
-                rng2 = np.random.default_rng(i + 42)
-                selected = rng2.choice(self._train_idx, 100, replace=False)
+                # Proper fractional sampling (same as _select_documents_vectorized)
+                int_part = np.floor(train_sv).astype(np.int64)
+                frac_part = train_sv - int_part
+                rng = np.random.default_rng(i + 42)
+                random_mask = rng.uniform(size=len(train_sv)) < frac_part
+                repeats = int_part + random_mask.astype(np.int64)
+                selected = self._train_idx[
+                    np.repeat(np.arange(len(self._train_idx)), repeats)
+                ]
+                if len(selected) < 10:
+                    rng2 = np.random.default_rng(i + 42)
+                    selected = rng2.choice(self._train_idx, 100, replace=False)
 
-            all_selected.append(selected)
+                all_selected.append(selected)
 
-            # Progress: every 5 experiments or last one
-            if (i + 1) % 5 == 0 or (i + 1) == n:
-                elapsed = time.time() - t0
-                eta = elapsed / (i + 1) * (n - i - 1)
-                print(f"[PreSample] {i + 1}/{n} done ({elapsed:.1f}s, ETA: {eta:.0f}s)")
+                # Progress: every 5 experiments or last one
+                if (i + 1) % 5 == 0 or (i + 1) == n:
+                    elapsed = time.time() - t0
+                    eta = elapsed / (i + 1) * (n - i - 1)
+                    print(f"[PreSample] {i + 1}/{n} done ({elapsed:.1f}s, ETA: {eta:.0f}s)")
 
         elapsed = time.time() - t0
         total_docs = sum(len(s) for s in all_selected)
@@ -1280,20 +1351,21 @@ class EssentialWebProxyRunner(BaseProxyRunner):
               f"(avg {total_docs // max(1, n):,}/exp)")
 
         # Collect unique docs → per-shard rows (union across all experiments)
-        if self.metadata_manager is not None:
-            all_unique = np.unique(np.concatenate(all_selected))
-            shard_groups = self.metadata_manager.global_to_shard_rows(all_unique)
-            # Store per-shard needed rows for precise cache miss tokenization
-            self._per_shard_needed_rows = {
-                sid: rows for sid, (_, rows) in shard_groups.items()
-            }
-            unique_ratio = len(all_unique) / max(1, self._num_docs) * 100
-            print(f"[PreSample] Unique docs: {len(all_unique):,} "
-                  f"({unique_ratio:.1f}% of pool) "
-                  f"across {len(shard_groups)} shards")
-            avg_per_shard = len(all_unique) // max(1, len(shard_groups))
-            print(f"[PreSample] Avg {avg_per_shard:,} docs/shard to tokenize "
-                  f"(vs {self.metadata_manager._per_shard_info[0]['num_docs']:,} full)")
+        with PerfTimer.section("collect_unique", "precompute"):
+            if self.metadata_manager is not None:
+                all_unique = np.unique(np.concatenate(all_selected))
+                shard_groups = self.metadata_manager.global_to_shard_rows(all_unique)
+                # Store per-shard needed rows for precise cache miss tokenization
+                self._per_shard_needed_rows = {
+                    sid: rows for sid, (_, rows) in shard_groups.items()
+                }
+                unique_ratio = len(all_unique) / max(1, self._num_docs) * 100
+                print(f"[PreSample] Unique docs: {len(all_unique):,} "
+                      f"({unique_ratio:.1f}% of pool) "
+                      f"across {len(shard_groups)} shards")
+                avg_per_shard = len(all_unique) // max(1, len(shard_groups))
+                print(f"[PreSample] Avg {avg_per_shard:,} docs/shard to tokenize "
+                      f"(vs {self.metadata_manager._per_shard_info[0]['num_docs']:,} full)")
 
         return all_selected
 
@@ -1321,8 +1393,9 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         mgr = self.metadata_manager
         t0 = time.time()
 
-        all_unique = np.unique(np.concatenate(all_selected))
-        shard_groups = mgr.global_to_shard_rows(all_unique)
+        with PerfTimer.section("collect_union", "tokenize_all"):
+            all_unique = np.unique(np.concatenate(all_selected))
+            shard_groups = mgr.global_to_shard_rows(all_unique)
 
         total_tokenized = 0
         total_cached = 0
@@ -1332,33 +1405,36 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         shard_miss_info = []
         shard_miss_meta = {}
 
-        for sid, (shard_path, local_rows) in shard_groups.items():
-            cached_rows = self._cached_shard_rows(sid)
-            memory_cached = self._memory_cache_get_rows(sid)
+        with PerfTimer.section("check_cache", "tokenize_all"):
+            for sid, (shard_path, local_rows) in shard_groups.items():
+                cached_rows = self._cached_shard_rows(sid)
+                memory_cached = self._memory_cache_get_rows(sid)
 
-            local_rows_int = [int(r) for r in local_rows]
-            hit_rows = [r for r in local_rows_int if r in cached_rows or r in memory_cached]
-            miss_rows = [r for r in local_rows_int if r not in cached_rows and r not in memory_cached]
+                local_rows_int = [int(r) for r in local_rows]
+                hit_rows = [r for r in local_rows_int if r in cached_rows or r in memory_cached]
+                miss_rows = [r for r in local_rows_int if r not in cached_rows and r not in memory_cached]
 
-            total_cached += len(hit_rows)
+                total_cached += len(hit_rows)
 
-            if miss_rows:
-                miss_rows_arr = np.array(sorted(miss_rows), dtype=np.int64)
-                shard_miss_info.append((sid, shard_path, miss_rows_arr.tolist()))
-                shard_miss_meta[sid] = len(miss_rows)
+                if miss_rows:
+                    miss_rows_arr = np.array(sorted(miss_rows), dtype=np.int64)
+                    shard_miss_info.append((sid, shard_path, miss_rows_arr.tolist()))
+                    shard_miss_meta[sid] = len(miss_rows)
 
         if shard_miss_info:
             print(f"[TokenizeAll] {sum(shard_miss_meta.values()):,} miss rows across {len(shard_miss_info)} shards, parallel tokenizing...")
 
-            parallel_results = _tokenize_shard_parallel(
-                shard_miss_info, self.tokenizer.name_or_path, self.block_size
-            )
+            with PerfTimer.section("parallel_tokenize", "tokenize_all"):
+                parallel_results = _tokenize_shard_parallel(
+                    shard_miss_info, self.tokenizer.name_or_path, self.block_size
+                )
 
-            for sid, parsed_rows, miss_tokens, io_time, tokenize_time, total_time in parallel_results:
-                self._memory_cache_add_rows(sid, parsed_rows, miss_tokens)
-                self._cache_add_rows(sid, parsed_rows, torch.from_numpy(miss_tokens))
-                total_tokenized += len(parsed_rows)
-                print(f"  [Shard {sid}] tokenized {len(parsed_rows):,} docs (IO {io_time:.1f}s, tok {tokenize_time:.1f}s)")
+            with PerfTimer.section("cache_results", "tokenize_all"):
+                for sid, parsed_rows, miss_tokens, io_time, tokenize_time, total_time in parallel_results:
+                    self._memory_cache_add_rows(sid, parsed_rows, miss_tokens)
+                    self._cache_add_rows(sid, parsed_rows, torch.from_numpy(miss_tokens))
+                    total_tokenized += len(parsed_rows)
+                    print(f"  [Shard {sid}] tokenized {len(parsed_rows):,} docs (IO {io_time:.1f}s, tok {tokenize_time:.1f}s)")
         else:
             print(f"[TokenizeAll] All {len(shard_groups)} shards fully cached, 0 miss rows")
 
@@ -1809,14 +1885,15 @@ def _tokenize_shard_parallel(
     io_workers = min(n_shards, 64)
     io_t0 = time.time()
     io_results = {}  # sid -> (parsed_rows, texts, io_time)
-    with ProcessPoolExecutor(max_workers=io_workers) as executor:
-        futures = {}
-        for sid, shard_path, miss_rows in shard_tasks:
-            fut = executor.submit(_io_read_shard, sid, shard_path, miss_rows)
-            futures[fut] = sid
-        for fut in as_completed(futures):
-            sid, parsed_rows, texts, io_time = fut.result()
-            io_results[sid] = (parsed_rows, texts, io_time)
+    with PerfTimer.section("stage1_io", "parallel_tokenize"):
+        with ProcessPoolExecutor(max_workers=io_workers) as executor:
+            futures = {}
+            for sid, shard_path, miss_rows in shard_tasks:
+                fut = executor.submit(_io_read_shard, sid, shard_path, miss_rows)
+                futures[fut] = sid
+            for fut in as_completed(futures):
+                sid, parsed_rows, texts, io_time = fut.result()
+                io_results[sid] = (parsed_rows, texts, io_time)
     io_total = time.time() - io_t0
     print(f"  [ParallelTokenize] Stage 1 IO: {n_shards} shards read in {io_total:.1f}s")
 
@@ -1860,15 +1937,16 @@ def _tokenize_shard_parallel(
     # This dramatically reduces serialization overhead (contiguous memory vs 200K Python lists)
     chunk_results_meta = []  # List of (sid, idx) pairs
     chunk_results_arrays = []  # List of np.array[N_chunk x block_size]
-    with ProcessPoolExecutor(max_workers=n_workers) as executor:
-        futures = []
-        for chunk in chunks:
-            fut = executor.submit(_tokenize_chunk_to_array, chunk, tokenizer_path, block_size, threads_per_worker)
-            futures.append(fut)
-        for fut in as_completed(futures):
-            meta, arr = fut.result()
-            chunk_results_meta.extend(meta)
-            chunk_results_arrays.append(arr)
+    with PerfTimer.section("stage2_tokenize", "parallel_tokenize"):
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            futures = []
+            for chunk in chunks:
+                fut = executor.submit(_tokenize_chunk_to_array, chunk, tokenizer_path, block_size, threads_per_worker)
+                futures.append(fut)
+            for fut in as_completed(futures):
+                meta, arr = fut.result()
+                chunk_results_meta.extend(meta)
+                chunk_results_arrays.append(arr)
     tok_total = time.time() - tok_t0
     print(f"  [ParallelTokenize] Stage 2 tokenize: {total_docs:,} docs in {tok_total:.1f}s "
           f"({total_docs / tok_total:.0f} docs/s)")
@@ -1876,21 +1954,22 @@ def _tokenize_shard_parallel(
     # ── Reassemble per-shard results ─────────────────────────────
     # Concatenate all arrays, then group by (sid, idx)
     # Build index: (sid, idx) -> row in concatenated array
-    all_tokens = np.concatenate(chunk_results_arrays, axis=0)
-    index_map: Dict[Tuple[int, int], int] = {}
-    for row_i, (sid, idx) in enumerate(chunk_results_meta):
-        index_map[(sid, idx)] = row_i
+    with PerfTimer.section("reassemble", "parallel_tokenize"):
+        all_tokens = np.concatenate(chunk_results_arrays, axis=0)
+        index_map: Dict[Tuple[int, int], int] = {}
+        for row_i, (sid, idx) in enumerate(chunk_results_meta):
+            index_map[(sid, idx)] = row_i
 
-    final_results = []
-    for sid in sorted(io_results.keys()):
-        parsed_rows, texts, io_time = io_results[sid]
-        # Build tokens array in original order
-        indices = [index_map[(sid, idx)] for idx in range(len(texts))]
-        miss_tokens = all_tokens[indices]  # fancy index -> (N, block_size) array
-        # tok_time attributed proportionally (all shards share the tokenize pool)
-        this_tok_time = tok_total  # wall time for the whole pool
-        total_time = io_total + tok_total
-        final_results.append((sid, parsed_rows, miss_tokens, io_time, tok_total, total_time))
+        final_results = []
+        for sid in sorted(io_results.keys()):
+            parsed_rows, texts, io_time = io_results[sid]
+            # Build tokens array in original order
+            indices = [index_map[(sid, idx)] for idx in range(len(texts))]
+            miss_tokens = all_tokens[indices]  # fancy index -> (N, block_size) array
+            # tok_time attributed proportionally (all shards share the tokenize pool)
+            this_tok_time = tok_total  # wall time for the whole pool
+            total_time = io_total + tok_total
+            final_results.append((sid, parsed_rows, miss_tokens, io_time, tok_total, total_time))
 
     return final_results
 

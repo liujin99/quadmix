@@ -350,7 +350,10 @@ class QuaDMixPipeline:
         print(f"  Output: {output_dir}")
         print("=" * 70)
 
+        stage_times = {}
+
         # ── Stage 0: Load Data ──────────────────────────────
+        _t = time.time()
         text_source: Optional[str] = "memory"  # 'memory' or 'sharded'
         if precomputed:
             # Check if sharded mode (metadata_manager passed via load_kwargs)
@@ -370,67 +373,106 @@ class QuaDMixPipeline:
             texts = data.texts
             token_counts = data.token_counts
             text_source = "memory"
+        stage_times["stage0_load_data"] = time.time() - _t
+        print(f"[Stage 0] Load data: {stage_times['stage0_load_data']:.1f}s")
 
         # ── Stage 1: Feature Extraction (normal mode only) ──
+        _t = time.time()
         if not precomputed:
             features = self.extract_features(texts)
             quality_scores = features["quality_scores"]
             domain_labels = features["domain_labels"]
+        stage_times["stage1_features"] = time.time() - _t
 
         # ── Stage 3: Parameter Sampling ─────────────────────
+        _t = time.time()
         n_exp = num_experiments or self.config.num_proxy_experiments
         print(f"\n[Stage 3] Sampling {n_exp} parameter configurations (Alg.1)...")
         param_sets = self._param_sampler.sample_batch(n_exp)
+        stage_times["stage3_param_sampling"] = time.time() - _t
+        print(f"[Stage 3] Parameter sampling: {stage_times['stage3_param_sampling']:.1f}s")
 
         # ── Stage 4: Proxy Experiments ──────────────────────
         if proxy_runner is None:
             raise ValueError("proxy_runner is required. Pass an EssentialWebProxyRunner instance.")
         print(f"\n[Stage 4] Running {n_exp} proxy experiments...")
 
+        _t_stage4 = time.time()
         if parallel_workers > 1 and hasattr(proxy_runner, 'precompute_samples'):
             # Parallel mode: pre-sample then dispatch across NPU devices
             # Tokenize Thread runs ahead, Workers pull tasks dynamically
             print(f"[Stage 4] Using {parallel_workers} parallel workers (dynamic task queue)")
             print(f"[Stage 4] Step 1: Pre-sampling (Eq.1-3, pure numpy, CPU only)")
+            _t = time.time()
             all_selected = proxy_runner.precompute_samples(param_sets)
+            stage_times["stage4a_precompute"] = time.time() - _t
+            print(f"[Stage 4] Pre-sampling: {stage_times['stage4a_precompute']:.1f}s")
+
             print(f"[Stage 4] Step 1.5: Pre-tokenize all docs (parallel, one-shot)")
+            _t = time.time()
             proxy_runner.tokenize_all_needed(all_selected)
+            stage_times["stage4b_tokenize"] = time.time() - _t
+            print(f"[Stage 4] Tokenize: {stage_times['stage4b_tokenize']:.1f}s")
+
             print(f"[Stage 4] Step 2: Dynamic parallel training (NPU workers, cache hits only)")
+            _t = time.time()
             results = proxy_runner.run_batch_parallel(
                 param_sets, all_selected,
                 num_workers=parallel_workers,
                 device_type=proxy_runner.device_type,
             )
+            stage_times["stage4c_training"] = time.time() - _t
+            print(f"[Stage 4] Training: {stage_times['stage4c_training']:.1f}s")
         elif hasattr(proxy_runner, 'precompute_samples'):
             # CPU/Sequential mode: precompute → tokenize all → run sequentially
             # One-shot tokenize ensures all exps get cache hits (no repeated IO)
             print(f"[Stage 4] CPU mode: precompute → tokenize union → sequential run")
+            _t = time.time()
             all_selected = proxy_runner.precompute_samples(param_sets)
+            stage_times["stage4a_precompute"] = time.time() - _t
+            print(f"[Stage 4] Pre-sampling: {stage_times['stage4a_precompute']:.1f}s")
+
+            _t = time.time()
             proxy_runner.tokenize_all_needed(all_selected)
+            stage_times["stage4b_tokenize"] = time.time() - _t
+            print(f"[Stage 4] Tokenize: {stage_times['stage4b_tokenize']:.1f}s")
+
+            _t = time.time()
             results = []
             for i, (params, sel) in enumerate(zip(param_sets, all_selected)):
                 r = proxy_runner.run_experiment(params, experiment_id=i, selected_idx=sel)
                 results.append(r)
+            stage_times["stage4c_training"] = time.time() - _t
+            print(f"[Stage 4] Training: {stage_times['stage4c_training']:.1f}s")
         else:
             # Fallback: original run_batch (legacy mode)
+            _t = time.time()
             results = proxy_runner.run_batch(param_sets)
+            stage_times["stage4c_training"] = time.time() - _t
+        stage_times["stage4_total"] = time.time() - _t_stage4
 
         losses = np.array([r.validation_loss for r in results])
         print(f"  Loss stats: mean={losses.mean():.4f}, std={losses.std():.4f}, "
               f"min={losses.min():.4f}, max={losses.max():.4f}")
 
         # ── Stage 5: LightGBM Regression ────────────────────
+        _t = time.time()
         print(f"\n[Stage 5] Training LightGBM regressor...")
         self._optimizer = QuaDMixOptimizer(self.config)
         self._optimizer.add_proxy_results(results)
         self._optimizer.train_regressor()
+        stage_times["stage5_lightgbm"] = time.time() - _t
+        print(f"[Stage 5] LightGBM: {stage_times['stage5_lightgbm']:.1f}s")
 
         # ── Stage 6: Optimal Parameter Search ───────────────
+        _t = time.time()
         n_search = num_search or self.config.num_search_points
         print(f"\n[Stage 6] Searching optimal parameters ({n_search} points)...")
         optimal_params, candidates, predicted_losses = self._optimizer.search_optimal(
             n_search_points=n_search, top_k=self.config.top_k_average,
         )
+        stage_times["stage6_search"] = time.time() - _t
+        print(f"[Stage 6] Search: {stage_times['stage6_search']:.1f}s")
         print(f"  Best predicted loss: {predicted_losses.min():.4f}")
         # Compute top-K average from sorted losses (not unsorted[:K])
         k = self.config.top_k_average
@@ -475,6 +517,7 @@ class QuaDMixPipeline:
                     print(f"    将随机丢弃约 {discard_pct:.1f}%（保持相对分布）")
 
         # ── Stage 7: Final Sampling ─────────────────────────
+        _t = time.time()
         print(f"\n[Stage 7] Applying optimal parameters for final sampling...")
         final_ranks = self.compute_quality_ranks(
             quality_scores, domain_labels, optimal_params, token_counts,
@@ -530,8 +573,11 @@ class QuaDMixPipeline:
                 name = (domain_names[m] if domain_names and m < len(domain_names)
                         else f"D{m}")
                 print(f"    [{m}] {name:>10s}: {orig_dist[m]:>7,} → {sel_dist[m]:>7,}  ({ratio:.2f}x)")
+        stage_times["stage7_final_sampling"] = time.time() - _t
+        print(f"[Stage 7] Final sampling: {stage_times['stage7_final_sampling']:.1f}s")
 
         # ── Stage 8: Save Outputs ───────────────────────────
+        _t = time.time()
         params_path = os.path.join(output_dir, "optimal_parameters.json")
         serialized = self._serialize_params(optimal_params, domain_names, quality_names)
         with open(params_path, "w") as f:
@@ -560,6 +606,7 @@ class QuaDMixPipeline:
                 "sampling_ratio": len(selected_indices) / n_docs_save,
             },
             "elapsed_seconds": elapsed,
+            "stage_times": {k: round(v, 1) for k, v in stage_times.items()},
             "input_file": data_path,
         }
         summary_path = os.path.join(output_dir, "pipeline_summary.json")
@@ -601,8 +648,11 @@ class QuaDMixPipeline:
                 doc_ids=np.arange(len(texts)),
                 format=output_format,
             )
+        stage_times["stage8_save"] = time.time() - _t
+        print(f"[Stage 8] Save outputs: {stage_times['stage8_save']:.1f}s")
 
         # ── Stage 9: Report ──
+        _t = time.time()
         print(f"\n[Stage 9] Generating comparison report...")
         report = generate_report(
             output_dir=output_dir,
@@ -619,6 +669,37 @@ class QuaDMixPipeline:
             use_sharded=(text_source == "sharded"),
         )
         save_report(report, output_dir)
+        stage_times["stage9_report"] = time.time() - _t
+        print(f"[Stage 9] Report: {stage_times['stage9_report']:.1f}s")
+
+        # ── Stage Timing Summary ──────────────────────────────
+        print(f"\n{'─' * 50}")
+        print(f"  STAGE TIMING SUMMARY")
+        print(f"{'─' * 50}")
+        for name, secs in sorted(stage_times.items(), key=lambda x: -x[1]):
+            pct = secs / max(elapsed, 1) * 100
+            bar = '█' * int(pct / 2)
+            print(f"  {name:30s} {secs:7.1f}s ({pct:4.1f}%) {bar}")
+        print(f"{'─' * 50}")
+
+        # ── Performance Timer Report ──────────────────────────
+        try:
+            from scripts.essential_proxy_runner import PerfTimer
+            if PerfTimer._enabled:
+                perf_text = PerfTimer.report()
+                print(perf_text)
+                perf_report_path = os.path.join(output_dir, "perf_report.txt")
+                with open(perf_report_path, "w") as f:
+                    f.write("STAGE TIMING SUMMARY\n")
+                    f.write("=" * 50 + "\n")
+                    for name, secs in sorted(stage_times.items(), key=lambda x: -x[1]):
+                        pct = secs / max(elapsed, 1) * 100
+                        f.write(f"  {name:30s} {secs:7.1f}s ({pct:4.1f}%)\n")
+                    f.write("\n")
+                    f.write(perf_text)
+                print(f"[PerfTimer] Report saved to: {perf_report_path}")
+        except ImportError:
+            pass
 
         print(f"\n{'=' * 70}")
         print(f"  Pipeline Complete! ({elapsed:.1f}s)")
