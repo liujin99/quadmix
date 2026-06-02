@@ -571,7 +571,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                     # Fallback: immediate write (blocking)
                     self._cache_add_rows(sid, parsed_rows, torch.from_numpy(miss_tokens))
 
-                print(f"  [Shard {sid}] {len(parsed_rows):,} docs (IO {io_time:.1f}s, tok {tokenize_time:.1f}s, total {total_time:.1f}s)")
+                print(
+                    f"  [Shard {sid}] {len(parsed_rows):,} docs (IO {io_time:.1f}s, tok {tokenize_time:.1f}s, total {total_time:.1f}s)")
 
             read_time = time.time() - read_t0
             print(f"[BatchTokenize] Parquet read + tokenize (parallel): {read_time:.1f}s")
@@ -891,11 +892,11 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         return ranks
 
     def run_experiment(
-        self,
-        params: ParameterSet,
-        experiment_id: int = 0,
-        selected_idx: Optional[np.ndarray] = None,
-        checkpoint_interval: Optional[int] = None,
+            self,
+            params: ParameterSet,
+            experiment_id: int = 0,
+            selected_idx: Optional[np.ndarray] = None,
+            checkpoint_interval: Optional[int] = None,
     ) -> ProxyResult:
         """Train one proxy model. Validates on openhermes-10k.
         """
@@ -949,30 +950,27 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         # ---- 2. Create model ----
         model = ProxyModel(config=self.model_config).to(device)
-        
-        # Compile model for kernel fusion (PyTorch 2.0+)
-        if hasattr(torch, 'compile'):
+
+        # Compile model for kernel fusion (CPU/CUDA only, not NPU)
+        if self.device_type != "npu" and hasattr(torch, 'compile'):
             try:
                 model = torch.compile(model, mode='max-autotune')
                 print(f"  [Exp {experiment_id:04d}] Model compiled with torch.compile")
             except Exception as e:
                 print(f"  [Exp {experiment_id:04d}] torch.compile failed: {e}, using eager mode")
-        
+        elif self.device_type == "npu":
+            print(f"  [Exp {experiment_id:04d}] Skipping torch.compile (NPU not supported)")
+
         non_emb = model.count_params(non_embedding_only=True)
         print(f"  [Exp {experiment_id:04d}] Model on {device}: "
               f"{model.count_params():,} total, {non_emb:,} non-emb")
 
-        # ---- 3. Optimizer ----
-        try:
-            optimizer = torch.optim.AdamW(
-                model.parameters(), lr=self.learning_rate,
-                betas=(0.9, 0.95), weight_decay=self.weight_decay, fused=True,
-            )
-        except RuntimeError:
-            optimizer = torch.optim.AdamW(
-                model.parameters(), lr=self.learning_rate,
-                betas=(0.9, 0.95), weight_decay=self.weight_decay, fused=False,
-            )
+        # ---- 3. Optimizer (fused only on CUDA) ----
+        use_fused = self.device_type == "cuda"
+        optimizer = torch.optim.AdamW(
+            model.parameters(), lr=self.learning_rate,
+            betas=(0.9, 0.95), weight_decay=self.weight_decay, fused=use_fused,
+        )
 
         # ---- 4. Training data preparation (RegMix-style: permutation shuffle) ----
         # Remove padding and insert EOS between documents to avoid cross-document contamination
@@ -986,7 +984,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             if len(real_doc) > 0:
                 real_tokens_list.append(real_doc)
                 real_tokens_list.append(torch.tensor([eos_id], dtype=doc.dtype))
-        
+
         flat_train = torch.cat(real_tokens_list).to(device)
         del train_tokens, real_tokens_list  # Free memory immediately
         num_steps = self.tiny_steps if self.tiny_steps > 0 else self.max_step
@@ -1029,7 +1027,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         t_start = time.time()
 
         print(f"  [Exp {experiment_id:04d}] Training {num_steps} steps "
-              f"(grad_acc={grad_acc}, warmup={warmup_steps} steps ({self.warmup_fraction*100:.0f}%), "
+              f"(grad_acc={grad_acc}, warmup={warmup_steps} steps ({self.warmup_fraction * 100:.0f}%), "
               f"micro_batch={self.micro_batch_size}, "
               f"blocks={total_blocks}, epochs~{math.ceil(max_iters / total_blocks)})"
               f"{', checkpoint every ' + str(checkpoint_interval) + ' steps' if checkpoint_interval > 0 else ''})...")
@@ -1050,10 +1048,10 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                         epoch += 1
                     block_starts_cpu[i] = perm[epoch_pos]
                     epoch_pos += 1
-                
+
                 # Transfer to device once
                 block_starts_buf.copy_(torch.from_numpy(block_starts_cpu).to(device))
-                
+
                 # Index on device
                 idx_device = block_starts_buf.unsqueeze(1) + arange_buf.unsqueeze(0)
                 batch_buf.copy_(flat_train[idx_device])
@@ -1214,7 +1212,6 @@ class EssentialWebProxyRunner(BaseProxyRunner):
     # ═══════════════════════════════════════════════════════════
     # Pre-compute sampling (Phase 0) — pure numpy, CPU only
     # ═══════════════════════════════════════════════════════════
-
     def precompute_samples(
             self, all_params: List[ParameterSet]
     ) -> List[np.ndarray]:
@@ -1783,9 +1780,13 @@ def _tokenize_shard_parallel(
     num_cpus = mp.cpu_count() or 8
 
     # ── Stage 1: Parallel IO ─────────────────────────────────────
+    # Limit IO workers to avoid OOM on large shard counts.
+    # Each worker holds one shard's text in memory (~200MB parquet → ~1GB text).
+    # On 192-core machine, 32 workers is safe (32GB RAM for IO).
+    io_workers = min(n_shards, 32)
     io_t0 = time.time()
     io_results = {}  # sid -> (parsed_rows, texts, io_time)
-    with ProcessPoolExecutor(max_workers=n_shards) as executor:
+    with ProcessPoolExecutor(max_workers=io_workers) as executor:
         futures = {}
         for sid, shard_path, miss_rows in shard_tasks:
             fut = executor.submit(_io_read_shard, sid, shard_path, miss_rows)
@@ -1808,13 +1809,13 @@ def _tokenize_shard_parallel(
     total_docs = len(flat_items)
 
     # Optimal worker count: encode_batch is internally multi-threaded
-    # so fewer processes avoid oversubscription. On 190-core machine:
-    #   16 workers, each using ~10 internal threads = ~160 cores utilized
+    # so fewer processes avoid oversubscription. On 192-core machine:
+    #   32 workers, each using ~4 internal threads = ~128 cores utilized
     env_workers = int(os.environ.get("TOKENIZE_WORKERS", "0"))
     if env_workers >= 1:
         n_workers = env_workers
     else:
-        n_workers = min(16, total_docs // 5000, num_cpus)
+        n_workers = min(32, total_docs // 5000, num_cpus)
         n_workers = max(4, n_workers)
 
     chunk_size = max(1000, total_docs // n_workers)

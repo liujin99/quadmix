@@ -10,6 +10,7 @@ Usage:
 """
 
 import argparse, json, os, time, glob
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 import pandas as pd
 
@@ -105,7 +106,7 @@ def process_shard(shard_path: str, shard_idx: int, output_dir: str) -> dict:
     # Save
     out_name = f"preprocessed_{shard_idx:05d}.parquet"
     out_path = os.path.join(output_dir, out_name)
-    output.to_parquet(out_path, index=False)
+    output.to_parquet(out_path, index=False, row_group_size=1000)
 
     valid_domains = (domains >= 0).sum()
     elapsed = time.time() - t0
@@ -146,8 +147,14 @@ def main():
                    help="Limit number of shards to process (for testing)")
     p.add_argument("--force", action="store_true",
                    help="Force reprocess even if output already exists")
+    p.add_argument("--workers", type=int, default=32,
+                   help="Number of parallel workers (default: 32)")
     args = p.parse_args()
 
+    # --force: clean output dir first to avoid stale/corrupted files
+    if args.force and os.path.isdir(args.output_dir):
+        import shutil
+        shutil.rmtree(args.output_dir)
     os.makedirs(args.output_dir, exist_ok=True)
 
     # Discover shards
@@ -191,33 +198,55 @@ def main():
     t_start = time.time()
     shard_index = []
     skipped = 0
+
+    # Separate shards to process vs skip
+    to_process = []
     for sp in shard_paths:
         shard_idx = parse_shard_idx_from_path(sp)
         if shard_idx < 0:
-            # Fallback to enumeration if filename doesn't match pattern
             shard_idx = len(shard_index)
 
         # Skip if already processed (incremental mode)
         if shard_idx in existing_preprocessed and shard_idx not in missing_shards and not args.force:
-            skipped += 1
-            # Still add to shard_index (read stats from existing file)
             out_name = f"preprocessed_{shard_idx:05d}.parquet"
             out_path = os.path.join(args.output_dir, out_name)
-            df = pd.read_parquet(out_path, columns=["domain"])
-            n = len(df)
-            valid_domains = (df["domain"] >= 0).sum()
-            shard_index.append({
-                "shard_idx": shard_idx,
-                "file": out_name,
-                "path": out_path,
-                "num_docs": n,
-                "valid_domains": int(valid_domains),
-                "elapsed_seconds": 0.0,  # skipped
-            })
-            continue
+            try:
+                df = pd.read_parquet(out_path, columns=["domain"])
+                skipped += 1
+                n = len(df)
+                valid_domains = (df["domain"] >= 0).sum()
+                shard_index.append({
+                    "shard_idx": shard_idx,
+                    "file": out_name,
+                    "path": out_path,
+                    "num_docs": n,
+                    "valid_domains": int(valid_domains),
+                    "elapsed_seconds": 0.0,
+                })
+                continue
+            except Exception:
+                # Corrupted preprocessed file — reprocess
+                print(f"  [WARN] Corrupted: {out_name}, will reprocess")
 
-        stats = process_shard(sp, shard_idx, args.output_dir)
-        shard_index.append(stats)
+        to_process.append((sp, shard_idx, args.output_dir))
+
+    # Parallel processing
+    workers = min(args.workers, len(to_process)) if to_process else 1
+    if len(to_process) > 1:
+        print(f"  Processing {len(to_process)} shards with {workers} workers (process pool)...")
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(process_shard, sp, si, odir): (sp, si)
+                       for sp, si, odir in to_process}
+            for future in as_completed(futures):
+                stats = future.result()
+                shard_index.append(stats)
+    else:
+        for sp, shard_idx, odir in to_process:
+            stats = process_shard(sp, shard_idx, odir)
+            shard_index.append(stats)
+
+    # Sort by shard_idx for consistent output
+    shard_index.sort(key=lambda s: s["shard_idx"])
 
     if skipped > 0:
         print(f"  Skipped {skipped} already-preprocessed shards")

@@ -30,6 +30,11 @@ if command -v conda &>/dev/null; then
     eval "$(conda shell.bash hook 2>/dev/null)" && conda activate nano
 fi
 
+# ── 锁定 Python 3.11（pyarrow 兼容 Ascend NPU）─────────────
+if [ -x "/usr/local/python3.11.13/bin/python3" ]; then
+    export PATH="/usr/local/python3.11.13/bin:$PATH"
+fi
+
 QUADMIX_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 export PATH="$HOME/.local/bin:$PATH"
 
@@ -130,7 +135,7 @@ if [ "$CLEAN_PREPROCESSED" = "1" ]; then
     NEED_CLEAN_PREPROCESSED=1
 elif [ "$CLEAN_PREPROCESSED" = "0" ]; then
     NEED_CLEAN_PREPROCESSED=0
-elif [ -f "$PREPROCESSED_DIR/shard_index.json" ]; then
+    elif [ -f "$PREPROCESSED_DIR/shard_index.json" ]; then
     # auto 模式：对比旧 shard 数量和当前 NUM_SHARDS
     OLD_SHARDS=$(python3 -c "import json; print(json.load(open('$PREPROCESSED_DIR/shard_index.json'))['num_shards'])" 2>/dev/null || echo 0)
     if [ "$OLD_SHARDS" -gt "$NUM_SHARDS" ]; then
@@ -138,6 +143,15 @@ elif [ -f "$PREPROCESSED_DIR/shard_index.json" ]; then
         echo ""
         echo "  [警告] 旧预处理有 $OLD_SHARDS 个 shard，当前只需 $NUM_SHARDS 个"
         echo "         将自动清理旧预处理目录防止残留文件干扰"
+    elif [ "$OLD_SHARDS" -eq 0 ] && [ -d "$PREPROCESSED_DIR" ]; then
+        # shard_index.json 存在但解析失败或为 0，目录有残留文件
+        RESIDUAL=$(ls "$PREPROCESSED_DIR"/preprocessed_*.parquet 2>/dev/null | wc -l || echo 0)
+        if [ "$RESIDUAL" -gt 0 ]; then
+            NEED_CLEAN_PREPROCESSED=1
+            echo ""
+            echo "  [警告] shard_index.json 损坏（shards=0），但有 $RESIDUAL 个残留文件"
+            echo "         将自动清理旧预处理目录"
+        fi
     fi
 fi
 
