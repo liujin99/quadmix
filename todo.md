@@ -11,6 +11,12 @@
 - **修复**: 使用 `mp.get_context('spawn')` 替代默认 fork，子进程从零启动不继承主进程内存
 - **影响**: 启动慢 2-3 秒，但避免卡死问题
 
+### 2026-06-02: micro_batch 64→40 避免 NPU OOM
+- **文件**: `scripts/demo_run_full.sh`, `scripts/demo_run_quick.sh`
+- **问题**: micro_batch=64 时 logits [64, 2048, 50432] fp32 = 26.3GB，加上梯度和 CE workspace，peak ~77GB 超过 NPU 60GB 上限
+- **修复**: micro_batch=40，peak ~49GB，余量 11GB
+- **影响**: global_batch 同步改为 40（无梯度累积），训练速度提升
+
 ### 2026-06-02: mmap file handle leak 修复
 - **文件**: `scripts/essential_proxy_runner.py:_cached_shard_rows()` 等 4 处
 - **问题**: `np.load(mmap_mode='r')` 未关闭文件句柄，101 shards 累积 101 个打开的 mmap fd 导致 IO hang
