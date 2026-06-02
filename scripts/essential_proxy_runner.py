@@ -1971,6 +1971,14 @@ def _tokenize_shard_parallel(
             io_queue.put(result)
             with results_lock:
                 io_completed[0] += 1
+                # Print progress every 10 shards
+                if io_completed[0] % 10 == 0 or io_completed[0] == n_shards:
+                    elapsed = time.time() - t0
+                    speed = io_completed[0] / elapsed if elapsed > 0 else 0
+                    eta = (n_shards - io_completed[0]) / speed if speed > 0 else 0
+                    print(f"  [IO Progress] {io_completed[0]}/{n_shards} shards "
+                          f"({io_completed[0]*100//n_shards}%), "
+                          f"{speed:.1f} shards/s, ETA {eta:.0f}s")
         except Exception as e:
             print(f"  [IO Error] shard {sid}: {e}")
             io_queue.put(None)  # Signal error
@@ -1997,6 +2005,15 @@ def _tokenize_shard_parallel(
             with results_lock:
                 results.append((sid, parsed_rows, tokens_array, io_time, tok_time, io_time + tok_time))
                 tok_completed[0] += 1
+                
+                # Print progress every 10 shards
+                if tok_completed[0] % 10 == 0 or tok_completed[0] == n_shards:
+                    elapsed = time.time() - t0
+                    speed = tok_completed[0] / elapsed if elapsed > 0 else 0
+                    eta = (n_shards - tok_completed[0]) / speed if speed > 0 else 0
+                    print(f"  [Tokenize Progress] {tok_completed[0]}/{n_shards} shards "
+                          f"({tok_completed[0]*100//n_shards}%), "
+                          f"{speed:.1f} shards/s, ETA {eta:.0f}s")
 
     t0 = time.time()
     
