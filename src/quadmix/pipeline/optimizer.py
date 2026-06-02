@@ -266,7 +266,12 @@ class QuaDMixOptimizer:
             n_val = 0
             print(f"[QuaDMixOptimizer] Only {n_total} experiments, using all for training")
         else:
-            n_train = int(n_total * self.config.regression_train_ratio)
+            # Dynamic adjustment: ensure validation set has at least 20 samples (or 20%, whichever is smaller)
+            # This prevents too-small validation sets when n_total is small (e.g., 64 experiments)
+            min_val = min(20, n_total // 5)
+            n_val = max(min_val, int(n_total * (1 - self.config.regression_train_ratio)))
+            n_train = n_total - n_val
+            
             rng = np.random.default_rng(42)
             indices = rng.permutation(n_total)
             train_idx = indices[:n_train]
