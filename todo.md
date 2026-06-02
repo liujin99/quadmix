@@ -237,3 +237,54 @@
 | P2 | A5 | Proxy Eq.2 缺少 token 加权 | 排名精度降低 |
 | P2 | B1 | LightGBM 无 early stopping | 过拟合风险 |
 | P3 | A7,B5 | 缺少 BMK 变体 / 消融支持 | 功能完整性 |
+
+---
+
+## 数据处理性能优化 — 2026-06-02
+
+### C1. `tokenize_all_needed` 单线程 tokenize
+- **文件**: `essential_proxy_runner.py:tokenize_all_needed()` (L1336)
+- **问题**: CPU/顺序模式调用 `_tokenize_texts()`（单线程），而并行模式用 `_tokenize_shard_parallel`（48 worker）。CPU 模式下 192 核完全浪费
+- **影响**: CPU 模式 tokenize 慢 10-20x
+- **方案**: `tokenize_all_needed` 内部也调用 `_tokenize_shard_parallel`
+
+### C2. Pack/Unpack 经磁盘 I/O 传递 token
+- **文件**: `essential_proxy_runner.py:_tokenize_batch_union()` (L617-620) + `_load_tokens_for_experiment()` (L648-651)
+- **问题**: 主进程 `torch.save` 写磁盘 → worker 进程 `torch.load` 读磁盘。大实验几百 MB，每个实验多几秒到几十秒 I/O
+- **影响**: 每实验额外 2-10s I/O 开销
+- **方案**: spawn 子进程不能用共享 tensor，但可用 `np.save` + mmap 或 shared_memory 替代
+
+### C3. `_cached_shard_rows` 每次构建 Python set 是 O(N)
+- **文件**: `essential_proxy_runner.py:_cached_shard_rows()` (L382-389)
+- **问题**: `set(int(r) for r in data['rows'])` — 10 万行 × `int()` 转换，Python for-loop
+- **影响**: 每 shard 每 batch 几十 ms
+- **方案**: 改用 `np.isin` 直接向量化查询，或缓存 rows 数组避免重复构建 set
+
+### C4. `_memory_cache_add_rows` Python dict 去重 O(N)
+- **文件**: `essential_proxy_runner.py:_memory_cache_add_rows()` (L309-314)
+- **问题**: `row_to_idx = {}; for i, r in enumerate(combined_rows): row_to_idx[int(r)] = i` + `sorted(row_to_idx.keys())` — 10 万行用 Python dict+sort 去重
+- **影响**: 每 shard 几十 ms
+- **方案**: 改用 `np.unique(return_index=True)`
+
+### C5. 预处理 `df.apply` 逐行提取质量信号
+- **文件**: `preprocess_essential_web_v1_sharded.py:process_shard()` (L89)
+- **问题**: `df["quality_signals"].apply(extract_quality_signals)` — 每行调用 Python 函数解析 dict。8 万行/shard × 20 shard = 160 万次 Python 函数调用
+- **影响**: 预处理阶段一次性开销，增量模式跳过
+- **方案**: 向量化提取或用 `pd.json_normalize`
+
+### C6. Memory cache LRU 用 list.remove 是 O(N)
+- **文件**: `essential_proxy_runner.py:_memory_cache_lru` (L276, L322, L328)
+- **问题**: LRU 用 Python list 实现，每次 `remove(sid)` 是 O(N) 线性扫描。20 个 shard 问题不大，shard 数增长会成为瓶颈
+- **影响**: shard 少时影响小
+- **方案**: 改用 `collections.OrderedDict`
+
+### 优先级
+
+| # | 瓶颈 | 影响 | 修复难度 |
+|---|------|------|---------|
+| C1 | tokenize_all_needed 单线程 | CPU 模式慢 10-20x | 低 |
+| C2 | Pack/Unpack 磁盘 I/O | 每实验 2-10s | 中 |
+| C3 | _cached_shard_rows set 构建 | 每 shard 几十 ms | 低 |
+| C4 | _memory_cache_add_rows dict 去重 | 每 shard 几十 ms | 低 |
+| C5 | 预处理 df.apply | 一次性 | 低 |
+| C6 | LRU list.remove | shard 少时小 | 低 |

@@ -106,7 +106,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             # RegMix training params
             model_variant: str = "tinyllama_1M",
             global_batch_size: int = 64,
-            micro_batch_size: int = 32,
+            micro_batch_size: int = 8,
             max_step: int = 25000,
             warmup_fraction: float = 0.04,  # warmup as fraction of actual steps (default 4% = RegMix default)
             learning_rate: float = 4e-4,
@@ -1009,7 +1009,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         # Pre-allocate: NPU buffers for batched transfer
         # Transfer grad_acc micro-batches at once per optimizer step to reduce host->device latency
-        accum_bs = self.micro_batch_size * grad_acc  # e.g. 32*2=64
+        accum_bs = self.micro_batch_size * grad_acc  # e.g. 8*8=64
         batch_buf = torch.empty(accum_bs, self.block_size + 1, dtype=torch.long, device=device)
         block_starts_buf = torch.empty(accum_bs, dtype=torch.long, device=device)  # NPU staging
         arange_buf = torch.arange(self.block_size + 1, dtype=torch.long, device=device)  # Pre-compute on device
