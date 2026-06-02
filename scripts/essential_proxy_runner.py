@@ -1236,7 +1236,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
               f"val_loss={val_loss:.4f} (ppl={np.exp(val_loss):.1f})")
         # ── Free NPU memory (torch-npu doesn't release HBM on del) ──
         with PerfTimer.section("free_npu", _timer_prefix):
-            del model, optimizer
+            del model
             if device.type == "npu":
                 import gc
                 gc.collect()
