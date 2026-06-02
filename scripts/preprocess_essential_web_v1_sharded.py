@@ -234,12 +234,23 @@ def main():
     workers = min(args.workers, len(to_process)) if to_process else 1
     if len(to_process) > 1:
         print(f"  Processing {len(to_process)} shards with {workers} workers (process pool)...")
+        t_proc_start = time.time()
+        completed = 0
         with ProcessPoolExecutor(max_workers=workers) as executor:
             futures = {executor.submit(process_shard, sp, si, odir): (sp, si)
                        for sp, si, odir in to_process}
             for future in as_completed(futures):
                 stats = future.result()
                 shard_index.append(stats)
+                completed += 1
+                # Print progress every 10 shards or at completion
+                if completed % 10 == 0 or completed == len(to_process):
+                    elapsed = time.time() - t_proc_start
+                    speed = completed / elapsed if elapsed > 0 else 0
+                    eta = (len(to_process) - completed) / speed if speed > 0 else 0
+                    print(f"  [Preprocess Progress] {completed}/{len(to_process)} shards "
+                          f"({completed*100//len(to_process)}%), "
+                          f"{speed:.1f} shards/s, ETA {eta:.0f}s")
     else:
         for sp, shard_idx, odir in to_process:
             stats = process_shard(sp, shard_idx, odir)
