@@ -12,7 +12,6 @@ Aligned with RegMix (Liu et al., 2024, ICLR 2025, arXiv:2407.01492)
 
 from typing import Optional
 
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -81,7 +80,7 @@ class CausalSelfAttention(nn.Module):
             dim=self.head_dim, max_seq_len=config.block_size, base=config.rope_base,
         )
 
-    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, T, C = x.shape
         q = self.q_proj(x).view(B, T, self.n_head, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, T, self.n_head, self.head_dim).transpose(1, 2)
@@ -90,11 +89,7 @@ class CausalSelfAttention(nn.Module):
         cos, sin = self.rotary(x, T)
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
-        attn = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        attn = attn + mask[:T, :T]
-        attn = F.softmax(attn, dim=-1)
-
-        y = torch.matmul(attn, v)
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         return self.out_proj(y)
 
@@ -122,8 +117,8 @@ class TransformerBlock(nn.Module):
         self.norm_2 = RMSNorm(config.n_embd, eps=config.norm_eps)
         self.mlp = LLaMAMLP(config)
 
-    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        x = x + self.attn(self.norm_1(x), mask)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x + self.attn(self.norm_1(x))
         x = x + self.mlp(self.norm_2(x))
         return x
 
@@ -197,15 +192,6 @@ class ProxyModel(nn.Module):
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.lm_head.weight = self.embed.weight  # tied
 
-        self.register_buffer(
-            "causal_mask",
-            torch.triu(
-                torch.full((config.block_size, config.block_size), float("-inf")),
-                diagonal=1,
-            ),
-            persistent=False,
-        )
-
         self._init_weights()
 
     def _init_weights(self):
@@ -223,10 +209,9 @@ class ProxyModel(nn.Module):
             f"Sequence length {T} exceeds block_size {self.config.block_size}"
 
         x = self.embed(input_ids)  # (B, T, C)
-        mask = self.causal_mask[:T, :T]  # slice is cheap (~100ns), precomputed buffer
 
         for layer in self.layers:
-            x = layer(x, mask)
+            x = layer(x)
 
         x = self.norm(x)
         logits = self.lm_head(x)

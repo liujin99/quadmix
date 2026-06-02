@@ -511,7 +511,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         """Path to temporary token file for a single experiment."""
         return os.path.join(
             self.token_cache_dir,
-            f"exp_{exp_id:04d}_tokens.pt"
+            f"exp_{exp_id:04d}_tokens.npy"
         )
 
     def _tokenize_batch_union(
@@ -642,45 +642,38 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         # ── Step 4: Pack each exp's tokens from memory_cache ───────────────
         exp_token_paths: Dict[int, str] = {}
         pack_t0 = time.time()
+        n_batch = len(batch_exp_ids)
 
-        for exp_id, selected_idx in zip(batch_exp_ids, batch_selected):
-            shard_groups = exp_to_shard_groups[exp_id]  # Reuse cached result
+        for i, (exp_id, selected_idx) in enumerate(zip(batch_exp_ids, batch_selected)):
+            shard_groups = exp_to_shard_groups[exp_id]
             all_tokens = []
 
             for sid, (shard_path, local_rows) in shard_groups.items():
-                # Query memory_cache for all needed rows (should be 100% hit now)
-                requested_rows = [int(r) for r in local_rows]
+                requested_rows = local_rows.tolist()
                 tokens, sorted_hit_rows, miss_rows = self._memory_cache_query(sid, requested_rows)
 
                 if miss_rows:
                     print(f"  WARNING: exp {exp_id} shard {sid} has {len(miss_rows)} miss rows after batch tokenize!")
-                    # Fallback: read from disk cache (should not happen in normal flow)
-                    cache_path = self._get_shard_token_path(sid)
-                    if os.path.exists(cache_path):
-                        data = np.load(cache_path)
-                        disk_rows = data['rows']
-                        disk_tokens = data['tokens']
-                        row_to_pos = {int(r): i for i, r in enumerate(disk_rows)}
-                        for r in miss_rows:
-                            if r in row_to_pos:
-                                pass  # TODO: handle this edge case
 
-                # Reorder tokens to match requested_rows order
-                # tokens[i] corresponds to sorted_hit_rows[i]
-                # Create mapping: row -> position in tokens array
-                row_to_token_pos = {int(r): i for i, r in enumerate(sorted_hit_rows)}
-                positions = np.array([row_to_token_pos[int(r)] for r in requested_rows], dtype=np.int64)
-                shard_tokens = torch.from_numpy(tokens[positions].astype(np.int64))
+                sorted_hit_arr = np.asarray(sorted_hit_rows, dtype=np.int64)
+                requested_arr = np.asarray(requested_rows, dtype=np.int64)
+                positions = np.searchsorted(sorted_hit_arr, requested_arr)
+                shard_tokens = tokens[positions]
                 all_tokens.append(shard_tokens)
 
-            # Pack into temporary file
-            result = torch.cat(all_tokens, dim=0)
+            result = np.concatenate(all_tokens, axis=0)
             exp_token_path = self._get_exp_token_path(exp_id)
-            torch.save(result, exp_token_path)
+            np.save(exp_token_path, result)
             exp_token_paths[exp_id] = exp_token_path
 
+            elapsed = time.time() - pack_t0
+            speed = (i + 1) / elapsed if elapsed > 0 else 0
+            eta = (n_batch - i - 1) / speed if speed > 0 else 0
+            print(f"  [Pack] {i+1}/{n_batch} exps ({(i+1)*100//n_batch}%), "
+                  f"{elapsed:.1f}s elapsed, ETA {eta:.0f}s")
+
         pack_time = time.time() - pack_t0
-        print(f"[BatchTokenize] Pack {len(batch_exp_ids)} exps: {pack_time:.1f}s")
+        print(f"[BatchTokenize] Pack {n_batch} exps: {pack_time:.1f}s")
 
         elapsed = time.time() - t0
         print(f"[BatchTokenize] Total: {elapsed:.1f}s for {len(batch_exp_ids)} experiments")
@@ -706,7 +699,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         if exp_id is not None:
             exp_token_path = self._get_exp_token_path(exp_id)
             if os.path.exists(exp_token_path):
-                result = torch.load(exp_token_path, map_location="cpu", weights_only=True)
+                result = torch.from_numpy(np.load(exp_token_path, mmap_mode='r')).long()
                 print(f"  [TokenLoad] exp {exp_id:04d}: {len(result):,} docs from temp file")
                 return result
 
