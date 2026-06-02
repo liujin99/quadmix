@@ -250,8 +250,8 @@ python3 "$QUADMIX_DIR/scripts/run_essential_web_v1.py" \
     --top-k 5 \
     --block-size 2048 \
     --tiny-steps 5000 \
-    --micro-batch-size 40 \
-    --global-batch-size 40 \
+    --micro-batch-size 32 \
+    --global-batch-size 64 \
     --rank-ref-size 10000 \
     --output "$OUTPUT_DIR" \
     $DEVICE_ARG \

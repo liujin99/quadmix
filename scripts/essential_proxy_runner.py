@@ -1045,7 +1045,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             for doc in train_tokens[non_empty]:
                 real_tokens_list.append(doc[doc != pad_id])
                 real_tokens_list.append(eos_buf)
-            flat_train = torch.cat(real_tokens_list).to(device)
+            flat_train = torch.cat(real_tokens_list)  # Keep on CPU to save NPU memory
             del train_tokens, real_tokens_list, real_mask, non_empty, eos_buf
         num_steps = self.tiny_steps if self.tiny_steps > 0 else self.max_step
         grad_acc = self.gradient_accumulation_steps
@@ -1076,6 +1076,11 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         batch_buf = torch.empty(accum_bs, self.block_size + 1, dtype=torch.long, device=device)
         block_starts_buf = torch.empty(accum_bs, dtype=torch.long, device=device)  # NPU staging
         arange_buf = torch.arange(self.block_size + 1, dtype=torch.long, device=device)  # Pre-compute on device
+        arange_cpu = torch.arange(self.block_size + 1, dtype=torch.long)  # CPU version for indexing
+
+        # Clear NPU memory fragmentation before training loop
+        if device.type == "npu":
+            torch.npu.empty_cache()
 
         # ---- 5. Training loop (RegMix-style: permutation shuffle, no replacement) ----
         _train_t0 = time.perf_counter()
@@ -1117,12 +1122,11 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                         filled += chunk
                         epoch_pos = chunk
 
-                # Transfer to device once
-                block_starts_buf.copy_(torch.from_numpy(block_starts_cpu).to(device))
-
-                # Index on device
-                idx_device = block_starts_buf.unsqueeze(1) + arange_buf.unsqueeze(0)
-                batch_buf.copy_(flat_train[idx_device])
+                # Index on CPU, then transfer to device
+                block_starts_cpu_tensor = torch.from_numpy(block_starts_cpu)
+                idx_cpu = block_starts_cpu_tensor.unsqueeze(1) + arange_cpu.unsqueeze(0)
+                batch_cpu = flat_train[idx_cpu]
+                batch_buf.copy_(batch_cpu.to(device))
 
             # Extract this micro-batch slice on device
             batch = batch_buf[mb_start:mb_end]
