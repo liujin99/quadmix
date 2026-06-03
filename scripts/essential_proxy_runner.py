@@ -272,7 +272,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         # Each experiment repeats normalize_fn(quality_scores[:, n]) - expensive!
         # Pre-compute once, reuse in all experiments (only weighted sum needed)
         from quadmix.utils.normalization import get_normalizer
-        normalize_fn = get_normalizer("zscore")
+        normalize_fn = get_normalizer("rank")
 
         t1 = time.time()
         num_criteria = self._quality_scores.shape[1]
@@ -892,7 +892,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         # ── Pre-compute normalized quality (Eq.1 optimization) ───────────────
         from quadmix.utils.normalization import get_normalizer
-        normalize_fn = get_normalizer("zscore")
+        normalize_fn = get_normalizer("rank")
 
         t1 = time.time()
         num_criteria = self._quality_scores.shape[1]
