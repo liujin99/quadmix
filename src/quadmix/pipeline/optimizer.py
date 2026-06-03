@@ -51,7 +51,7 @@ class RegressionModel:
                 "n_estimators": 1000,
                 "learning_rate": 0.05,
                 "num_leaves": 31,
-                "min_child_samples": min(20, max(1, n_train // 20)),
+                "min_child_samples": min(20, max(5, n_train // 10)),
                 "subsample": 0.8,
                 "colsample_bytree": 0.8,
                 "reg_alpha": 0.1,
@@ -317,48 +317,81 @@ class QuaDMixOptimizer:
             print(f"[QuaDMixOptimizer] Val   R² = {val_r2:.4f}, MAE = {val_mae:.4f}")
         print(f"[QuaDMixOptimizer] Val   samples = {n_val}")
 
-        self._compute_reliability(train_params, train_losses, val_params, val_losses, n_val)
+        self._compute_reliability(params_list, losses)
 
         return self._regressor
 
     def _compute_reliability(
         self,
-        train_params: List[ParameterSet],
-        train_losses: npt.NDArray[np.float64],
-        val_params: List[ParameterSet],
-        val_losses: npt.NDArray[np.float64],
-        n_val: int,
+        params_list: List[ParameterSet],
+        losses: npt.NDArray[np.float64],
     ):
-        n_train = len(train_params)
-        n_features = len(train_params[0].flatten()) if n_train > 0 else 0
+        n_total = len(params_list)
+        n_features = len(params_list[0].flatten()) if n_total > 0 else 0
 
         self._n_features = n_features
-        self._n_train = n_train
-        self._n_val = n_val
-        self._sample_sufficient = n_train >= n_features
+        self._n_train = n_total
+        self._n_val = None
+        self._sample_sufficient = n_total >= n_features
         self._overfit_gap = self._train_r2 - self._val_r2 if self._val_r2 else None
 
         self._val_r2_ci_lower = None
         self._val_r2_ci_upper = None
         self._val_r2_ci_std = None
+        self._val_r2_bootstrap_mean = None
+        self._bootstrap_models: List[RegressionModel] = []
 
-        if n_val < 10:
-            print(f"[QuaDMixOptimizer] ⚠️  Val samples too few ({n_val} < 10), skip bootstrap CI")
+        if n_total < 10:
+            print(f"[QuaDMixOptimizer] ⚠️  Too few samples ({n_total} < 10), skip bootstrap")
             return
 
-        n_bootstrap = 500
+        if n_total < 50:
+            n_bootstrap = 100
+        elif n_total < 200:
+            n_bootstrap = 200
+        elif n_total < 500:
+            n_bootstrap = 300
+        else:
+            n_bootstrap = 500
+        n_ensemble = min(50, n_bootstrap // 4)
         rng = np.random.default_rng(42)
         bootstrap_r2s = []
 
-        for _ in range(n_bootstrap):
-            idx = rng.choice(n_val, size=n_val, replace=True)
-            if len(np.unique(idx)) < 5:
+        print(f"[QuaDMixOptimizer] Bootstrap: {n_bootstrap} iterations (full resampling, OOB evaluation)...")
+        for i in range(n_bootstrap):
+            idx = rng.choice(n_total, size=n_total, replace=True)
+            unique_idx = np.unique(idx)
+
+            oob_mask = np.ones(n_total, dtype=bool)
+            oob_mask[unique_idx] = False
+            oob_idx = np.where(oob_mask)[0]
+
+            if len(unique_idx) < max(10, n_features // 2) or len(oob_idx) < 5:
                 continue
-            boot_params = [val_params[i] for i in idx]
-            boot_losses = val_losses[idx]
+
+            boot_train_params = [params_list[j] for j in idx]
+            boot_train_losses = losses[idx]
+            oob_params = [params_list[j] for j in oob_idx]
+            oob_losses = losses[oob_idx]
+
             try:
-                r2 = float(self._regressor.score(boot_params, boot_losses))
+                model = RegressionModel(
+                    model_type="lightgbm",
+                    **self.regression_params,
+                )
+                model.fit(
+                    boot_train_params,
+                    boot_train_losses,
+                    num_domains=self.config.num_domains,
+                    num_criteria=self.config.num_quality_criteria,
+                    eval_params_list=oob_params,
+                    eval_losses=oob_losses,
+                )
+                r2 = float(model.score(oob_params, oob_losses))
                 bootstrap_r2s.append(r2)
+
+                if len(self._bootstrap_models) < n_ensemble:
+                    self._bootstrap_models.append(model)
             except Exception:
                 continue
 
@@ -370,14 +403,17 @@ class QuaDMixOptimizer:
         self._val_r2_ci_lower = float(np.percentile(bootstrap_r2s, 2.5))
         self._val_r2_ci_upper = float(np.percentile(bootstrap_r2s, 97.5))
         self._val_r2_ci_std = float(np.std(bootstrap_r2s))
+        self._val_r2_bootstrap_mean = float(np.mean(bootstrap_r2s))
 
         ci_width = self._val_r2_ci_upper - self._val_r2_ci_lower
         status = "✓ Stable" if ci_width < 0.3 else "⚠️ Wide CI"
 
+        print(f"[QuaDMixOptimizer] Val   R² (bootstrap mean) = {self._val_r2_bootstrap_mean:.4f}")
         print(f"[QuaDMixOptimizer] Val   R² 95% CI = [{self._val_r2_ci_lower:.3f}, {self._val_r2_ci_upper:.3f}] (width={ci_width:.3f}) {status}")
+        print(f"[QuaDMixOptimizer] Bootstrap ensemble: {len(self._bootstrap_models)} models trained")
 
         if not self._sample_sufficient:
-            print(f"[QuaDMixOptimizer] ⚠️  Samples ({n_train}) < Features ({n_features}): underdetermined, increase experiments to {n_features * 3}+")
+            print(f"[QuaDMixOptimizer] ⚠️  Samples ({n_total}) < Features ({n_features}): underdetermined, increase experiments to {n_features * 3}+")
         elif self._overfit_gap and self._overfit_gap > 0.3:
             print(f"[QuaDMixOptimizer] ⚠️  Train-Val gap = {self._overfit_gap:.3f}: possible overfitting")
 
@@ -391,6 +427,10 @@ class QuaDMixOptimizer:
 
         Based on Section 3.3: sample 100,000 points, predict loss,
         average top-K.
+
+        If bootstrap ensemble models are available, uses ensemble prediction
+        (average of all bootstrap models) instead of single model for more
+        stable results.
 
         Args:
             n_search_points: Number of candidate points to sample.
@@ -411,8 +451,14 @@ class QuaDMixOptimizer:
         sampler = ParameterSampler(self.config, seed=9999)
         candidates = sampler.sample_batch(n_search)
 
-        # Predict losses
-        predicted_losses = self._regressor.predict(candidates)
+        # Predict losses using ensemble if available
+        if hasattr(self, '_bootstrap_models') and len(self._bootstrap_models) > 0:
+            all_preds = np.array([m.predict(candidates) for m in self._bootstrap_models])
+            predicted_losses = np.mean(all_preds, axis=0)
+            print(f"[QuaDMixOptimizer] Search: ensemble prediction ({len(self._bootstrap_models)} models)")
+        else:
+            predicted_losses = self._regressor.predict(candidates)
+            print(f"[QuaDMixOptimizer] Search: single model prediction")
 
         # Find top-K
         top_indices = np.argsort(predicted_losses)[:k]
@@ -447,6 +493,10 @@ class QuaDMixOptimizer:
     @property
     def val_r2_ci_upper(self) -> Optional[float]:
         return getattr(self, "_val_r2_ci_upper", None)
+
+    @property
+    def val_r2_bootstrap_mean(self) -> Optional[float]:
+        return getattr(self, "_val_r2_bootstrap_mean", None)
 
     @property
     def sample_sufficient(self) -> Optional[bool]:

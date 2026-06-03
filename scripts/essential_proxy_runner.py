@@ -1315,7 +1315,6 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 "params_omega": [sc.omega for sc in params.sampling_configs],
                 "params_eta": [sc.eta for sc in params.sampling_configs],
                 "params_epsilon": [sc.epsilon for sc in params.sampling_configs],
-                "global_weights": params.merge_config.global_weights.tolist(),
                 "domain_weights": params.merge_config.domain_weights.tolist(),
                 "checkpoint_steps": dict(self._ckpt_results) if hasattr(self, '_ckpt_results') else {},
                 "training_config": {

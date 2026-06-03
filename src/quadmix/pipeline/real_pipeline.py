@@ -601,6 +601,7 @@ class QuaDMixPipeline:
                 "top_k_avg_loss": top_k_avg_loss,
             },
             "reliability": {
+                "val_r2_bootstrap_mean": self._optimizer.val_r2_bootstrap_mean,
                 "val_r2_ci_lower": self._optimizer.val_r2_ci_lower,
                 "val_r2_ci_upper": self._optimizer.val_r2_ci_upper,
                 "val_r2_ci_width": (
@@ -612,7 +613,6 @@ class QuaDMixPipeline:
                 "overfit_gap": self._optimizer.overfit_gap,
                 "n_features": self._optimizer.n_features,
                 "n_train_samples": getattr(self._optimizer, "_n_train", None),
-                "n_val_samples": getattr(self._optimizer, "_n_val", None),
             },
             "sampling": {
                 "num_original_docs": n_docs_save,
@@ -761,7 +761,6 @@ class QuaDMixPipeline:
         result = {
             "num_domains": params.num_domains,
             "num_criteria": params.num_criteria,
-            "global_weights": params.merge_config.global_weights.tolist(),
             "domain_weights": params.merge_config.domain_weights.tolist(),
             "sampling_configs": [
                 {
