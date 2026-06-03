@@ -37,7 +37,7 @@ class RegressionModel:
         self._model = None
         self._is_fitted = False
 
-    def _build_model(self):
+    def _build_model(self, n_train: int = 0):
         """Build the underlying regressor model."""
         if self.model_type == "lightgbm":
             try:
@@ -51,7 +51,7 @@ class RegressionModel:
                 "n_estimators": 1000,
                 "learning_rate": 0.05,
                 "num_leaves": 31,
-                "min_child_samples": 20,
+                "min_child_samples": min(20, max(1, n_train // 20)),
                 "subsample": 0.8,
                 "colsample_bytree": 0.8,
                 "reg_alpha": 0.1,
@@ -123,7 +123,7 @@ class RegressionModel:
         self._num_domains = num_domains
         self._num_criteria = num_criteria
 
-        self._build_model()
+        self._build_model(n_train=len(params_list))
 
         if (self.model_type == "lightgbm" and eval_params_list is not None
                 and eval_losses is not None and len(eval_params_list) > 0):
