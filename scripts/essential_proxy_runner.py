@@ -519,6 +519,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             batch_selected: List[np.ndarray],
             batch_exp_ids: List[int],
             async_write_queue: Optional["Queue"] = None,
+            shm_store: Optional[Dict[int, tuple]] = None,
     ) -> Dict[int, str]:
         """NPU Parallel Mode: Batch tokenize union miss rows across all experiments.
 
@@ -527,13 +528,14 @@ class EssentialWebProxyRunner(BaseProxyRunner):
           2. For each shard, read parquet ONCE (not 8 times)
           3. Tokenize all miss rows in batch
           4. Store in memory_cache for subsequent batches
-          5. Pack each exp's tokens to temp file
+          5. Pack each exp's tokens to SharedMemory (or temp file as fallback)
           6. AsyncWrite thread writes to disk cache in background
 
         Args:
             batch_selected: List of selected_indices for each exp
             batch_exp_ids: List of experiment IDs
             async_write_queue: Queue for AsyncWrite thread (optional)
+            shm_store: Dict to store SharedMemory info {exp_id: (shm_name, shape, dtype_str)}
 
         Returns:
             Dict[exp_id -> exp_token_path] for each experiment
@@ -662,9 +664,19 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 all_tokens.append(shard_tokens)
 
             result = np.concatenate(all_tokens, axis=0)
-            exp_token_path = self._get_exp_token_path(exp_id)
-            np.save(exp_token_path, result)
-            exp_token_paths[exp_id] = exp_token_path
+
+            if shm_store is not None:
+                from multiprocessing.shared_memory import SharedMemory
+                shm = SharedMemory(create=True, size=result.nbytes)
+                shm_array = np.ndarray(result.shape, dtype=result.dtype, buffer=shm.buf)
+                shm_array[:] = result[:]
+                shm_store[exp_id] = (shm.name, result.shape, result.dtype.str)
+                shm.close()
+                exp_token_paths[exp_id] = f"shm://{shm_store[exp_id][0]}"
+            else:
+                exp_token_path = self._get_exp_token_path(exp_id)
+                np.save(exp_token_path, result)
+                exp_token_paths[exp_id] = exp_token_path
 
             elapsed = time.time() - pack_t0
             speed = (i + 1) / elapsed if elapsed > 0 else 0
@@ -681,19 +693,32 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         return exp_token_paths
 
     def _load_tokens_for_experiment(
-            self, selected_idx: np.ndarray, exp_id: int = None
+            self, selected_idx: np.ndarray, exp_id: int = None,
+            shm_info: Optional[tuple] = None,
     ) -> torch.Tensor:
         """Load tokens for selected document indices.
 
         In sharded mode (parallel):
-          1. If exp_id provided and temporary file exists → load from temp file
-          2. Otherwise fallback to shard cache logic
+          1. If shm_info provided → load from SharedMemory (zero-copy)
+          2. If exp_id provided and temporary file exists → load from temp file
+          3. Otherwise fallback to shard cache logic
 
         In legacy mode:
           Directly index into self._token_ids (already loaded)
         """
         if self._mode == "legacy":
             return self._token_ids[selected_idx]
+
+        # SharedMemory path (zero-copy, no disk I/O)
+        if shm_info is not None:
+            from multiprocessing.shared_memory import SharedMemory
+            shm_name, shape, dtype_str = shm_info
+            shm = SharedMemory(name=shm_name)
+            shm_array = np.ndarray(shape, dtype=np.dtype(dtype_str), buffer=shm.buf)
+            result = torch.from_numpy(shm_array.copy()).long()
+            shm.close()
+            print(f"  [TokenLoad] exp {exp_id:04d}: {len(result):,} docs from SharedMemory")
+            return result
 
         # Parallel mode: check for temporary file
         if exp_id is not None:
@@ -1020,6 +1045,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             params: ParameterSet,
             experiment_id: int = 0,
             selected_idx: Optional[np.ndarray] = None,
+            shm_info: Optional[tuple] = None,
             checkpoint_interval: Optional[int] = None,
     ) -> ProxyResult:
         """Train one proxy model. Validates on openhermes-10k.
@@ -1072,7 +1098,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         # ---- 1. Load / tokenize training data on demand ----
         with PerfTimer.section("load_tokens", _timer_prefix):
-            train_tokens = self._load_tokens_for_experiment(selected_idx, exp_id=experiment_id)
+            train_tokens = self._load_tokens_for_experiment(selected_idx, exp_id=experiment_id, shm_info=shm_info)
         # Keep on CPU to avoid HBM pressure — move to device per-batch
 
         # ---- 2. Create model ----
@@ -1611,9 +1637,9 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             f"params_list length {n_exp}"
         )
 
-        # Default: tokenize batch size = NPU count (cache完一批正好NPU开跑)
+        # Default: tokenize batch size = 2× NPU count (2 rounds buffer)
         if tokenize_lookahead is None:
-            tokenize_lookahead = num_workers
+            tokenize_lookahead = num_workers * 2
 
         if num_workers <= 1:
             # Sequential fallback
@@ -1673,9 +1699,9 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         import threading
         import queue as thread_queue  # For AsyncWrite thread
 
-        # Default: tokenize batch size = NPU count
+        # Default: tokenize batch size = 2× NPU count (2 rounds buffer)
         if tokenize_lookahead is None:
-            tokenize_lookahead = num_workers
+            tokenize_lookahead = num_workers * 2
 
         n_exp = len(params_list)
         all_results = [None] * n_exp
@@ -1707,7 +1733,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         print(f"\n[DynamicParallel] {n_exp} experiments, {num_workers} workers")
         print(f"[DynamicParallel] tokenize_lookahead={tokenize_lookahead} (batch union mode)")
-        print(f"[DynamicParallel] NPU Parallel Mode: memory_cache + AsyncWrite enabled")
+        print(f"[DynamicParallel] NPU Parallel Mode: SharedMemory + memory_cache + AsyncWrite enabled")
 
         # ── Create queues ───────────────────────────────────────
         ctx = mp.get_context("spawn")
@@ -1721,6 +1747,9 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         ready_events: Dict[int, bool] = {}
         ready_cond = threading.Condition()  # replaces busy-wait polling
         completed_count = 0
+
+        # SharedMemory info for each experiment (avoids disk I/O)
+        exp_shm_info: Dict[int, tuple] = {}  # {exp_id: (shm_name, shape, dtype_str)}
 
         # ── 0. AsyncWrite Thread (background write to disk cache) ──────
         def async_write_thread_func():
@@ -1759,7 +1788,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 try:
                     # Batch tokenize: union miss rows, each shard read ONCE
                     exp_token_paths = self._tokenize_batch_union(
-                        batch_selected, batch_ids, async_write_queue
+                        batch_selected, batch_ids, async_write_queue,
+                        shm_store=exp_shm_info,
                     )
                     batch_count += 1
 
@@ -1828,7 +1858,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
                     if is_ready is True:
                         # Immediate dispatch: single exp ready
-                        task_queue.put((pos, params_list[pos], all_selected[pos]))
+                        shm_info = exp_shm_info.get(pos)
+                        task_queue.put((pos, params_list[pos], all_selected[pos], shm_info))
                         pos += 1
                         continue
                     elif is_ready is False:
@@ -1929,7 +1960,20 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                     shm.unlink()
                 except Exception:
                     pass
-            print(f"[SharedMem] Cleaned up {len(shared_meta)} shared memory blocks")
+            print(f"[SharedMem] Cleaned up {len(shared_meta)} metadata blocks")
+
+        # Cleanup any leaked token SharedMemory (workers should have unlinked them)
+        leaked = 0
+        for exp_id, (shm_name, shape, dtype_str) in exp_shm_info.items():
+            try:
+                shm = mp.shared_memory.SharedMemory(name=shm_name)
+                shm.close()
+                shm.unlink()
+                leaked += 1
+            except Exception:
+                pass
+        if leaked:
+            print(f"[SharedMem] Cleaned up {leaked} leaked token blocks")
 
         return all_results
 
@@ -2242,10 +2286,11 @@ def _worker_dynamic_loop(
                 print(f"[Worker {worker_id}] Shutdown, completed {completed} experiments")
                 break
 
-            exp_id, params, selected_idx = task
+            exp_id, params, selected_idx, shm_info = task
             print(f"[Worker {worker_id}] Running exp {exp_id}")
 
             r = runner.run_experiment(params, experiment_id=exp_id, selected_idx=selected_idx,
+                                      shm_info=shm_info,
                                       checkpoint_interval=config_dict.get("checkpoint_interval", 1000))
             result_queue.put(r)
             completed += 1
@@ -2256,11 +2301,21 @@ def _worker_dynamic_loop(
             if device_type == "npu":
                 torch.npu.empty_cache()
 
-            # Clean up temporary token file
-            exp_token_path = runner._get_exp_token_path(exp_id)
-            if os.path.exists(exp_token_path):
-                os.remove(exp_token_path)
-                print(f"[Worker {worker_id}] Cleaned temp file for exp {exp_id}")
+            # Clean up SharedMemory or temporary token file
+            if shm_info is not None:
+                from multiprocessing.shared_memory import SharedMemory
+                try:
+                    shm = SharedMemory(name=shm_info[0])
+                    shm.close()
+                    shm.unlink()
+                    print(f"[Worker {worker_id}] Released SharedMemory for exp {exp_id}")
+                except Exception as e:
+                    print(f"[Worker {worker_id}] SharedMemory cleanup failed for exp {exp_id}: {e}")
+            else:
+                exp_token_path = runner._get_exp_token_path(exp_id)
+                if os.path.exists(exp_token_path):
+                    os.remove(exp_token_path)
+                    print(f"[Worker {worker_id}] Cleaned temp file for exp {exp_id}")
 
         result_queue.put(None)  # Signal completion to collector
 
