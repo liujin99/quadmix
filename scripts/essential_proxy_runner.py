@@ -944,6 +944,77 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         return ranks
 
+    def _sample_one_experiment(
+            self, params: ParameterSet, experiment_id: int,
+    ) -> np.ndarray:
+        """Process one experiment: Eq.1-3 + sampling, domain-by-domain.
+
+        Memory-efficient: only creates [n_m] arrays per domain instead of [N] arrays.
+        For 10B docs with 10 domains: peak memory O(N/10) instead of O(N).
+        """
+        M = self.config.num_domains
+        rng_eq2 = np.random.default_rng(experiment_id + 1729)
+        rng_sample = np.random.default_rng(experiment_id + 42)
+        has_tokens = hasattr(self, '_token_counts') and self._token_counts is not None
+
+        domain_selected = []
+
+        for m in range(M):
+            indices = self._domain_indices.get(m)
+            if indices is None or len(indices) == 0:
+                continue
+            if m >= len(params.sampling_configs):
+                continue
+
+            n_m = len(indices)
+
+            # Eq.1: merged scores for this domain [n_m]
+            alpha_m = params.merge_config.get_final_weights(m)
+            domain_scores = self._normalized_quality[indices] @ alpha_m
+
+            # Eq.2: rank estimation for this domain [n_m]
+            k = min(self.rank_ref_size, n_m)
+            ref_idx = rng_eq2.choice(n_m, k, replace=False)
+            ref_scores_unsorted = domain_scores[ref_idx]
+            sort_order = np.argsort(ref_scores_unsorted)
+            ref_scores = ref_scores_unsorted[sort_order]
+            positions = np.searchsorted(ref_scores, domain_scores, side='right')
+
+            if has_tokens:
+                ref_tokens = self._token_counts[indices[ref_idx]][sort_order].astype(np.float64)
+                cum_tokens = np.concatenate(([0.0], np.cumsum(ref_tokens)))
+                total_ref_tokens = cum_tokens[-1]
+                if total_ref_tokens > 0:
+                    domain_ranks = cum_tokens[positions] / total_ref_tokens
+                else:
+                    domain_ranks = positions.astype(np.float64) / k
+            else:
+                domain_ranks = positions.astype(np.float64) / k
+
+            # Eq.3: sampling values for this domain [n_m]
+            sc = params.sampling_configs[m]
+            within_threshold = domain_ranks <= sc.omega
+            sv = np.full(n_m, sc.epsilon, dtype=np.float64)
+            if within_threshold.any():
+                exponent = -sc.lambda_ * (sc.omega - domain_ranks[within_threshold])
+                sigmoid = 2.0 / (1.0 + np.exp(np.clip(exponent, -100, 100)))
+                sv[within_threshold] = sigmoid ** sc.eta + sc.epsilon
+
+            # Fractional sampling for this domain [n_m]
+            int_part = np.floor(sv).astype(np.int64)
+            frac_part = sv - int_part
+            random_mask = rng_sample.uniform(size=n_m) < frac_part
+            repeats = int_part + random_mask.astype(np.int64)
+            selected_local = np.repeat(np.arange(n_m), repeats)
+            if len(selected_local) > 0:
+                domain_selected.append(indices[selected_local])
+
+        if domain_selected:
+            return np.concatenate(domain_selected)
+        else:
+            rng2 = np.random.default_rng(experiment_id + 42)
+            return rng2.choice(np.arange(self._num_docs), 100, replace=False)
+
     def run_experiment(
             self,
             params: ParameterSet,
@@ -1313,45 +1384,62 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         Returns list of selected_indices (one per experiment).
         Pure numpy, no tokenization or GPU involved.
+
+        Optimizations:
+          - Domain-by-domain processing: O(n_m) memory per domain instead of O(N)
+          - ThreadPoolExecutor: numpy releases GIL, true parallel across experiments
         """
-        all_selected: List[np.ndarray] = []
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import threading
+
         t0 = time.time()
         n = len(all_params)
+        num_cpus = mp.cpu_count() or 8
+        n_m_max = max((len(idx) for idx in self._domain_indices.values()), default=self._num_docs)
+        mem_per_thread = 6 * n_m_max * 8
+        try:
+            import psutil
+            available_ram = psutil.virtual_memory().available * 0.8
+        except ImportError:
+            available_ram = 1.5 * 1024**3 * 0.6
+        max_threads_by_mem = max(1, int(available_ram / mem_per_thread))
+        n_workers = min(n, num_cpus, max_threads_by_mem)
 
-        print(f"[PreSample] Pre-sampling {n} experiments (Eq.1-3)...")
+        print(f"[PreSample] Pre-sampling {n} experiments (Eq.1-3) "
+              f"with {n_workers} threads (domain-by-domain, "
+              f"mem/thread={mem_per_thread/1024**2:.0f}MB, "
+              f"available={available_ram/1024**3:.0f}GB)...")
+
+        all_selected: List[Optional[np.ndarray]] = [None] * n
+        completed = [0]
+        lock = threading.Lock()
+
+        def worker(i: int, params: ParameterSet):
+            selected = self._sample_one_experiment(params, i)
+            with lock:
+                all_selected[i] = selected
+                completed[0] += 1
+                c = completed[0]
+            if c % max(1, n // 10) == 0 or c == n:
+                elapsed = time.time() - t0
+                speed = c / elapsed if elapsed > 0 else 0
+                eta = (n - c) / speed if speed > 0 else 0
+                print(f"[PreSample] {c}/{n} done ({elapsed:.1f}s, "
+                      f"{speed:.1f} exp/s, ETA: {eta:.0f}s")
 
         with PerfTimer.section("eq123_sampling", "precompute"):
-            for i, params in enumerate(all_params):
-                quality_ranks = self._compute_ranks_for_params(params, i)
-                sv = compute_sampling_values(
-                    quality_ranks, self._domain_labels, params
-                )
-                train_sv = sv[self._train_idx]
-
-                # Proper fractional sampling (same as _select_documents_vectorized)
-                int_part = np.floor(train_sv).astype(np.int64)
-                frac_part = train_sv - int_part
-                rng = np.random.default_rng(i + 42)
-                random_mask = rng.uniform(size=len(train_sv)) < frac_part
-                repeats = int_part + random_mask.astype(np.int64)
-                selected = self._train_idx[
-                    np.repeat(np.arange(len(self._train_idx)), repeats)
+            with ThreadPoolExecutor(max_workers=n_workers) as executor:
+                futures = [
+                    executor.submit(worker, i, params)
+                    for i, params in enumerate(all_params)
                 ]
-                if len(selected) < 10:
-                    rng2 = np.random.default_rng(i + 42)
-                    selected = rng2.choice(self._train_idx, 100, replace=False)
-
-                all_selected.append(selected)
-
-                # Progress: every 5 experiments or last one
-                if (i + 1) % 5 == 0 or (i + 1) == n:
-                    elapsed = time.time() - t0
-                    eta = elapsed / (i + 1) * (n - i - 1)
-                    print(f"[PreSample] {i + 1}/{n} done ({elapsed:.1f}s, ETA: {eta:.0f}s)")
+                for fut in futures:
+                    fut.result()
 
         elapsed = time.time() - t0
         total_docs = sum(len(s) for s in all_selected)
-        print(f"[PreSample] {n} experiments pre-sampled in {elapsed:.1f}s")
+        print(f"[PreSample] {n} experiments pre-sampled in {elapsed:.1f}s "
+              f"({n / elapsed:.1f} exp/s)")
         print(f"[PreSample] Total selected docs: {total_docs:,} "
               f"(avg {total_docs // max(1, n):,}/exp)")
 
