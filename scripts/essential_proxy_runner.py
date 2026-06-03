@@ -272,7 +272,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         # Each experiment repeats normalize_fn(quality_scores[:, n]) - expensive!
         # Pre-compute once, reuse in all experiments (only weighted sum needed)
         from quadmix.utils.normalization import get_normalizer
-        normalize_fn = get_normalizer("rank")
+        self._normalizer_name = "rank"
+        normalize_fn = get_normalizer(self._normalizer_name)
 
         t1 = time.time()
         num_criteria = self._quality_scores.shape[1]
@@ -892,7 +893,9 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         # ── Pre-compute normalized quality (Eq.1 optimization) ───────────────
         from quadmix.utils.normalization import get_normalizer
-        normalize_fn = get_normalizer("rank")
+        if not hasattr(self, '_normalizer_name'):
+            self._normalizer_name = "rank"
+        normalize_fn = get_normalizer(self._normalizer_name)
 
         t1 = time.time()
         num_criteria = self._quality_scores.shape[1]
@@ -1315,6 +1318,24 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 "global_weights": params.merge_config.global_weights.tolist(),
                 "domain_weights": params.merge_config.domain_weights.tolist(),
                 "checkpoint_steps": dict(self._ckpt_results) if hasattr(self, '_ckpt_results') else {},
+                "training_config": {
+                    "global_batch_size": self.global_batch_size,
+                    "micro_batch_size": self.micro_batch_size,
+                    "gradient_accumulation_steps": self.gradient_accumulation_steps,
+                    "learning_rate": self.learning_rate,
+                    "weight_decay": self.weight_decay,
+                    "warmup_fraction": self.warmup_fraction,
+                    "grad_clip": self.grad_clip,
+                    "block_size": self.block_size,
+                    "device_type": self.device_type,
+                    "precision": "bf16" if self.device_type == "npu" else "fp32",
+                    "attention_type": "flash" if hasattr(torch.nn.functional, "scaled_dot_product_attention") else "explicit",
+                    "normalizer": getattr(self, "_normalizer_name", "unknown"),
+                },
+                "timing": {
+                    "training_elapsed_s": _train_elapsed,
+                    "total_elapsed_s": time.perf_counter() - _train_t0,
+                },
             }
             np.save(os.path.join(exp_dir, "selected_indices.npy"), selected_idx)
             with open(os.path.join(exp_dir, "meta.json"), "w") as f:

@@ -600,6 +600,20 @@ class QuaDMixPipeline:
                 "best_predicted_loss": float(predicted_losses.min()),
                 "top_k_avg_loss": top_k_avg_loss,
             },
+            "reliability": {
+                "val_r2_ci_lower": self._optimizer.val_r2_ci_lower,
+                "val_r2_ci_upper": self._optimizer.val_r2_ci_upper,
+                "val_r2_ci_width": (
+                    self._optimizer.val_r2_ci_upper - self._optimizer.val_r2_ci_lower
+                    if self._optimizer.val_r2_ci_lower is not None and self._optimizer.val_r2_ci_upper is not None
+                    else None
+                ),
+                "sample_sufficient": self._optimizer.sample_sufficient,
+                "overfit_gap": self._optimizer.overfit_gap,
+                "n_features": self._optimizer.n_features,
+                "n_train_samples": getattr(self._optimizer, "_n_train", None),
+                "n_val_samples": getattr(self._optimizer, "_n_val", None),
+            },
             "sampling": {
                 "num_original_docs": n_docs_save,
                 "num_selected_docs": len(selected_indices),
@@ -667,6 +681,7 @@ class QuaDMixPipeline:
             metrics=summary["metrics"],
             elapsed=elapsed,
             use_sharded=(text_source == "sharded"),
+            reliability=summary.get("reliability"),
         )
         save_report(report, output_dir)
         stage_times["stage9_report"] = time.time() - _t

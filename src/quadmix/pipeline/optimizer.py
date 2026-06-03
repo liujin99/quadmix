@@ -317,7 +317,69 @@ class QuaDMixOptimizer:
             print(f"[QuaDMixOptimizer] Val   R² = {val_r2:.4f}, MAE = {val_mae:.4f}")
         print(f"[QuaDMixOptimizer] Val   samples = {n_val}")
 
+        self._compute_reliability(train_params, train_losses, val_params, val_losses, n_val)
+
         return self._regressor
+
+    def _compute_reliability(
+        self,
+        train_params: List[ParameterSet],
+        train_losses: npt.NDArray[np.float64],
+        val_params: List[ParameterSet],
+        val_losses: npt.NDArray[np.float64],
+        n_val: int,
+    ):
+        n_train = len(train_params)
+        n_features = len(train_params[0].flatten()) if n_train > 0 else 0
+
+        self._n_features = n_features
+        self._n_train = n_train
+        self._n_val = n_val
+        self._sample_sufficient = n_train >= n_features
+        self._overfit_gap = self._train_r2 - self._val_r2 if self._val_r2 else None
+
+        self._val_r2_ci_lower = None
+        self._val_r2_ci_upper = None
+        self._val_r2_ci_std = None
+
+        if n_val < 10:
+            print(f"[QuaDMixOptimizer] ⚠️  Val samples too few ({n_val} < 10), skip bootstrap CI")
+            return
+
+        n_bootstrap = 500
+        rng = np.random.default_rng(42)
+        bootstrap_r2s = []
+
+        for _ in range(n_bootstrap):
+            idx = rng.choice(n_val, size=n_val, replace=True)
+            if len(np.unique(idx)) < 5:
+                continue
+            boot_params = [val_params[i] for i in idx]
+            boot_losses = val_losses[idx]
+            try:
+                r2 = float(self._regressor.score(boot_params, boot_losses))
+                bootstrap_r2s.append(r2)
+            except Exception:
+                continue
+
+        if len(bootstrap_r2s) < 50:
+            print(f"[QuaDMixOptimizer] ⚠️  Bootstrap failed ({len(bootstrap_r2s)} valid), skip CI")
+            return
+
+        bootstrap_r2s = np.array(bootstrap_r2s)
+        self._val_r2_ci_lower = float(np.percentile(bootstrap_r2s, 2.5))
+        self._val_r2_ci_upper = float(np.percentile(bootstrap_r2s, 97.5))
+        self._val_r2_ci_std = float(np.std(bootstrap_r2s))
+
+        ci_width = self._val_r2_ci_upper - self._val_r2_ci_lower
+        status = "✓ Stable" if ci_width < 0.3 else "⚠️ Wide CI"
+
+        print(f"[QuaDMixOptimizer] Val   R² 95% CI = [{self._val_r2_ci_lower:.3f}, {self._val_r2_ci_upper:.3f}] (width={ci_width:.3f}) {status}")
+
+        if not self._sample_sufficient:
+            print(f"[QuaDMixOptimizer] ⚠️  Samples ({n_train}) < Features ({n_features}): underdetermined, increase experiments to {n_features * 3}+")
+        elif self._overfit_gap and self._overfit_gap > 0.3:
+            print(f"[QuaDMixOptimizer] ⚠️  Train-Val gap = {self._overfit_gap:.3f}: possible overfitting")
 
     def search_optimal(
         self,
@@ -377,3 +439,23 @@ class QuaDMixOptimizer:
     @property
     def val_mae(self) -> Optional[float]:
         return getattr(self, "_val_mae", None)
+
+    @property
+    def val_r2_ci_lower(self) -> Optional[float]:
+        return getattr(self, "_val_r2_ci_lower", None)
+
+    @property
+    def val_r2_ci_upper(self) -> Optional[float]:
+        return getattr(self, "_val_r2_ci_upper", None)
+
+    @property
+    def sample_sufficient(self) -> Optional[bool]:
+        return getattr(self, "_sample_sufficient", None)
+
+    @property
+    def overfit_gap(self) -> Optional[float]:
+        return getattr(self, "_overfit_gap", None)
+
+    @property
+    def n_features(self) -> Optional[int]:
+        return getattr(self, "_n_features", None)

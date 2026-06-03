@@ -196,7 +196,7 @@ def generate_report(
     output_dir, data_path, optimal_params, optimal_selected_indices,
     domain_labels, token_counts, num_domains=10, num_criteria=5,
     config=None, metrics=None, elapsed=None,
-    use_sharded=False,
+    use_sharded=False, reliability=None,
 ):
     """Generate MD report with separate PNG figures."""
     # Compute distributions
@@ -228,6 +228,55 @@ def generate_report(
         if elapsed is not None:
             parts.append(f"| Duration | {elapsed:.1f}s |")
         parts.append("")
+
+    if reliability:
+        parts.append("## Model Reliability\n")
+        ci_lower = reliability.get("val_r2_ci_lower")
+        ci_upper = reliability.get("val_r2_ci_upper")
+        ci_width = reliability.get("val_r2_ci_width")
+        sample_sufficient = reliability.get("sample_sufficient")
+        overfit_gap = reliability.get("overfit_gap")
+        n_features = reliability.get("n_features")
+        n_train = reliability.get("n_train_samples")
+        n_val = reliability.get("n_val_samples")
+
+        parts.append("| Metric | Value | Status |")
+        parts.append("|:-------|:------|:-------|")
+
+        val_r2 = metrics.get("val_r2") if metrics else None
+        if val_r2 is not None:
+            ci_status = "✓ Stable" if ci_width is not None and ci_width < 0.3 else "⚠️ Wide CI"
+            parts.append(f"| Val R² | {val_r2:.4f} | {ci_status} |")
+
+        if ci_lower is not None and ci_upper is not None:
+            parts.append(f"| 95% CI | [{ci_lower:.3f}, {ci_upper:.3f}] | width={ci_width:.3f} |")
+
+        if overfit_gap is not None:
+            gap_status = "✓ OK" if overfit_gap < 0.3 else "⚠️ Overfitting"
+            parts.append(f"| Train-Val Gap | {overfit_gap:.3f} | {gap_status} |")
+
+        if n_train is not None and n_features is not None:
+            ratio = n_train / n_features if n_features > 0 else 0
+            suff_status = "✓ OK" if sample_sufficient else "⚠️ Underdetermined"
+            parts.append(f"| Samples/Features | {n_train}/{n_features} ({ratio:.1f}x) | {suff_status} |")
+
+        if n_val is not None:
+            parts.append(f"| Val Samples | {n_val} | — |")
+
+        parts.append("")
+
+        warnings = []
+        if not sample_sufficient:
+            warnings.append(f"- ⚠️ **Samples ({n_train}) < Features ({n_features})**: model is underdetermined, increase experiments to {n_features * 3 if n_features else 200}+")
+        if overfit_gap is not None and overfit_gap > 0.3:
+            warnings.append(f"- ⚠️ **Train-Val gap = {overfit_gap:.3f}**: possible overfitting, consider more experiments")
+        if ci_width is not None and ci_width > 0.3:
+            warnings.append(f"- ⚠️ **CI width = {ci_width:.3f}**: Val R² is unstable, results may not be reproducible")
+
+        if warnings:
+            parts.append("**Recommendations:**\n")
+            parts.extend(warnings)
+            parts.append("")
 
     parts += [
         "## 采样概览\n",
