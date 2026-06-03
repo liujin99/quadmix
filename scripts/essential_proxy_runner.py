@@ -1780,8 +1780,10 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             pos = 0
             batch_count = 0
             while pos < n_exp:
-                # Tokenize a batch of experiments using UNION optimization
-                end_pos = min(pos + tokenize_lookahead, n_exp)
+                # First batch: only num_workers to start NPU ASAP
+                # Subsequent batches: tokenize_lookahead for buffer
+                batch_size = num_workers if batch_count == 0 else tokenize_lookahead
+                end_pos = min(pos + batch_size, n_exp)
                 batch_ids = list(range(pos, end_pos))
                 batch_selected = [all_selected[i] for i in batch_ids]
 
@@ -1823,7 +1825,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         tokenize_thread.start()
 
         # ── Wait for first batch to be tokenized ────────────────
-        first_batch_end = min(tokenize_lookahead, n_exp)
+        first_batch_end = min(num_workers, n_exp)
         print(f"[DynamicParallel] Waiting for first batch (exp 0-{first_batch_end - 1}) to be tokenized...")
         wait_start = time.time()
         last_progress_time = 0
