@@ -546,11 +546,9 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         # ── Step 1: Collect all shard rows needed by this batch ───────────
         # shard_to_exp_rows[sid] = {exp_id: [row_in_shard, ...]}
         shard_to_exp_rows: Dict[int, Dict[int, List[int]]] = {}
-        exp_to_shard_groups: Dict[int, Dict] = {}  # Cache for Step 4
 
         for exp_id, selected_idx in zip(batch_exp_ids, batch_selected):
             shard_groups = mgr.global_to_shard_rows(selected_idx)
-            exp_to_shard_groups[exp_id] = shard_groups  # Cache for reuse
             for sid, (shard_path, local_rows) in shard_groups.items():
                 if sid not in shard_to_exp_rows:
                     shard_to_exp_rows[sid] = {}
@@ -641,29 +639,37 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             read_time = time.time() - read_t0
             print(f"[BatchTokenize] Parquet read + tokenize (parallel): {read_time:.1f}s")
 
-        # ── Step 4: Pack each exp's tokens from memory_cache ───────────────
+        # ── Step 4: Build global index (one-time) + Pack each exp ───────────
         exp_token_paths: Dict[int, str] = {}
         pack_t0 = time.time()
         n_batch = len(batch_exp_ids)
 
+        # Build global index: flat tokens array + sorted global_ids
+        # This avoids per-shard queries for each exp
+        shard_starts = mgr._shard_starts
+        global_ids_list = []
+        tokens_list = []
+        for sid, cache_data in self._memory_cache.items():
+            rows = cache_data["rows"]
+            tokens = cache_data["tokens"]
+            global_ids = shard_starts[sid] + rows
+            global_ids_list.append(global_ids)
+            tokens_list.append(tokens)
+
+        all_global_ids = np.concatenate(global_ids_list).astype(np.int64)
+        all_tokens_flat = np.concatenate(tokens_list, axis=0)
+
+        # Sort by global_id for searchsorted
+        sort_idx = np.argsort(all_global_ids)
+        all_global_ids = all_global_ids[sort_idx]
+        all_tokens_flat = all_tokens_flat[sort_idx]
+
+        print(f"  [GlobalIndex] {len(all_global_ids):,} docs indexed")
+
+        # Pack each exp: single searchsorted + fancy index
         for i, (exp_id, selected_idx) in enumerate(zip(batch_exp_ids, batch_selected)):
-            shard_groups = exp_to_shard_groups[exp_id]
-            all_tokens = []
-
-            for sid, (shard_path, local_rows) in shard_groups.items():
-                requested_rows = local_rows.tolist()
-                tokens, sorted_hit_rows, miss_rows = self._memory_cache_query(sid, requested_rows)
-
-                if miss_rows:
-                    print(f"  WARNING: exp {exp_id} shard {sid} has {len(miss_rows)} miss rows after batch tokenize!")
-
-                sorted_hit_arr = np.asarray(sorted_hit_rows, dtype=np.int64)
-                requested_arr = np.asarray(requested_rows, dtype=np.int64)
-                positions = np.searchsorted(sorted_hit_arr, requested_arr)
-                shard_tokens = tokens[positions]
-                all_tokens.append(shard_tokens)
-
-            result = np.concatenate(all_tokens, axis=0)
+            positions = np.searchsorted(all_global_ids, selected_idx)
+            result = all_tokens_flat[positions]
 
             if shm_store is not None:
                 from multiprocessing.shared_memory import SharedMemory
