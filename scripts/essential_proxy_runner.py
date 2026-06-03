@@ -272,7 +272,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         # Each experiment repeats normalize_fn(quality_scores[:, n]) - expensive!
         # Pre-compute once, reuse in all experiments (only weighted sum needed)
         from quadmix.utils.normalization import get_normalizer
-        normalize_fn = get_normalizer("rank")
+        normalize_fn = get_normalizer("zscore")
 
         t1 = time.time()
         num_criteria = self._quality_scores.shape[1]
@@ -861,7 +861,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         # ── Pre-compute normalized quality (Eq.1 optimization) ───────────────
         from quadmix.utils.normalization import get_normalizer
-        normalize_fn = get_normalizer("rank")
+        normalize_fn = get_normalizer("zscore")
 
         t1 = time.time()
         num_criteria = self._quality_scores.shape[1]
@@ -1322,7 +1322,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         val_tokens = self._val_token_ids[:val_n, :bs].to(device)
         val_mask = self._val_loss_mask[:val_n, :bs].to(device)
         with torch.no_grad():
-            val_bs = min(256, val_n)
+            val_bs = min(96, val_n)
             per_doc_losses = []
             for start in range(0, len(val_tokens), val_bs):
                 end = min(start + val_bs, len(val_tokens))

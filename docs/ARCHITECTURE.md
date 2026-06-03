@@ -113,10 +113,10 @@ Pure numpy, CPU only. For each experiment's parameters:
 
 ```python
 # In _load_metadata_only() — one-time cost
-normalize_fn = get_normalizer("rank")  # rank-based normalization
+normalize_fn = get_normalizer("zscore")  # z-score: preserves numerical relationships for α weighting
 for n in range(num_criteria):
     _normalized_quality[:, n] = normalize_fn(quality_scores[:, n])
-# ~10s for 5 criteria × 8.4M docs
+# ~3s for 5 criteria × 8.4M docs (O(N) single pass vs rank's O(N log N))
 
 # In _compute_ranks_for_params() — per-experiment, now only weighted sum
 merged_scores[mask] = _normalized_quality[mask] @ alpha_m  # ~4s vs ~20s
@@ -552,8 +552,8 @@ All demos use full validation set (10k docs), warmup_fraction=4%, checkpoint_int
 ```
 Eq.1 per experiment:
   for n in range(5 criteria):
-      normalized[:, n] = rank_normalize(quality[:, n])  # ~20s total
-  merged = weighted_sum(normalized, alpha_m)             # ~4s
+      normalized[:, n] = zscore_normalize(quality[:, n])  # ~20s total
+  merged = weighted_sum(normalized, alpha_m)               # ~4s
 ```
 
 **Solution**: Pre-compute once.
@@ -561,7 +561,7 @@ Eq.1 per experiment:
 ```python
 # At initialization (one-time):
 for n in range(5 criteria):
-    _normalized_quality[:, n] = rank_normalize(quality[:, n])  # ~10s one-time
+    _normalized_quality[:, n] = zscore_normalize(quality[:, n])  # ~3s one-time
 # Pre-compute domain indices (avoid 275M-element bool mask per experiment)
 _domain_indices = {m: np.where(domain_labels == m)[0] for m in range(M)}  # ~3s
 

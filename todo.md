@@ -499,15 +499,14 @@ micro_batch=32, block_size=2048, vocab=50432 时的显存分布（bf16 后）：
 - **影响**: 每批实验额外 1-2 秒（275M docs 的 searchsorted 开销）
 - **方案**: 缓存 Step 1 的 `shard_to_exp_rows` 结果，Step 4 直接复用
 
-#### E3. `rank_normalize` 双重 argsort
-- **文件**: `src/quadmix/utils/normalization.py:rank_normalize()` (L48)
-- **问题**: 
-  ```python
-  ranks = np.argsort(np.argsort(scores))  # O(N log N) × 2
-  ```
-  275M docs × 5 criteria = 5 次双重 argsort
-- **影响**: 初始化时可能耗时数分钟
-- **方案**: `scipy.stats.rankdata` 是单次 O(N log N)，快 ~2x
+#### ~~E3. `rank_normalize` 双重 argsort~~ ✅ 已修复（改用 zscore）
+- **文件**: `src/quadmix/utils/normalization.py`, `scripts/essential_proxy_runner.py`, `src/quadmix/core/quality_merger.py`
+- **完成**: 2026-06-03
+- **原问题**: rank_normalize 用双重 argsort (O(N log N) × 2)，且丢失数值关系导致 α 权重失效
+- **修复**: 默认 normalizer 从 `rank` 改为 `zscore`
+  - 性能: O(N) 单次扫描 (mean+std)，275M×5 从数分钟降到 ~3s
+  - 算法: 保留数值关系，α 能真正调节评分器权重幅度差异
+  - 鲁棒: 对 outlier 不敏感（vs minmax 会被极端值压缩）
 
 #### E4. Validation `val_bs` 可以更激进（部分完成）
 - **文件**: `scripts/essential_proxy_runner.py:_run_validation()` (L1325)
@@ -587,7 +586,7 @@ micro_batch=32, block_size=2048, vocab=50432 时的显存分布（bf16 后）：
 |---|------|------|------|
 | E1 | shared_to_ndarray 11GB 拷贝 | Worker 启动 10-30s | 待实施 |
 | E2 | global_to_shard_rows 重复调用 | 每批 1-2s | 待实施 |
-| E3 | rank_normalize 双重 argsort | 初始化数分钟 | 待实施 |
+| ~~E3~~ | ~~rank_normalize 双重 argsort~~ | ~~初始化数分钟~~ | ✅ 已修复 (zscore) |
 | E4 | val_bs 可提到 256 | 每次 val 节省 3x | 部分完成 (16→64) |
 | E5 | ProcessPoolExecutor 重建 | 每批 2-5s | 待实施 |
 | E6 | _memory_cache_query 双重遍历 | 每 shard 几十 ms | 待实施 |

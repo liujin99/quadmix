@@ -3,6 +3,13 @@ Normalization function σ for quality scores.
 
 The paper uses σ to align the scales of different quality criteria
 before merging (Equation 1). Smaller values indicate better quality.
+
+σ must preserve numerical relationships so that α weights in Eq.1
+can meaningfully control the relative importance of each criterion.
+Z-score is chosen over rank/minmax because:
+- Preserves relative distances (α can weight amplitude differences)
+- Robust to outliers (unlike minmax which compresses to near-zero)
+- O(N) single pass (vs rank's O(N log N) double argsort)
 """
 
 import numpy as np
@@ -55,7 +62,7 @@ NORMALIZATION_REGISTRY: dict[str, Callable[[npt.NDArray[np.float64]], npt.NDArra
 }
 
 
-def get_normalizer(name: str = "rank") -> Callable[[npt.NDArray[np.float64]], npt.NDArray[np.float64]]:
+def get_normalizer(name: str = "zscore") -> Callable[[npt.NDArray[np.float64]], npt.NDArray[np.float64]]:
     """Get a normalization function by name."""
     if name not in NORMALIZATION_REGISTRY:
         raise ValueError(
