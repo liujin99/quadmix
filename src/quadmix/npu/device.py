@@ -94,6 +94,7 @@ class DeviceManager:
                     if dev_id != self.npu_device_id and dev_id > 0:
                         print(f"[DeviceManager] npu_device_id={self.npu_device_id} "
                               f"adjusted to {dev_id} (only {npu_count} devices)")
+                    torch.npu.set_device(dev_id)
                     return torch.device(f"npu:{dev_id}")
                 else:
                     print("[WARN] NPU requested but no devices found. Falling back to CPU.")
