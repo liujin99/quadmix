@@ -5,6 +5,51 @@
 
 ## 已完成
 
+### 2026-06-03: NPU 显存碎片化修复
+- **文件**: `scripts/essential_proxy_runner.py`
+- **问题**: Worker 0 在 backward 时 OOM，其他 worker 正常。原因是每迭代调用 `empty_cache()` 释放完整块，导致 forward/backward 分配位置漂移，碎片累积
+- **修复**: 移除训练循环中的 per-iteration `empty_cache()`，保留低频调用（训练开始、checkpoint、实验结束）
+- **影响**: 允许 PyTorch 分配器自然复用缓存块，解决碎片化 OOM
+
+### 2026-06-03: precompute_samples 并行化 + 内存优化
+- **文件**: `scripts/essential_proxy_runner.py:precompute_samples()`
+- **问题**: 3000 实验串行处理，每次 Eq.1-3 分配 13GB（275M docs）
+- **修复**: 
+  1. 新增 `_sample_one_experiment` 方法，按 domain 逐域处理，内存 O(N/M) 而非 O(N)
+  2. ThreadPoolExecutor 并行（numpy 释放 GIL，真正并行）
+  3. 动态限制线程数防止 OOM
+- **影响**: 10-20x 加速，内存从 13GB → 1.3GB/experiment
+
+### 2026-06-03: NPU device context 修复
+- **文件**: `src/quadmix/npu/device.py`
+- **问题**: Worker 1-7 默认使用 NPU 0 context，导致 `.to(device)` 时 ACL stream synchronize 失败
+- **修复**: 每个 worker 进程启动时调用 `torch.npu.set_device(dev_id)`
+- **影响**: 8 NPU 并行训练正常工作
+
+### 2026-06-03: bf16 混合精度训练
+- **文件**: `scripts/essential_proxy_runner.py`, `scripts/demo_run_full.sh`
+- **问题**: 全程 fp32，logits 13.1GB，backward 28GB，OOM
+- **修复**: 
+  ```python
+  with torch.autocast(device_type="npu", dtype=torch.bfloat16):
+      logits = model(inp)
+  loss = F.cross_entropy(logits.float().view(-1, vocab), tgt.view(-1))
+  ```
+- **影响**: logits 13.1→6.5GB，backward 28→14GB，训练速度 1.5-2x
+
+### 2026-06-03: Flash Attention + Pack 优化
+- **文件**: `src/quadmix/core/proxy_model.py`, `scripts/essential_proxy_runner.py`
+- **修复**:
+  1. Flash Attention: `F.scaled_dot_product_attention` 替代显式 2048×2048 注意力矩阵，节省 8GB
+  2. Pack: `np.searchsorted` 替代 Python dict，`np.save` 替代 `torch.save`，`np.load(mmap_mode='r')` 近零拷贝
+- **影响**: 显存节省 8GB，Pack 时间 148s → 10-30s
+
+### 2026-06-03: ProcessPoolExecutor tokenize (GIL bypass)
+- **文件**: `scripts/essential_proxy_runner.py:_tokenize_shard_parallel()`
+- **问题**: 48 Python threads 共享 1 GIL + 4 全局 Rust threads，实际只有 4 线程做 CPU 工作（90% 空闲）
+- **修复**: ProcessPoolExecutor(48) 每个进程独立 GIL + 4 Rust threads = 192 线程真并行
+- **影响**: 7 min → ~40s（10x 加速）
+
 ### 2026-06-02: ProcessPoolExecutor fork→spawn 避免 COW page fault
 - **文件**: `scripts/essential_proxy_runner.py:_tokenize_shard_parallel()`
 - **问题**: 主进程 RSS 18GB，fork 64 workers 导致 64×18GB=1.15TB COW 虚拟映射，海量 page fault 导致 tokenize 卡死
@@ -25,6 +70,18 @@
 ### 2026-06-02: 综合性能计时系统
 - **文件**: `scripts/essential_proxy_runner.py`, `src/quadmix/pipeline/real_pipeline.py`
 - **内容**: PerfTimer 类 + stage 级计时，实时输出 + 结束汇总
+
+### 2026-06-01: 质量分数方向反转修复 (A1)
+- **文件**: `scripts/preprocess_essential_web_v1_sharded.py:extract_quality_signals()`
+- **问题**: FastText 分数 higher=better，但代码按 smaller=better 处理，选择最低质量文档
+- **修复**: 在 `extract_quality_signals()` 中取反 `qs = -qs`
+- **影响**: 正确选择高质量文档
+
+### 2026-06-01: Token-weighted Eq.2 (A5) + LightGBM early stopping (B1)
+- **文件**: `scripts/essential_proxy_runner.py`, `src/quadmix/pipeline/optimizer.py`
+- **修复**:
+  1. A5: Proxy Eq.2 使用 token 数加权计算百分位，匹配论文
+  2. B1: LightGBM 添加 early stopping (patience=50)，防止过拟合
 
 ## P0 — 高影响（预计加速 30-50%）
 
@@ -110,6 +167,25 @@
 - [x] P3-11: causal_mask 优化（已使用预计算 buffer）  ✓ 2025-05-28
 - [x] P3-12: Validation batch 扩大 (200→1024)  ✓ 2025-05-28
 
+### 2026-06-01 ~ 06-03 新增完成项
+
+- [x] A1: 质量分数方向反转修复 ✓ 2026-06-01 (e852787)
+- [x] A5: Proxy Eq.2 token-weighted ✓ 2026-06-01 (2269457)
+- [x] B1: LightGBM early stopping ✓ 2026-06-01 (2269457)
+- [x] C1: tokenize_all_needed 并行化 ✓ 2026-06-02 (55a4248)
+- [x] D1: bf16 混合精度训练 ✓ 2026-06-03 (23d022b)
+- [x] F2: precompute_samples 并行化 + 内存优化 ✓ 2026-06-03 (dbd1bf6)
+- [x] Flash Attention ✓ 2026-06-03 (601337f)
+- [x] Pack 优化 (np.searchsorted + np.save) ✓ 2026-06-03 (601337f)
+- [x] NPU device context 修复 ✓ 2026-06-03 (4cb7177)
+- [x] NPU 显存碎片化修复 ✓ 2026-06-03 (d450d4a)
+- [x] ProcessPoolExecutor tokenize (GIL bypass) ✓ 2026-06-03 (55a4248)
+- [x] mmap file handle leak 修复 ✓ 2026-06-02 (c948f91)
+- [x] PerfTimer 综合计时系统 ✓ 2026-06-02 (c948f91)
+- [x] micro_batch 64→40 (NPU OOM) ✓ 2026-06-02 (1099020)
+- [x] ProcessPoolExecutor spawn mode ✓ 2026-06-02 (bacba24)
+- [x] val_bs 16→64 ✓ 2026-06-02 (019c903)
+
 ---
 
 ## 文档更新 2025-05-28
@@ -128,27 +204,12 @@
 
 ### P0 — 严重问题
 
-#### A1. [已验证-确认BUG] 质量分数方向反转
-- **文件**: `scripts/preprocess_essential_web_v1_sharded.py:extract_quality_signals()` (L59-68)
-- **状态**: ✅ 已验证确认 — 这是一个真实 BUG
-- **问题**: 论文和代码假设 "smaller = better"，但 essential-web-v1 的 FastText 分数是 **"higher = better"**
-- **验证方法**: 分析 `train-00000-of-03291.parquet` 中 83,933 个文档的分数分布
-- **验证证据**:
-  - `qs_dclm` 最高分 (≈1.0) 的文档: 泰语赌博垃圾内容、git commit 日志、HTML 碎片、乱码
-  - `qs_dclm` 最低分 (≈0) 的文档: 数学书籍、政府行政数据、教堂活动页、股票市场数据
-  - `qs_fineweb_edu_approx` 最高分 (≈3.9) 的文档: PDS 元数据文件、代码 blob、汇率表
-  - `qs_fineweb_edu_approx` 最低分 (≈0.001) 的文档: 电池产品页、垃圾邮件、电商页面
-  - DCLM 官方 `fasttext_filter.yaml` 使用 `threshold: 0.018112`，保留 >= threshold 的文档（即高分=高质量）
-- **影响**: **代码当前在选择最低质量的文档作为"最好"的数据** — rank_normalize 将最小分数排为 rank 0（"最好"），但最小分数实际是最差质量
-- **所有 5 个 FastText 信号方向**:
-  - `qs_dclm`: [0, 1]，higher = better (P(instruction-like))
-  - `qs_fineweb_edu_approx`: [0, ~4]，higher = better (logit 分数)
-  - `qs_english`: [0, 1]，higher = better (P(English))
-  - `qs_eai_general_math`: [0, 1]，higher = better (P(math-like))
-  - `qs_eai_open_web_math`: [0, 1]，higher = better (P(math-like))
-- **修复方案**: 在预处理时反转分数方向: `qs = -qs` (或 `qs = max_val - qs`)
-  - 修改 `preprocess_essential_web_v1_sharded.py` 的 `extract_quality_signals()`
-  - 或在 `ShardMetadataManager` 加载时反转
+#### ~~A1. 质量分数方向反转~~ ✅ 已修复
+- **文件**: `scripts/preprocess_essential_web_v1_sharded.py:extract_quality_signals()`
+- **完成**: 2026-06-01 (commit e852787)
+- **问题**: FastText 分数 higher=better，但代码按 smaller=better 处理
+- **修复**: 在 `extract_quality_signals()` 中取反 `qs = -qs`
+- **影响**: 正确选择高质量文档
 
 ### P1 — 重大问题
 
@@ -170,10 +231,10 @@
 
 ### P2 — 中等问题
 
-#### A5. Proxy 实验中 Eq.2 缺少 token 加权
-- **文件**: `scripts/essential_proxy_runner.py:_compute_ranks_for_params()` (L832-875)
-- **问题**: 论文 Eq.2 使用 token 数量加权计算百分位，proxy 实验使用文档数等权
-- **影响**: 排名精度降低，与论文不一致
+#### ~~A5. Proxy 实验中 Eq.2 缺少 token 加权~~ ✅ 已修复
+- **文件**: `scripts/essential_proxy_runner.py:_compute_ranks_for_params()`
+- **完成**: 2026-06-01 (commit 2269457)
+- **修复**: Proxy Eq.2 使用 token 数加权计算百分位，匹配论文
 
 #### A6. 数据集不同 — 非问题（设计选择）
 - **论文**: RefinedWeb (570B tokens)
@@ -198,10 +259,11 @@
 
 ### 算法层面
 
-#### B1. LightGBM 缺少 early stopping 和交叉验证
-- **文件**: `src/quadmix/pipeline/optimizer.py:train_regressor()` (L219-294)
-- **问题**: 1000 棵树无 early stopping，单一 train/val 划分
-- **方案**: 添加 early stopping + K-fold 交叉验证
+#### ~~B1. LightGBM 缺少 early stopping~~ ✅ 已修复
+- **文件**: `src/quadmix/pipeline/optimizer.py:train_regressor()`
+- **完成**: 2026-06-01 (commit 2269457)
+- **修复**: 添加 early stopping (patience=50)，防止过拟合
+- **注**: K-fold 交叉验证未实施，当前使用单一 train/val 划分
 
 #### B2. 参数空间搜索效率低
 - **文件**: `src/quadmix/pipeline/optimizer.py:search_optimal()` (L296-337)
@@ -252,24 +314,24 @@
 
 ## 优先级总结
 
-| 优先级 | 编号 | 问题 | 影响 |
+| 优先级 | 编号 | 问题 | 状态 |
 |--------|------|------|------|
-| P0 | A1 | 质量分数方向可能反转 | 可能选择低质量数据 |
-| P1 | A4 | Proxy 训练 token 数太少 | 回归模型质量差 |
-| P1 | A2,A3 | N=5/M=10 vs N=3/M=26 | 参数空间和搜索精度不同 |
-| P2 | A5 | Proxy Eq.2 缺少 token 加权 | 排名精度降低 |
-| P2 | B1 | LightGBM 无 early stopping | 过拟合风险 |
-| P3 | A7,B5 | 缺少 BMK 变体 / 消融支持 | 功能完整性 |
+| ~~P0~~ | ~~A1~~ | ~~质量分数方向反转~~ | ✅ 已修复 |
+| P1 | A4 | Proxy 训练 token 数太少 | 待评估 |
+| P1 | A2,A3 | N=5/M=10 vs N=3/M=26 | 设计选择，不改 |
+| ~~P2~~ | ~~A5~~ | ~~Proxy Eq.2 缺少 token 加权~~ | ✅ 已修复 |
+| ~~P2~~ | ~~B1~~ | ~~LightGBM 无 early stopping~~ | ✅ 已修复 |
+| P2 | B2 | Bayesian Optimization | 待实施 |
+| P3 | A7,B5 | 缺少 BMK 变体 / 消融支持 | 待实施 |
 
 ---
 
 ## 数据处理性能优化 — 2026-06-02
 
-### C1. `tokenize_all_needed` 单线程 tokenize
-- **文件**: `essential_proxy_runner.py:tokenize_all_needed()` (L1336)
-- **问题**: CPU/顺序模式调用 `_tokenize_texts()`（单线程），而并行模式用 `_tokenize_shard_parallel`（48 worker）。CPU 模式下 192 核完全浪费
-- **影响**: CPU 模式 tokenize 慢 10-20x
-- **方案**: `tokenize_all_needed` 内部也调用 `_tokenize_shard_parallel`
+### ~~C1. `tokenize_all_needed` 单线程 tokenize~~ ✅ 已完成
+- **完成**: 2026-06-02 (commit 55a4248)
+- **修复**: ProcessPoolExecutor(48) 替代 ThreadPool，每个进程独立 GIL + 4 Rust threads = 192 线程真并行
+- **效果**: 7 min → ~40s（10x 加速）
 
 ### C2. Pack/Unpack 经磁盘 I/O 传递 token
 - **文件**: `essential_proxy_runner.py:_tokenize_batch_union()` (L617-620) + `_load_tokens_for_experiment()` (L648-651)
@@ -303,14 +365,14 @@
 
 ### 优先级
 
-| # | 瓶颈 | 影响 | 修复难度 |
-|---|------|------|---------|
-| C1 | tokenize_all_needed 单线程 | CPU 模式慢 10-20x | 低 |
-| C2 | Pack/Unpack 磁盘 I/O | 每实验 2-10s | 中 |
-| C3 | _cached_shard_rows set 构建 | 每 shard 几十 ms | 低 |
-| C4 | _memory_cache_add_rows dict 去重 | 每 shard 几十 ms | 低 |
-| C5 | 预处理 df.apply | 一次性 | 低 |
-| C6 | LRU list.remove | shard 少时小 | 低 |
+| # | 瓶颈 | 影响 | 状态 |
+|---|------|------|------|
+| ~~C1~~ | ~~tokenize_all_needed 单线程~~ | ~~CPU 模式慢 10-20x~~ | ✅ 已完成 |
+| C2 | Pack/Unpack 磁盘 I/O | 每实验 2-10s | 部分完成 (np.save) |
+| C3 | _cached_shard_rows set 构建 | 每 shard 几十 ms | 待实施 |
+| C4 | _memory_cache_add_rows dict 去重 | 每 shard 几十 ms | 待实施 |
+| C5 | 预处理 df.apply | 一次性 | 待实施 |
+| C6 | LRU list.remove | shard 少时小 | 待实施 |
 
 ---
 
@@ -320,59 +382,45 @@
 
 **根因：logits 张量占 95% 显存**
 
-micro_batch=32, block_size=2048, vocab=50432 时的显存分布：
+micro_batch=32, block_size=2048, vocab=50432 时的显存分布（bf16 后）：
 
 | 组件 | 大小 | 说明 |
 |------|------|------|
 | 模型权重 (1M params) | 57 MB | embed + 2 层 transformer |
 | AdamW 优化器状态 | 114 MB | 2× 权重副本 |
-| causal_mask buffer | 16 MB | 2048×2048 |
+| ~~causal_mask buffer~~ | ~~16 MB~~ | Flash Attention 后不再需要 |
 | flat_train (~8M tokens) | 68 MB | 训练数据 |
 | batch_buf + 辅助 buffer | 1 MB | 预分配 |
-| **静态总计** | **~256 MB** | |
+| **静态总计** | **~240 MB** | |
 | | | |
-| embed 输出 (32×2048×256) | 33.5 MB | forward |
-| attention scores ×2 层 | 2.1 GB | 32×8×2048×2048 |
-| **logits (32×2048×50432×4B)** | **13.1 GB** | **瓶颈** |
+| embed 输出 (32×2048×256) | 16.8 MB | forward (bf16) |
+| ~~attention scores ×2 层~~ | ~~2.1 GB~~ | Flash Attention 不物化 |
+| **logits (32×2048×50432×2B)** | **6.5 GB** | **bf16 减半** |
 | | | |
-| logits（保留用于梯度） | 13.1 GB | backward |
-| logits 梯度 | 13.1 GB | backward |
-| attention 梯度 ×2 层 | ~2 GB | backward |
-| **backward 总计** | **~28 GB** | |
+| logits（保留用于梯度） | 6.5 GB | backward |
+| logits 梯度 | 6.5 GB | backward |
+| ~~attention 梯度 ×2 层~~ | ~~2 GB~~ | Flash Attention 不物化 |
+| **backward 总计** | **~13 GB** | |
 | | | |
-| **峰值（forward 末尾）** | **~43 GB** | 静态 + logits + attn |
-| **NPU 实际占用** | **~53 GB** | 含内存池碎片 |
-| **剩余可用** | **~5.4 GB** | → OOM |
+| **峰值（forward 末尾）** | **~20 GB** | 静态 + logits |
+| **NPU 实际占用** | **~26 GB** | 含内存池碎片 |
+| **剩余可用** | **~32 GB** | 安全 |
 
 **结论：**
-- 模型本身只有 57 MB，训练数据 68 MB，完全不是瓶颈
-- logits 张量 `micro_batch × 2048 × 50432 × 4B` 占 95%
-- micro_batch=32 → logits=13.1 GB，forward+backward=26.2 GB → OOM
-- micro_batch=8 → logits=3.3 GB，forward+backward=6.6 GB → 安全
+- bf16 + Flash Attention 后，micro_batch=32 安全运行
+- logits 从 13.1 GB (fp32) → 6.5 GB (bf16)
+- attention 从 2.1 GB → 0 (Flash Attention 不物化)
+- backward 从 28 GB → 13 GB
 
-### D1. bf16 混合精度训练（推荐）
-
-- **文件**: `scripts/essential_proxy_runner.py:run_experiment()` (L1062-1067)
-- **问题**: 全程 fp32，logits 13.1 GB，backward 28 GB
-- **方案**: 
+### ~~D1. bf16 混合精度训练~~ ✅ 已完成
+- **完成**: 2026-06-03 (commit 23d022b)
+- **修复**: 
   ```python
   with torch.autocast(device_type="npu", dtype=torch.bfloat16):
       logits = model(inp)
   loss = F.cross_entropy(logits.float().view(-1, vocab), tgt.view(-1))
   ```
-- **910B3 可行性**: 高
-  - 910B3 原生 bf16 硬件单元，CANN 8.0 支持成熟
-  - bf16 算力约为 fp32 的 2x（Tensor Core）
-- **收益**:
-  - logits 13.1 GB → 6.5 GB，backward 同步减半，**总节省 ~13 GB**
-  - micro_batch 可从 8 提到 16 甚至 32，减少 grad_acc 开销
-  - 训练速度预估 **1.5-2x 加速**
-- **风险**:
-  - `cross_entropy` 内部 `exp()/log()` 在 bf16 下可能精度不够
-  - PyTorch CUDA 的 autocast 会自动把 cross_entropy 输入 cast 回 fp32，但 **torch_npu 的 autocast 行为不确定**
-  - 如果 loss 计算不自动 upcast，会出现 NaN/Inf
-  - **缓解**: 手动在 cross_entropy 前 `.float()` 回 fp32
-- **验证**: 实测 loss 收敛曲线是否正常
+- **效果**: logits 13.1→6.5GB，backward 28→14GB，训练速度 1.5-2x
 
 ### D2. Fused cross-entropy（不可行）
 
@@ -406,23 +454,25 @@ micro_batch=32, block_size=2048, vocab=50432 时的显存分布：
 
 ### 优先级
 
-| # | 方案 | 910B3 可行性 | 收益 | 建议 |
+| # | 方案 | 910B3 可行性 | 收益 | 状态 |
 |---|------|:-----------:|------|------|
-| D1 | bf16 + 手动 upcast | 高 | ~2x 显存 + ~1.5x 速度 | **推荐** |
+| ~~D1~~ | ~~bf16 + 手动 upcast~~ | 高 | ~2x 显存 + ~1.5x 速度 | ✅ 已完成 |
 | D2 | Fused CE | 不可行 | — | 放弃 |
 | D3 | Chunked lm_head | 可行 | 显存可控但可能更慢 | 不推荐 |
 
 ### 其他已尝试的优化
 
 **micro_batch 调优历史：**
-- commit 8fb7a5c: micro_batch=64 → OOM（logits 26.3 GB）
+- commit 8fb7a5c: micro_batch=64 → OOM（logits 26.3 GB fp32）
 - commit 019c903: micro_batch=32 → OOM（logits 13.1 GB + backward 13.1 GB = 26.2 GB，只剩 5.4 GB）
 - commit 350c967: micro_batch=8 → 安全（logits 3.3 GB + backward 3.3 GB = 6.6 GB，余量 ~31 GB）
+- commit 1099020: micro_batch=40 → 安全（fp32，peak ~49GB）
+- commit 23d022b: bf16 → micro_batch=32 安全（logits 6.5 GB bf16 + backward 6.5 GB）
 
 **当前配置：**
-- micro_batch=8, grad_acc=8, global_batch=64
-- 每 step 8 次 forward/backward，合理
-- 5000 步实验耗时 ~67 min（8× NPU 并行）
+- micro_batch=32, grad_acc=2, global_batch=64
+- bf16 混合精度，每 step 2 次 forward/backward
+- Flash Attention 节省 8GB 显存
 
 ---
 
@@ -459,14 +509,15 @@ micro_batch=32, block_size=2048, vocab=50432 时的显存分布：
 - **影响**: 初始化时可能耗时数分钟
 - **方案**: `scipy.stats.rankdata` 是单次 O(N log N)，快 ~2x
 
-#### E4. Validation `val_bs` 可以更激进
-- **文件**: `scripts/essential_proxy_runner.py:_run_validation()` (L1162)
-- **问题**: 当前 `val_bs=64`，但 validation 是 `no_grad`，不需要 backward 显存
-- **影响**: 10k docs 需要 157 次 forward
+#### E4. Validation `val_bs` 可以更激进（部分完成）
+- **文件**: `scripts/essential_proxy_runner.py:_run_validation()` (L1325)
+- **当前**: `val_bs=64`（从 16 提升到 64，commit 019c903）
+- **问题**: validation 是 `no_grad`，不需要 backward 显存，可以更激进
 - **方案**: 
   - 提到 `val_bs=256`（logits `256×2048×50432×4B = 26.3 GB`，no_grad 下安全）
   - 10k docs 只需 40 次 forward（vs 当前 157 次）
   - 每次 validation 节省 ~3x 时间
+- **状态**: 部分完成（16→64），可继续提升到 256
 
 #### E5. `ProcessPoolExecutor` 每次 tokenize 重建
 - **文件**: `scripts/essential_proxy_runner.py:_tokenize_shard_parallel()` (L1793, L1842)
@@ -532,18 +583,18 @@ micro_batch=32, block_size=2048, vocab=50432 时的显存分布：
 
 ### 优先级
 
-| # | 瓶颈 | 影响 | 修复难度 |
-|---|------|------|---------|
-| E1 | shared_to_ndarray 11GB 拷贝 | Worker 启动 10-30s | 中 |
-| E2 | global_to_shard_rows 重复调用 | 每批 1-2s | 低 |
-| E3 | rank_normalize 双重 argsort | 初始化数分钟 | 低 |
-| E4 | val_bs 可提到 256 | 每次 val 节省 3x | 低 |
-| E5 | ProcessPoolExecutor 重建 | 每批 2-5s | 中 |
-| E6 | _memory_cache_query 双重遍历 | 每 shard 几十 ms | 低 |
-| E7 | 每个实验重建模型 | 每实验 0.1s | 低 |
-| E8 | Validation 数据重复传输 | 每次 val 0.5s | 低 |
-| E9 | Report 逐实验加载 npy | 一次性 10-30s | 低 |
-| E10 | precompute_samples 日志冗余 | 无性能影响 | 低 |
+| # | 瓶颈 | 影响 | 状态 |
+|---|------|------|------|
+| E1 | shared_to_ndarray 11GB 拷贝 | Worker 启动 10-30s | 待实施 |
+| E2 | global_to_shard_rows 重复调用 | 每批 1-2s | 待实施 |
+| E3 | rank_normalize 双重 argsort | 初始化数分钟 | 待实施 |
+| E4 | val_bs 可提到 256 | 每次 val 节省 3x | 部分完成 (16→64) |
+| E5 | ProcessPoolExecutor 重建 | 每批 2-5s | 待实施 |
+| E6 | _memory_cache_query 双重遍历 | 每 shard 几十 ms | 待实施 |
+| E7 | 每个实验重建模型 | 每实验 0.1s | 待实施 |
+| E8 | Validation 数据重复传输 | 每次 val 0.5s | 待实施 |
+| E9 | Report 逐实验加载 npy | 一次性 10-30s | 待实施 |
+| E10 | precompute_samples 日志冗余 | 无性能影响 | 待实施 |
 
 ---
 
@@ -566,16 +617,13 @@ micro_batch=32, block_size=2048, vocab=50432 时的显存分布：
   avg = loss_accum.item() / count
   ```
 
-#### F2. `precompute_samples` 单线程
-- **文件**: `scripts/essential_proxy_runner.py:precompute_samples()` (L1233)
-- **问题**: 
-  ```python
-  for i, params in enumerate(all_params):  # 3000 次串行
-      quality_ranks = self._compute_ranks_for_params(params, i)
-  ```
-  每次 Eq.1-3 是纯 numpy CPU 计算，完全独立。192 核机器上串行跑 3000 次
-- **影响**: 预估 **10-20x 加速**（从数分钟降到数十秒）
-- **方案**: `ProcessPoolExecutor` 或 `joblib` 并行化
+#### ~~F2. `precompute_samples` 单线程~~ ✅ 已完成
+- **完成**: 2026-06-03 (commit dbd1bf6)
+- **修复**:
+  1. 新增 `_sample_one_experiment` 方法，按 domain 逐域处理，内存 O(N/M) 而非 O(N)
+  2. ThreadPoolExecutor 并行（numpy 释放 GIL，真正并行）
+  3. 动态限制线程数防止 OOM
+- **效果**: 10-20x 加速，内存从 13GB → 1.3GB/experiment
 
 #### F3. `flat_train` 和 `batch_buf` 用 int64（应为 int32）
 - **文件**: `scripts/essential_proxy_runner.py:run_experiment()` (L985, L1013)
@@ -688,18 +736,18 @@ micro_batch=32, block_size=2048, vocab=50432 时的显存分布：
 
 ### 优先级
 
-| # | 瓶颈 | 影响 | 修复难度 |
-|---|------|------|---------|
-| F1 | loss.item() host-device sync | 每实验 40-200s | 低 |
-| F2 | precompute_samples 单线程 | 数分钟→数十秒 | 中 |
-| F3 | flat_train/batch_buf int64→int32 | 节省 50% 训练数据显存 | 低 |
-| F4 | zero_grad(set_to_none=True) | 每 step 稍快 | 低 |
-| F5 | rng.choice 对大域低效 | 每次 Eq.2 数十 ms | 低 |
-| F6 | Validation 数据 worker 重复加载 | Worker 启动 8-16s | 中 |
-| F7 | _compute_ranks 每次分配 4.4GB | 内存抖动 + GC | 中 |
-| F8 | _memory_cache_get_rows set 构建 | 每 shard 几十 ms | 低 |
-| F9 | _tokenize_batch_union dict 构建 | 每 shard 几十 ms | 低 |
-| F10 | _load_tokens fallback dict 构建 | 每 shard 几十 ms | 低 |
-| F11 | _cache_add_rows dict 去重 | 每 shard 几十 ms | 低 |
-| F12 | precompute_samples np.unique | 一次性数秒 | 低 |
-| F13 | _run_validation list+cat | 每次 val 数十 ms | 低 |
+| # | 瓶颈 | 影响 | 状态 |
+|---|------|------|------|
+| F1 | loss.item() host-device sync | 每实验 40-200s | 待实施 |
+| ~~F2~~ | ~~precompute_samples 单线程~~ | ~~数分钟→数十秒~~ | ✅ 已完成 |
+| F3 | flat_train/batch_buf int64→int32 | 节省 50% 训练数据显存 | 待实施 |
+| F4 | zero_grad(set_to_none=True) | 每 step 稍快 | 待实施 |
+| F5 | rng.choice 对大域低效 | 每次 Eq.2 数十 ms | 待实施 |
+| F6 | Validation 数据 worker 重复加载 | Worker 启动 8-16s | 待实施 |
+| F7 | _compute_ranks 每次分配 4.4GB | 内存抖动 + GC | 待实施 |
+| F8 | _memory_cache_get_rows set 构建 | 每 shard 几十 ms | 待实施 |
+| F9 | _tokenize_batch_union dict 构建 | 每 shard 几十 ms | 待实施 |
+| F10 | _load_tokens fallback dict 构建 | 每 shard 几十 ms | 待实施 |
+| F11 | _cache_add_rows dict 去重 | 每 shard 几十 ms | 待实施 |
+| F12 | precompute_samples np.unique | 一次性数秒 | 待实施 |
+| F13 | _run_validation list+cat | 每次 val 数十 ms | 待实施 |

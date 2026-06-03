@@ -1155,7 +1155,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         # ---- 5. Training loop (RegMix-style: permutation shuffle, no replacement) ----
         _train_t0 = time.perf_counter()
         model.train()
-        total_loss = 0.0
+        loss_accum = torch.tensor(0.0, device=device)
         self._ckpt_results = {}  # step -> val_loss
         iter_ct = 0
         step_ct = 0
@@ -1217,7 +1217,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                     pg["lr"] = lr
                 torch.nn.utils.clip_grad_norm_(model.parameters(), self.grad_clip)
                 optimizer.step()
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
                 step_ct += 1
 
                 # Checkpoint: record val_loss every checkpoint_interval steps
@@ -1232,11 +1232,11 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                     elapsed_ckpt = time.time() - t_start
                     print(f"    [CHECKPOINT step={step_ct}] val_loss={ckpt_val:.4f} ({elapsed_ckpt:.0f}s)")
 
-            total_loss += loss.item()
+            loss_accum += loss.detach()
             iter_ct += 1
 
             if not is_acc and (step_ct % log_int == 0 or step_ct == 1):
-                avg = total_loss / step_ct
+                avg = (loss_accum / step_ct).item()
                 elapsed = time.time() - t_start
                 rem = (num_steps - step_ct) * elapsed / max(1, step_ct)
                 print(f"    Step {step_ct}/{num_steps}, loss={avg:.4f}, "
@@ -1264,7 +1264,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         # ---- 8. Save metadata ----
         with PerfTimer.section("save_metadata", _timer_prefix):
-            avg_train = total_loss / step_ct if step_ct > 0 else 0
+            avg_train = (loss_accum / step_ct).item() if step_ct > 0 else 0
 
             meta = {
                 "experiment_id": experiment_id,
@@ -1322,7 +1322,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         val_tokens = self._val_token_ids[:val_n, :bs].to(device)
         val_mask = self._val_loss_mask[:val_n, :bs].to(device)
         with torch.no_grad():
-            val_bs = min(64, val_n)
+            val_bs = min(256, val_n)
             per_doc_losses = []
             for start in range(0, len(val_tokens), val_bs):
                 end = min(start + val_bs, len(val_tokens))
