@@ -6,11 +6,12 @@ before merging (Equation 1). Smaller values indicate better quality.
 
 σ must preserve numerical relationships so that α weights in Eq.1
 can meaningfully control the relative importance of each criterion.
-Rank normalization is chosen over zscore/minmax because:
-- Robust to outliers (zscore's std is sensitive to extreme values)
-- Stable across different data distributions (rank only depends on ordering)
-- Consistent with Eq.2's re-ranking step (both use percentile-based approach)
-- Empirically produces more stable val_loss for LightGBM regression
+Log1p-zscore is chosen as default because:
+- Variance balance: all criteria get var=1.0 → equal α = equal importance
+- Preserves signal in skewed distributions (dclm/math: 95% near-zero docs
+  stay clustered, 5% high-quality docs retain their gap)
+- log(1+x) compresses heavy tails before zscore standardization
+- Outlier more robust than pure zscore (log dampens extreme values)
 """
 
 import numpy as np
@@ -55,15 +56,33 @@ def rank_normalize(scores: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
     return ranks.astype(np.float64) / n
 
 
+def log1p_z_normalize(scores: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+    """
+    Log1p + Z-score normalization: zscore(log(1 + x - min(x))).
+    Shifts to non-negative, applies log to compress heavy tails, then standardizes.
+    Best for skewed distributions where rank would distort signal.
+    """
+    if len(scores) == 0:
+        return scores
+    shifted = scores - scores.min()
+    logged = np.log1p(shifted)
+    mean = np.mean(logged)
+    std = np.std(logged)
+    if std < 1e-10:
+        return np.zeros_like(scores)
+    return (logged - mean) / std
+
+
 # Registry of available normalization functions
 NORMALIZATION_REGISTRY: dict[str, Callable[[npt.NDArray[np.float64]], npt.NDArray[np.float64]]] = {
     "zscore": zscore_normalize,
     "minmax": minmax_normalize,
     "rank": rank_normalize,
+    "log1p_z": log1p_z_normalize,
 }
 
 
-def get_normalizer(name: str = "rank") -> Callable[[npt.NDArray[np.float64]], npt.NDArray[np.float64]]:
+def get_normalizer(name: str = "log1p_z") -> Callable[[npt.NDArray[np.float64]], npt.NDArray[np.float64]]:
     """Get a normalization function by name."""
     if name not in NORMALIZATION_REGISTRY:
         raise ValueError(
