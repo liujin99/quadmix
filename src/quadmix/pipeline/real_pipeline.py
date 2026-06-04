@@ -586,12 +586,14 @@ class QuaDMixPipeline:
 
         elapsed = time.time() - t_start
         n_docs_save = n_docs  # from earlier
+        normalizer = getattr(proxy_runner, "_normalizer_name", "unknown")
         summary = {
             "config": {
                 "num_domains": self.config.num_domains,
                 "num_quality_criteria": self.config.num_quality_criteria,
                 "num_proxy_experiments": n_exp,
                 "num_search_points": n_search,
+                "normalizer": normalizer,
             },
             "metrics": {
                 "train_r2": self._optimizer.train_r2,
@@ -758,22 +760,29 @@ class QuaDMixPipeline:
         quality_names: Optional[List[str]] = None,
     ) -> Dict:
         """Serialize ParameterSet to JSON-friendly dict."""
-        result = {
-            "num_domains": params.num_domains,
-            "num_criteria": params.num_criteria,
-            "domain_weights": params.merge_config.domain_weights.tolist(),
-            "sampling_configs": [
-                {
-                    "lambda": sc.lambda_,
-                    "omega": sc.omega,
-                    "eta": sc.eta,
-                    "epsilon": sc.epsilon,
-                }
-                for sc in params.sampling_configs
-            ],
+        M = params.num_domains
+        N = params.num_criteria
+        d_names = domain_names or [f"domain_{m}" for m in range(M)]
+        q_names = quality_names or [f"criterion_{n}" for n in range(N)]
+        dw = params.merge_config.domain_weights
+
+        quality_weights = {}
+        for m in range(M):
+            start = m * N
+            quality_weights[d_names[m]] = {
+                q_names[n]: round(float(dw[start + n]), 6) for n in range(N)
+            }
+
+        sampling_params = {}
+        for m, sc in enumerate(params.sampling_configs):
+            sampling_params[d_names[m]] = {
+                "lambda": round(sc.lambda_, 4),
+                "omega": round(sc.omega, 6),
+                "eta": round(sc.eta, 6),
+                "epsilon": round(sc.epsilon, 6),
+            }
+
+        return {
+            "quality_weights": quality_weights,
+            "sampling_params": sampling_params,
         }
-        if domain_names:
-            result["domain_names"] = domain_names
-        if quality_names:
-            result["quality_names"] = quality_names
-        return result
