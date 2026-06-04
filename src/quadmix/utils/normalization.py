@@ -16,11 +16,14 @@ QuaDMix Input Contract:
     under the "higher = better" convention (best doc gets highest rank).
     threshold_rank detects signal layer as the top tail (largest values).
 
-threshold_rank is the default normalizer because:
-- For skewed distributions (|skew| > 4): uses percentile to separate
+rank is the default normalizer because it is robust across all distribution
+shapes and produces the best predictive performance (R²=0.808).
+
+threshold_rank is available as an alternative for right-skewed distributions:
+- For skewed distributions (skew > 4): uses percentile to separate
   noise from signal. Noise layer → 0, signal layer → rank [0, 1].
 - For moderate/uniform distributions: falls back to pure rank.
-- Prevents noise layer docs from entering sampling when ω is large.
+- Caution: changes α weight semantics (only signal layer docs affected).
 """
 
 import numpy as np
@@ -145,7 +148,7 @@ NORMALIZATION_REGISTRY: dict[str, Callable[[npt.NDArray[np.float64]], npt.NDArra
 }
 
 
-def get_normalizer(name: str = "threshold_rank") -> Callable[[npt.NDArray[np.float64]], npt.NDArray[np.float64]]:
+def get_normalizer(name: str = "rank") -> Callable[[npt.NDArray[np.float64]], npt.NDArray[np.float64]]:
     """Get a normalization function by name."""
     if name not in NORMALIZATION_REGISTRY:
         raise ValueError(
