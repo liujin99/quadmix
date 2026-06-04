@@ -2,27 +2,37 @@
 Normalization function σ for quality scores.
 
 The paper uses σ to align the scales of different quality criteria
-before merging (Equation 1). Smaller values indicate better quality.
+before merging (Equation 1).
 
-σ must preserve numerical relationships so that α weights in Eq.1
-can meaningfully control the relative importance of each criterion.
-Log1p-zscore is chosen as default because:
-- Variance balance: all criteria get var=1.0 → equal α = equal importance
-- Preserves signal in skewed distributions (dclm/math: 95% near-zero docs
-  stay clustered, 5% high-quality docs retain their gap)
-- log(1+x) compresses heavy tails before zscore standardization
-- Outlier more robust than pure zscore (log dampens extreme values)
+QuaDMix Input Contract:
+    quality_matrix: ndarray of shape (num_docs, num_criteria)
+    Convention: higher = better (e.g., higher probability, higher confidence).
+    Users pass raw scores directly — no negation needed.
+    Most real-world quality scorers output "higher = better" naturally.
+
+    Normalization functions here are mathematical transforms. They do
+    not enforce or validate direction. rank_normalize assigns rank 0
+    to the smallest value and rank ~1 to the largest, which is correct
+    under the "higher = better" convention (best doc gets highest rank).
+    threshold_rank detects signal layer as the top tail (largest values).
+
+threshold_rank is the default normalizer because:
+- For skewed distributions (|skew| > 4): uses percentile to separate
+  noise from signal. Noise layer → 0, signal layer → rank [0, 1].
+- For moderate/uniform distributions: falls back to pure rank.
+- Prevents noise layer docs from entering sampling when ω is large.
 """
 
 import numpy as np
 import numpy.typing as npt
+from scipy import stats as sp_stats
 from typing import Callable
 
 
 def zscore_normalize(scores: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
     """
     Z-score normalization: (x - μ) / σ.
-    Preserves relative ordering. Smaller = better (when mean-subtracted).
+    Preserves relative ordering. Higher = better (direction-preserving).
     """
     mean = np.mean(scores)
     std = np.std(scores)
@@ -34,25 +44,23 @@ def zscore_normalize(scores: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]
 def minmax_normalize(scores: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
     """
     Min-max normalization to [0, 1].
-    Smaller = better (inverted: 1 - minmax).
+    Higher = better (largest value maps to 1.0, smallest to 0.0).
     """
     s_min, s_max = np.min(scores), np.max(scores)
     if s_max - s_min < 1e-10:
         return np.zeros_like(scores)
-    return 1.0 - (scores - s_min) / (s_max - s_min)
+    return (scores - s_min) / (s_max - s_min)
 
 
 def rank_normalize(scores: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
     """
     Rank-based normalization to [0, 1].
-    Smaller = better (rank percentile where 0 = best).
-    This is most faithful to the paper's approach since the quality
-    values get re-ranked later anyway.
+    Higher = better (largest value gets rank ~1, smallest gets rank ~0).
     """
     n = len(scores)
     if n == 0:
         return scores
-    ranks = np.argsort(np.argsort(scores))  # 0 = smallest (best)
+    ranks = np.argsort(np.argsort(scores))  # 0 = smallest (worst)
     return ranks.astype(np.float64) / n
 
 
@@ -73,16 +81,71 @@ def log1p_z_normalize(scores: npt.NDArray[np.float64]) -> npt.NDArray[np.float64
     return (logged - mean) / std
 
 
+def _detect_threshold(
+    scores: npt.NDArray[np.float64],
+    skew: float,
+) -> tuple[float, int]:
+    """Detect noise/signal boundary via percentile for skewed distributions.
+
+    In "higher = better" convention:
+    - Right-skewed (skew > 4): most docs have low scores (noise), few have high scores (signal)
+      → threshold = p75, signal = scores > p75
+    - Left-skewed (skew < -4): most docs have high scores (saturated, no clear noise layer)
+      → fall back to pure rank (return direction = 0)
+
+    Returns:
+        (threshold_value, direction): direction=1 for right-skew, 0 for fallback.
+    """
+    if skew <= 4:
+        return 0.0, 0
+
+    return float(np.percentile(scores, 75)), 1
+
+
+def threshold_rank_normalize(scores: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+    """Threshold + rank: noise layer → 0, signal layer → rank [0, 1].
+
+    For right-skewed distributions (skew > 4): uses percentile to separate
+    noise from signal. Noise layer (low scores) gets 0, signal layer
+    (high scores) gets rank within [0, 1]. Falls back to pure rank otherwise.
+    """
+    n = len(scores)
+    if n == 0:
+        return scores
+
+    skew = float(sp_stats.skew(scores))
+    threshold, direction = _detect_threshold(scores, skew)
+
+    if direction == 0:
+        return rank_normalize(scores)
+
+    result = np.zeros(n, dtype=np.float64)
+
+    signal_mask = scores > threshold
+
+    signal_count = signal_mask.sum()
+    if signal_count < max(10, n // 10):
+        return rank_normalize(scores)
+
+    signal_scores = scores[signal_mask]
+    signal_ranks = np.argsort(np.argsort(signal_scores))
+
+    result[signal_mask] = signal_ranks.astype(np.float64) / signal_count
+
+    return result
+
+
 # Registry of available normalization functions
 NORMALIZATION_REGISTRY: dict[str, Callable[[npt.NDArray[np.float64]], npt.NDArray[np.float64]]] = {
     "zscore": zscore_normalize,
     "minmax": minmax_normalize,
     "rank": rank_normalize,
     "log1p_z": log1p_z_normalize,
+    "threshold_rank": threshold_rank_normalize,
 }
 
 
-def get_normalizer(name: str = "rank") -> Callable[[npt.NDArray[np.float64]], npt.NDArray[np.float64]]:
+def get_normalizer(name: str = "threshold_rank") -> Callable[[npt.NDArray[np.float64]], npt.NDArray[np.float64]]:
     """Get a normalization function by name."""
     if name not in NORMALIZATION_REGISTRY:
         raise ValueError(

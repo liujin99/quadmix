@@ -58,13 +58,18 @@ def extract_domain_level_1(eai_taxonomy):
 
 
 def extract_quality_signals(quality_signals):
+    """Extract quality signals from raw fasttext data.
+
+    Raw fasttext scores are "higher = better" (probability/confidence).
+    QuaDMix accepts "higher = better" as input convention — no negation needed.
+    """
     if not isinstance(quality_signals, dict):
         return np.zeros(len(FASTTEXT_FIELDS), dtype=np.float32)
     fasttext = quality_signals.get("fasttext", {})
     if not isinstance(fasttext, dict):
         return np.zeros(len(FASTTEXT_FIELDS), dtype=np.float32)
     return np.array([
-        -(fasttext.get(field, 0.0) or 0.0)
+        (fasttext.get(field, 0.0) or 0.0)
         for field in FASTTEXT_FIELDS
     ], dtype=np.float32)
 

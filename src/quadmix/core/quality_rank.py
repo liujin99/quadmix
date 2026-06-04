@@ -1,12 +1,17 @@
 """
 Quality rank computation — Equation (2) from the paper.
 
-    ¯r = |{x | d_x = m, ¯q_x <= ¯q}| / |{x | d_x = m}|
+    ¯r = |{x | d_x = m, ¯q_x >= ¯q}| / |{x | d_x = m}|
 
 The merged quality rank ¯r is the percentile of a document within its domain,
 where TOKEN counts are used for the denominator (not document counts).
 
 Lower ¯r means higher quality (0 = best in domain, 1 = worst).
+
+QuaDMix Input Contract:
+    merged_scores: ndarray of shape (num_docs,)
+    Convention: higher = better (e.g., higher probability, higher confidence).
+    Users pass raw scores directly — no negation needed.
 """
 
 import numpy as np
@@ -24,7 +29,7 @@ def compute_quality_ranks(
 
     Args:
         merged_scores: Array of merged quality scores ¯q.
-                       Shape: (num_docs,) — smaller = better.
+                       Shape: (num_docs,) — higher = better.
         domain_labels: Array of domain labels.
                        Shape: (num_docs,).
         token_counts: Optional per-document token counts.
@@ -63,26 +68,23 @@ def compute_quality_ranks(
             ranks[indices] = 0.5  # Edge case: all tokens 0
             continue
 
-        # Sort by merged quality (ascending: best quality first)
-        sort_order = np.argsort(domain_scores)
+        # Sort by merged quality (descending: best quality first)
+        sort_order = np.argsort(-domain_scores)
 
         # Compute cumulative token percentage (token-weighted percentile)
-        # For each document, ¯r = (cumulative tokens for same or worse quality) / total tokens
-        # Per paper: |{x | d_x = m, ¯q_x <= ¯q}|
+        # For each document, ¯r = (cumulative tokens for same or better quality) / total tokens
+        # Per paper: |{x | d_x = m, ¯q_x >= ¯q}|
         sorted_tokens = domain_tokens[sort_order]
         cumulative = np.cumsum(sorted_tokens)
 
         # Map back to original order
         # The rank for document i at sorted position pos is cumulative[pos] / total
-        # Since cumulative[pos] includes document itself (¯q_x <= ¯q)
+        # Since cumulative[pos] includes document itself (¯q_x >= ¯q)
         sorted_ranks = cumulative / total_tokens
 
-        # Remove the "self" token to get strictly less-than fraction
-        # This gives 0 for the best document instead of token_fraction_of_best
-        # Actually, per paper: ¯r = |{x | d_x = m, ¯q_x <= ¯q}| / |{x | d_x = m}|
+        # Per paper: ¯r = |{x | d_x = m, ¯q_x >= ¯q}| / |{x | d_x = m}|
         # The set includes the document itself, so cumulative[t] / total is correct.
         # Best document has ¯r ≈ tokens_of_best / total (very small but > 0)
-        # We'll keep it as-is which matches the paper definition.
 
         # Map sorted positions back to original indices
         inv_sort = np.argsort(sort_order)

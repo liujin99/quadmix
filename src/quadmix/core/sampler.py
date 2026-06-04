@@ -10,6 +10,13 @@ Where:
     ω  — quality threshold; only documents with ¯r <= ω get quality boost
     η  — scaling exponent on sigmoid output
     ε  — base sampling rate for low-quality tail (ensures some coverage)
+
+QuaDMix Input Contract:
+    quality_ranks: ndarray of shape (num_docs,) in [0, 1]
+    Convention: 0 = best quality, 1 = worst quality.
+    This is derived from merged_scores via compute_quality_ranks().
+    Users pass raw scores (higher = better) to the merging step;
+    the rank computation handles direction internally.
 """
 
 import numpy as np

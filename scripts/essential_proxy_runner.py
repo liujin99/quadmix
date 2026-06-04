@@ -273,7 +273,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         # Each experiment repeats normalize_fn(quality_scores[:, n]) - expensive!
         # Pre-compute once, reuse in all experiments (only weighted sum needed)
         from quadmix.utils.normalization import get_normalizer
-        self._normalizer_name = "rank"
+        self._normalizer_name = "threshold_rank"
         normalize_fn = get_normalizer(self._normalizer_name)
 
         t1 = time.time()
@@ -895,7 +895,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         # ── Pre-compute normalized quality (Eq.1 optimization) ───────────────
         from quadmix.utils.normalization import get_normalizer
         if not hasattr(self, '_normalizer_name'):
-            self._normalizer_name = "rank"
+            self._normalizer_name = "threshold_rank"
         normalize_fn = get_normalizer(self._normalizer_name)
 
         t1 = time.time()
@@ -961,10 +961,10 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             k = min(self.rank_ref_size, n_domain)
             ref_idx = rng.choice(n_domain, k, replace=False)
             ref_scores_unsorted = domain_scores[ref_idx]
-            sort_order = np.argsort(ref_scores_unsorted)
+            sort_order = np.argsort(-ref_scores_unsorted)
             ref_scores = ref_scores_unsorted[sort_order]
 
-            positions = np.searchsorted(ref_scores, domain_scores, side='right')
+            positions = np.searchsorted(-ref_scores, -domain_scores, side='right')
 
             if has_tokens:
                 ref_tokens = self._token_counts[indices[ref_idx]][sort_order].astype(np.float64)
@@ -1045,9 +1045,9 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             k = min(self.rank_ref_size, n_m)
             ref_idx = rng_eq2.choice(n_m, k, replace=False)
             ref_scores_unsorted = domain_scores[ref_idx]
-            sort_order = np.argsort(ref_scores_unsorted)
+            sort_order = np.argsort(-ref_scores_unsorted)
             ref_scores = ref_scores_unsorted[sort_order]
-            positions = np.searchsorted(ref_scores, domain_scores, side='right')
+            positions = np.searchsorted(-ref_scores, -domain_scores, side='right')
 
             if has_tokens:
                 ref_tokens = self._token_counts[indices[ref_idx]][sort_order].astype(np.float64)

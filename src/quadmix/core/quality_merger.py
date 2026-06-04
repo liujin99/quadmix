@@ -6,7 +6,13 @@ Quality merging — Equation (1) from the paper.
 Where:
     σ — normalization function aligning quality criterion scales
     α_m = (α_{1,m}, ..., α_{N,m}) — merging parameters for domain m
-    q_n — raw quality score from criterion n (smaller = better)
+    q_n — raw quality score from criterion n
+
+QuaDMix Input Contract:
+    quality_matrix: ndarray of shape (num_docs, num_criteria)
+    Convention: higher = better (e.g., higher probability, higher confidence).
+    Users pass raw scores directly — no negation needed.
+    Most real-world quality scorers output "higher = better" naturally.
 """
 
 import numpy as np
@@ -20,7 +26,7 @@ def compute_merged_quality_scores(
     quality_matrix: npt.NDArray[np.float64],
     domain_labels: npt.NDArray[np.int64],
     merge_config: MergedQualityConfig,
-    normalizer: str = "rank",
+    normalizer: str = "threshold_rank",
 ) -> npt.NDArray[np.float64]:
     """
     Compute merged quality scores ¯q for all documents (Equation 1).
@@ -28,14 +34,14 @@ def compute_merged_quality_scores(
     Args:
         quality_matrix: Shape (num_docs, N) — raw quality scores.
                         q_{n,doc} = quality_matrix[doc, n]
-                        SMALLER values = BETTER quality.
+                        HIGHER values = BETTER quality.
         domain_labels: Shape (num_docs,) — domain label for each doc.
         merge_config: Merging parameters α_m for each domain.
         normalizer: Name of normalization function σ to use.
 
     Returns:
         Array of merged quality scores ¯q for each document.
-        Shape: (num_docs,) — smaller = better quality.
+        Shape: (num_docs,) — higher = better quality.
     """
     num_docs, num_criteria = quality_matrix.shape
     normalize_fn = get_normalizer(normalizer)

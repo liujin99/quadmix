@@ -5,6 +5,13 @@ In the paper, three quality scorers are used:
   2. Fineweb-Edu Classifier — classifier trained on educational quality
   3. DCLM — fastText-based classifier
 
+QuaDMix Input Contract:
+    All quality scores follow "higher = better" convention.
+    Most real-world scorers output "higher = better" naturally
+    (probability, confidence, quality score).
+    Subclasses of BaseQualityScorer should return "higher = better" scores
+    directly from their score() method.
+
 This module provides an abstract base class that can be subclassed
 for any quality scoring method. For NPU deployment, the actual models
 should be loaded on the target device.
@@ -19,9 +26,9 @@ import numpy.typing as npt
 class BaseQualityScorer(ABC):
     """Abstract base class for quality scoring.
 
-    Each scorer outputs a score where SMALLER values = BETTER quality.
-    This convention matches the paper's notation where q_{n,x} represents
-    quality and smaller is better.
+    Each scorer outputs a score where HIGHER values = BETTER quality.
+    This matches the natural convention of most quality scorers
+    (probability, confidence, quality score).
     """
 
     def __init__(self, name: str):
@@ -39,7 +46,7 @@ class BaseQualityScorer(ABC):
             documents: List of document strings to score.
 
         Returns:
-            Array of quality scores. SMALLER = BETTER.
+            Array of quality scores. HIGHER = BETTER.
             Shape: (len(documents),)
         """
         ...
