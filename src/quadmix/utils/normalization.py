@@ -82,7 +82,7 @@ NORMALIZATION_REGISTRY: dict[str, Callable[[npt.NDArray[np.float64]], npt.NDArra
 }
 
 
-def get_normalizer(name: str = "log1p_z") -> Callable[[npt.NDArray[np.float64]], npt.NDArray[np.float64]]:
+def get_normalizer(name: str = "rank") -> Callable[[npt.NDArray[np.float64]], npt.NDArray[np.float64]]:
     """Get a normalization function by name."""
     if name not in NORMALIZATION_REGISTRY:
         raise ValueError(

@@ -395,22 +395,27 @@ class QuaDMixOptimizer:
             except Exception:
                 continue
 
-        if len(bootstrap_r2s) < 50:
-            print(f"[QuaDMixOptimizer] ⚠️  Bootstrap failed ({len(bootstrap_r2s)} valid), skip CI")
+        if len(bootstrap_r2s) < 10:
+            print(f"[QuaDMixOptimizer] ⚠️  Bootstrap failed ({len(bootstrap_r2s)} valid < 10), skip all")
             return
 
         bootstrap_r2s = np.array(bootstrap_r2s)
+        self._val_r2_bootstrap_mean = float(np.mean(bootstrap_r2s))
+        print(f"[QuaDMixOptimizer] Val   R² (bootstrap mean) = {self._val_r2_bootstrap_mean:.4f} ({len(bootstrap_r2s)} iterations)")
+        print(f"[QuaDMixOptimizer] Bootstrap ensemble: {len(self._bootstrap_models)} models trained")
+
+        if len(bootstrap_r2s) < 50:
+            print(f"[QuaDMixOptimizer] ⚠️  Too few valid iterations ({len(bootstrap_r2s)} < 50), skip CI")
+            return
+
         self._val_r2_ci_lower = float(np.percentile(bootstrap_r2s, 2.5))
         self._val_r2_ci_upper = float(np.percentile(bootstrap_r2s, 97.5))
         self._val_r2_ci_std = float(np.std(bootstrap_r2s))
-        self._val_r2_bootstrap_mean = float(np.mean(bootstrap_r2s))
 
         ci_width = self._val_r2_ci_upper - self._val_r2_ci_lower
         status = "✓ Stable" if ci_width < 0.3 else "⚠️ Wide CI"
 
-        print(f"[QuaDMixOptimizer] Val   R² (bootstrap mean) = {self._val_r2_bootstrap_mean:.4f}")
         print(f"[QuaDMixOptimizer] Val   R² 95% CI = [{self._val_r2_ci_lower:.3f}, {self._val_r2_ci_upper:.3f}] (width={ci_width:.3f}) {status}")
-        print(f"[QuaDMixOptimizer] Bootstrap ensemble: {len(self._bootstrap_models)} models trained")
 
         if not self._sample_sufficient:
             print(f"[QuaDMixOptimizer] ⚠️  Samples ({n_total}) < Features ({n_features}): underdetermined, increase experiments to {n_features * 3}+")

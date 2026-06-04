@@ -20,7 +20,7 @@ def compute_merged_quality_scores(
     quality_matrix: npt.NDArray[np.float64],
     domain_labels: npt.NDArray[np.int64],
     merge_config: MergedQualityConfig,
-    normalizer: str = "log1p_z",
+    normalizer: str = "rank",
 ) -> npt.NDArray[np.float64]:
     """
     Compute merged quality scores ¯q for all documents (Equation 1).

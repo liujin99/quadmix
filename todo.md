@@ -274,10 +274,32 @@
 - **问题**: 不同 (λ, ω, η, ε) 可能产生相似采样曲线，引入回归不确定性
 - **方案**: 对采样函数做正交化或参数约束
 
-#### B4. 质量分数归一化函数选择
+#### B4. 质量分数归一化函数选择 ✅ 已确认 rank 最优
 - **文件**: `src/quadmix/utils/normalization.py`
-- **问题**: rank 归一化是全局的，论文未明确 σ 的语义
-- **方案**: 尝试域内归一化或对比不同归一化方案
+- **完成**: 2026-06-04
+- **实验结果**:
+
+  | Normalizer | 实验数 | Val R² (single) | Bootstrap mean Val R² | val_loss std | 结论 |
+  |------------|--------|-----------------|-----------------------|--------------|------|
+  | rank | 64 | 0.538 | 0.779 | 0.137 | 信号最强 |
+  | rank | 200 | 0.880 | 0.808 | — | 稳定，最佳 |
+  | zscore | 64 | 0.137 | 0.576 | 0.096 | 信号中等 |
+  | log1p_z | 64 | 0.006 | — | 0.094 | 信号最弱，不可用 |
+
+- **rank 最优的原因**:
+  - 每个准则强制展开到 [0,1] 均匀分布，α 对不同准则有同等话语权
+  - merged_score 差异大 → 不同 α 组合产生显著不同的采样分布 → val_loss 方差大（0.137）
+  - LightGBM 能清晰学到 α 的作用
+- **log1p_z/minmax 失败的原因**:
+  - 保留原始分布形状，偏斜准则（dclm IQR=0.008）的值域仍然极小
+  - merged_score 被均匀分布的准则（fineweb_edu IQR=0.645）主导
+  - 其他准则的 α 几乎不起作用 → val_loss 方差小 → LightGBM 无信号可学
+- **rank "扭曲分布" 无害的原因**:
+  - merged_score 是 5 个准则的加权和，噪声层文档在其他准则上有区分
+  - sigmoid 的平滑性抹平了噪声层内部的假排名差异
+  - 信号层文档 merged_score 整体高于噪声层，α 变化有效影响采样概率
+  - α 学到的本质是"哪些准则更重要"，噪声层的假排序不影响最终结果
+- **当前状态**: 默认 normalizer 为 rank，R²=0.808
 
 #### B5. 缺少质量融合消融实验支持
 - **论文**: Table 2 做了 A/F/D 不同组合消融
@@ -310,6 +332,66 @@
 - **问题**: target token 丢弃用 `np.random.default_rng()` 无种子
 - **方案**: 统一使用固定种子
 
+#### B11. 归一化方法改进：阈值 + rank（两阶段归一化）
+- **文件**: `src/quadmix/utils/normalization.py`
+- **背景**: rank 是当前最优（R²=0.808），但在 ω 参数范围扩大时存在局限性
+- **问题**:
+  - rank 把噪声层（如 dclm 76% 近零文档）赋予了假排名
+  - 当前 ω 范围（top 10-20%）只采高质量文档，噪声层进不来，没问题
+  - 如果 ω 调大（top 50%），噪声层文档开始被采到，引入虚假信号
+  - 后果：val_loss 方差混入噪声、LightGBM 学到虚假规律、R² 下降
+- **方案**: 阈值 + rank（两阶段归一化）
+  ```
+  Step 1: 识别噪声层 vs 信号层（per criterion）
+  Step 2: 噪声层统一赋 0，信号层做 rank
+  ```
+  以 dclm 为例：
+  ```
+  原始:  [0.001, 0.002, ..., 0.008, 0.1, 0.3, 0.5, 0.9]
+          ←── 76% 噪声层 ──→      ←── 24% 信号层 ──→
+
+  rank:    [0.01, 0.05, ..., 0.76,  0.77, 0.82, 0.88, 0.99]
+           ← 假排名，噪声被展开 →  ← 信号被压缩 →
+
+  阈值+rank: [0, 0, ..., 0,         0.04, 0.25, 0.58, 1.0]
+             ← 噪声统一为 0 →       ← 信号层内部 rank →
+  ```
+- **效果**:
+  - ω 小时（top 10%）：只采信号层文档，和纯 rank 一样
+  - ω 大时（top 50%）：噪声层全部 merged_score=0，不会被采到。采样范围扩大到信号层内部更低的文档，但不会混入噪声
+- **阈值确定方法**:
+  1. 分位数阈值：取 p75-p80（dclm 76% 近零 → p76 附近是自然分界）
+  2. 拐点检测：对排序后的分数做二阶差分，找斜率突变最大的位置
+  3. 固定阈值：原始分数 > 0.05 才算信号（简单但需要 per-criterion 调参）
+- **per-criterion 处理策略**:
+
+  | 类型 | 标签 | 分布特征 | 推荐处理 |
+  |------|------|---------|---------|
+  | 右偏（噪声+信号） | dclm, eai_general_math | 76-77% 近 0, skew>+4.9 | 阈值 + rank |
+  | 均匀 | fineweb_edu | 均匀 [0, 3.94], skew=+1.09 | 直接 rank |
+  | 左偏（饱和） | english | 98% 在 [0.5, 1.0], skew=-3.63 | 反向阈值 + rank 或二值化 |
+  | 中度偏斜 | eai_open_web_math | 中等分布, skew=+2.54 | 直接 rank |
+
+- **通用判断框架**（遇到新质量标签时）:
+  ```
+  1. 画分布直方图，看偏度 skew 和 IQR
+  2. 判断类型：
+     - |skew| > 3 且有明确拐点 → 阈值 + rank
+     - |skew| < 2 且分布均匀 → rank 或 minmax 均可
+     - 2 < |skew| < 3 → 看拐点是否明显，不明显则直接 rank
+  3. 阈值确定：
+     - 优先用拐点检测（二阶差分最大突变点）
+     - 备选：分位数（右偏取 p75-p80，左偏取 p20-p25）
+  4. 验证：
+     - 跑 64 组实验，对比 Val R² 和 val_loss std
+     - val_loss std 越大越好（信号强）
+     - Val R² 越高越好（LightGBM 能学到）
+  ```
+- **实施建议**:
+  - 当前优先级：低（R²=0.808，ω 范围 top 10-20%，够用）
+  - 触发条件：如果未来需要 ω 覆盖更大范围（top 50%），必须实施
+  - 对 dclm/math 加阈值收益最大（这两个偏斜最严重）
+
 ---
 
 ## 优先级总结
@@ -321,8 +403,10 @@
 | P1 | A2,A3 | N=5/M=10 vs N=3/M=26 | 设计选择，不改 |
 | ~~P2~~ | ~~A5~~ | ~~Proxy Eq.2 缺少 token 加权~~ | ✅ 已修复 |
 | ~~P2~~ | ~~B1~~ | ~~LightGBM 无 early stopping~~ | ✅ 已修复 |
+| ~~P2~~ | ~~B4~~ | ~~归一化函数选择~~ | ✅ 已确认 rank 最优 |
 | P2 | B2 | Bayesian Optimization | 待实施 |
 | P3 | A7,B5 | 缺少 BMK 变体 / 消融支持 | 待实施 |
+| P3 | B11 | 阈值 + rank 两阶段归一化 | 待实施（ω 扩大时） |
 
 ---
 
@@ -499,14 +583,12 @@ micro_batch=32, block_size=2048, vocab=50432 时的显存分布（bf16 后）：
 - **影响**: 每批实验额外 1-2 秒（275M docs 的 searchsorted 开销）
 - **方案**: 缓存 Step 1 的 `shard_to_exp_rows` 结果，Step 4 直接复用
 
-#### ~~E3. `rank_normalize` 双重 argsort~~ ✅ 已修复（改用 zscore）
+#### ~~E3. `rank_normalize` 双重 argsort~~ ✅ 已确认 rank 最优（不改）
 - **文件**: `src/quadmix/utils/normalization.py`, `scripts/essential_proxy_runner.py`, `src/quadmix/core/quality_merger.py`
-- **完成**: 2026-06-03
+- **完成**: 2026-06-04（确认 rank 最优，回退到 rank）
 - **原问题**: rank_normalize 用双重 argsort (O(N log N) × 2)，且丢失数值关系导致 α 权重失效
-- **修复**: 默认 normalizer 从 `rank` 改为 `zscore`
-  - 性能: O(N) 单次扫描 (mean+std)，275M×5 从数分钟降到 ~3s
-  - 算法: 保留数值关系，α 能真正调节评分器权重幅度差异
-  - 鲁棒: 对 outlier 不敏感（vs minmax 会被极端值压缩）
+- **尝试**: 改为 zscore（Val R²=0.137）和 log1p_z（Val R²=0.006），均远差于 rank（Val R²=0.538-0.880）
+- **结论**: rank 的"扭曲分布"在 Eq.1→Eq.2→Eq.3 链路中无害（sigmoid 平滑性 + 多准则加权和），且提供最大参数敏感度。保持 rank。
 
 #### E4. Validation `val_bs` 可以更激进（部分完成）
 - **文件**: `scripts/essential_proxy_runner.py:_run_validation()` (L1325)
@@ -586,7 +668,7 @@ micro_batch=32, block_size=2048, vocab=50432 时的显存分布（bf16 后）：
 |---|------|------|------|
 | E1 | shared_to_ndarray 11GB 拷贝 | Worker 启动 10-30s | 待实施 |
 | E2 | global_to_shard_rows 重复调用 | 每批 1-2s | 待实施 |
-| ~~E3~~ | ~~rank_normalize 双重 argsort~~ | ~~初始化数分钟~~ | ✅ 已修复 (zscore) |
+| ~~E3~~ | ~~rank_normalize 双重 argsort~~ | ~~初始化数分钟~~ | ✅ 已确认 rank 最优（不改） |
 | E4 | val_bs 可提到 256 | 每次 val 节省 3x | 部分完成 (16→64) |
 | E5 | ProcessPoolExecutor 重建 | 每批 2-5s | 待实施 |
 | E6 | _memory_cache_query 双重遍历 | 每 shard 几十 ms | 待实施 |
