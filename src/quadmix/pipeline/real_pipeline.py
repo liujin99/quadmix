@@ -439,8 +439,14 @@ class QuaDMixPipeline:
 
             _t = time.time()
             results = []
-            for i, (params, sel) in enumerate(zip(param_sets, all_selected)):
-                r = proxy_runner.run_experiment(params, experiment_id=i, selected_idx=sel)
+            all_selected_train = getattr(proxy_runner, '_all_selected_train', all_selected)
+            for i, (params, sel, sel_train) in enumerate(
+                zip(param_sets, all_selected, all_selected_train)
+            ):
+                r = proxy_runner.run_experiment(
+                    params, experiment_id=i, selected_idx=sel_train,
+                    sampled_doc_count=len(sel),
+                )
                 results.append(r)
             stage_times["stage4c_training"] = time.time() - _t
             print(f"[Stage 4] Training: {stage_times['stage4c_training']:.1f}s")

@@ -40,6 +40,7 @@ from quadmix.core.quality_merger import compute_merged_quality_scores
 from quadmix.core.quality_rank import compute_quality_ranks
 from quadmix.core.sampler import compute_sampling_values
 from quadmix.pipeline.proxy_runner import BaseProxyRunner
+from scripts.preprocess_essential_web_v1_sharded import DOMAIN_MAP, FASTTEXT_FIELDS
 
 
 class PerfTimer:
@@ -978,6 +979,40 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         return ranks
 
+    def _training_token_budget(self) -> int:
+        """Total tokens training will consume: num_steps × global_batch_size × block_size."""
+        num_steps = self.tiny_steps if self.tiny_steps > 0 else self.max_step
+        return num_steps * self.global_batch_size * self.block_size
+
+    def _subsample_for_budget(
+        self, selected_idx: np.ndarray, seed: int = 0,
+    ) -> np.ndarray:
+        """Subsample selected_idx to match training token budget.
+
+        Uses char_count // 4 as token estimate. Random sampling without
+        replacement preserves the quality-weighted distribution.
+        """
+        tokens_needed = self._training_token_budget()
+
+        if self.metadata_manager is not None:
+            est_tokens = np.maximum(
+                self.metadata_manager.doc_char_counts[selected_idx] // 4, 1
+            )
+        else:
+            est_tokens = np.full(len(selected_idx), self.block_size // 2, dtype=np.int64)
+
+        total_est = int(est_tokens.sum())
+        if total_est <= tokens_needed:
+            return selected_idx
+
+        avg_tok = total_est / len(selected_idx)
+        docs_needed = max(100, int(tokens_needed / avg_tok * 1.2))
+        if docs_needed >= len(selected_idx):
+            return selected_idx
+
+        rng = np.random.default_rng(seed)
+        return rng.choice(selected_idx, size=docs_needed, replace=False)
+
     def _sample_one_experiment(
             self, params: ParameterSet, experiment_id: int,
     ) -> np.ndarray:
@@ -1056,8 +1091,13 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             selected_idx: Optional[np.ndarray] = None,
             shm_info: Optional[tuple] = None,
             checkpoint_interval: Optional[int] = None,
+            sampled_doc_count: Optional[int] = None,
     ) -> ProxyResult:
         """Train one proxy model. Validates on openhermes-10k.
+
+        Args:
+            sampled_doc_count: Original sampled doc count (before budget subsampling).
+                               Used for metadata. If None, uses len(selected_idx).
         """
         from quadmix.core.proxy_model import ProxyModel
         from quadmix.npu.device import DeviceManager, DeviceType
@@ -1096,12 +1136,18 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             if len(selected_idx) < 10:
                 rng2 = np.random.default_rng(experiment_id + 42)
                 selected_idx = rng2.choice(self._train_idx, 100, replace=False)
+
+            sampled_doc_count = len(selected_idx)
+            selected_idx = self._subsample_for_budget(selected_idx, seed=experiment_id)
         else:
             # Pre-computed mode: verify correct dtype
             selected_idx = np.asarray(selected_idx, dtype=np.int64)
 
-        print(f"  [Exp {experiment_id:04d}] QuaDMix sampled {len(selected_idx)} docs "
-              f"(from {len(self._train_idx):,})")
+        if sampled_doc_count is None:
+            sampled_doc_count = len(selected_idx)
+
+        print(f"  [Exp {experiment_id:04d}] QuaDMix sampled {sampled_doc_count} docs "
+              f"(from {len(self._train_idx):,}), training with {len(selected_idx)}")
 
         _timer_prefix = f"exp{experiment_id:04d}"
 
@@ -1301,6 +1347,28 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         with PerfTimer.section("save_metadata", _timer_prefix):
             avg_train = (loss_accum / step_ct).item() if step_ct > 0 else 0
 
+            domain_names = list(DOMAIN_MAP.keys())
+            quality_names = FASTTEXT_FIELDS
+            M = params.num_domains
+            N = params.num_criteria
+            dw = params.merge_config.domain_weights
+
+            quality_weights = {}
+            for m in range(M):
+                start = m * N
+                quality_weights[domain_names[m]] = {
+                    quality_names[n]: round(float(dw[start + n]), 6) for n in range(N)
+                }
+
+            sampling_params = {}
+            for m, sc in enumerate(params.sampling_configs):
+                sampling_params[domain_names[m]] = {
+                    "lambda": round(sc.lambda_, 4),
+                    "omega": round(sc.omega, 6),
+                    "eta": round(sc.eta, 6),
+                    "epsilon": round(sc.epsilon, 6),
+                }
+
             meta = {
                 "experiment_id": experiment_id,
                 "variant": self.model_variant,
@@ -1308,14 +1376,12 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 "val_loss": val_loss,
                 "val_ppl": float(np.exp(val_loss)),
                 "num_steps": step_ct,
-                "sampled_docs": len(selected_idx),
+                "sampled_docs": sampled_doc_count,
+                "training_docs": len(selected_idx),
                 "val_docs": len(self._val_token_ids),
                 "assistant_loss": True,
-                "params_lambda": [sc.lambda_ for sc in params.sampling_configs],
-                "params_omega": [sc.omega for sc in params.sampling_configs],
-                "params_eta": [sc.eta for sc in params.sampling_configs],
-                "params_epsilon": [sc.epsilon for sc in params.sampling_configs],
-                "domain_weights": params.merge_config.domain_weights.tolist(),
+                "quality_weights": quality_weights,
+                "sampling_params": sampling_params,
                 "checkpoint_steps": dict(self._ckpt_results) if hasattr(self, '_ckpt_results') else {},
                 "training_config": {
                     "global_batch_size": self.global_batch_size,
@@ -1493,17 +1559,41 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         print(f"[PreSample] Total selected docs: {total_docs:,} "
               f"(avg {total_docs // max(1, n):,}/exp)")
 
+        # Subsample for training token budget (preserves quality-weighted distribution)
+        budget_tokens = self._training_token_budget()
+        print(f"[PreSample] Training budget: {budget_tokens:,} tokens "
+              f"({self.tiny_steps if self.tiny_steps > 0 else self.max_step} steps × "
+              f"{self.global_batch_size} GBS × {self.block_size} BS)")
+
+        all_selected_train: List[np.ndarray] = []
+        total_train_docs = 0
+        total_sampled_docs = 0
+        for i, sel in enumerate(all_selected):
+            train_sel = self._subsample_for_budget(sel, seed=i)
+            all_selected_train.append(train_sel)
+            total_train_docs += len(train_sel)
+            total_sampled_docs += len(sel)
+        self._all_selected_train = all_selected_train
+
+        if total_train_docs < total_sampled_docs:
+            reduction = (1 - total_train_docs / total_sampled_docs) * 100
+            print(f"[PreSample] Token budget subsample: {total_sampled_docs:,} → "
+                  f"{total_train_docs:,} docs ({reduction:.1f}% reduction, "
+                  f"avg {total_train_docs // max(1, n):,}/exp)")
+        else:
+            print(f"[PreSample] All sampled docs fit within training budget")
+
         # Collect unique docs → per-shard rows (union across all experiments)
         with PerfTimer.section("collect_unique", "precompute"):
             if self.metadata_manager is not None:
-                all_unique = np.unique(np.concatenate(all_selected))
+                all_unique = np.unique(np.concatenate(all_selected_train))
                 shard_groups = self.metadata_manager.global_to_shard_rows(all_unique)
                 # Store per-shard needed rows for precise cache miss tokenization
                 self._per_shard_needed_rows = {
                     sid: rows for sid, (_, rows) in shard_groups.items()
                 }
                 unique_ratio = len(all_unique) / max(1, self._num_docs) * 100
-                print(f"[PreSample] Unique docs: {len(all_unique):,} "
+                print(f"[PreSample] Unique docs to tokenize: {len(all_unique):,} "
                       f"({unique_ratio:.1f}% of pool) "
                       f"across {len(shard_groups)} shards")
                 avg_per_shard = len(all_unique) // max(1, len(shard_groups))
@@ -1536,8 +1626,10 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         mgr = self.metadata_manager
         t0 = time.time()
 
+        tokenize_source = getattr(self, '_all_selected_train', all_selected)
+
         with PerfTimer.section("collect_union", "tokenize_all"):
-            all_unique = np.unique(np.concatenate(all_selected))
+            all_unique = np.unique(np.concatenate(tokenize_source))
             shard_groups = mgr.global_to_shard_rows(all_unique)
 
         total_tokenized = 0
@@ -1669,10 +1761,14 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         if num_workers <= 1:
             # Sequential fallback
+            all_selected_train = getattr(self, '_all_selected_train', all_selected)
             results = []
-            for i, (params, sel) in enumerate(zip(params_list, all_selected)):
+            for i, (params, sel, sel_train) in enumerate(
+                zip(params_list, all_selected, all_selected_train)
+            ):
                 r = self.run_experiment(
-                    params, experiment_id=i, selected_idx=sel
+                    params, experiment_id=i, selected_idx=sel_train,
+                    sampled_doc_count=len(sel),
                 )
                 results.append(r)
             return results
@@ -1800,6 +1896,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         async_write_thread.start()
 
         # ── 1. Tokenize Thread (CPU, batch union mode) ───────────
+        all_selected_train = getattr(self, '_all_selected_train', all_selected)
+
         def tokenize_thread_func():
             """Continuously pre-tokenize experiments in BATCH UNION mode."""
             print(f"[TokenizeThread] STARTED at {time.time():.0f}")
@@ -1811,7 +1909,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 batch_size = num_workers if batch_count == 0 else tokenize_lookahead
                 end_pos = min(pos + batch_size, n_exp)
                 batch_ids = list(range(pos, end_pos))
-                batch_selected = [all_selected[i] for i in batch_ids]
+                batch_selected = [all_selected_train[i] for i in batch_ids]
 
                 try:
                     # Batch tokenize: union miss rows, each shard read ONCE
@@ -1887,7 +1985,11 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                     if is_ready is True:
                         # Immediate dispatch: single exp ready
                         shm_info = exp_shm_info.get(pos)
-                        task_queue.put((pos, params_list[pos], all_selected[pos], shm_info))
+                        task_queue.put((
+                            pos, params_list[pos],
+                            all_selected_train[pos], shm_info,
+                            len(all_selected[pos]),
+                        ))
                         pos += 1
                         continue
                     elif is_ready is False:
@@ -2314,11 +2416,13 @@ def _worker_dynamic_loop(
                 print(f"[Worker {worker_id}] Shutdown, completed {completed} experiments")
                 break
 
-            exp_id, params, selected_idx, shm_info = task
+            exp_id, params, selected_idx, shm_info = task[:4]
+            sampled_doc_count = task[4] if len(task) > 4 else None
             print(f"[Worker {worker_id}] Running exp {exp_id}")
 
             r = runner.run_experiment(params, experiment_id=exp_id, selected_idx=selected_idx,
                                       shm_info=shm_info,
+                                      sampled_doc_count=sampled_doc_count,
                                       checkpoint_interval=config_dict.get("checkpoint_interval", 1000))
             result_queue.put(r)
             completed += 1
