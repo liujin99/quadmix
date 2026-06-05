@@ -227,6 +227,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         print(f"[ProxyRunner] Model config: {model_variant}, "
               f"block={self.block_size}, model_vocab={self.model_config.vocab_size}")
         print(f"[ProxyRunner] Training: batch={self.batch_size}, "
+              f"micro_batch={self.micro_batch_size}, "
               f"grad_acc={self.gradient_accumulation_steps}")
 
         # Load modes

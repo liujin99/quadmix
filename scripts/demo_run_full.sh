@@ -34,10 +34,7 @@ if command -v conda &>/dev/null; then
     eval "$(conda shell.bash hook 2>/dev/null)" && conda activate nano
 fi
 
-# ── 锁定 Python 3.11（pyarrow 兼容 Ascend NPU）─────────────
-if [ -x "/usr/local/python3.11.13/bin/python3" ]; then
-    export PATH="/usr/local/python3.11.13/bin:$PATH"
-fi
+
 
 QUADMIX_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 export PATH="$HOME/.local/bin:$PATH"
