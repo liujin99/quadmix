@@ -40,7 +40,7 @@ from quadmix.core.quality_merger import compute_merged_quality_scores
 from quadmix.core.quality_rank import compute_quality_ranks
 from quadmix.core.sampler import compute_sampling_values
 from quadmix.pipeline.proxy_runner import BaseProxyRunner
-from scripts.preprocess_essential_web_v1_sharded import DOMAIN_MAP, FASTTEXT_FIELDS
+from preprocess_essential_web_v1_sharded import DOMAIN_MAP, FASTTEXT_FIELDS
 
 
 class PerfTimer:
@@ -2231,6 +2231,7 @@ def _tokenize_shard_parallel(
 
     with PerfTimer.section("parallel_tokenize", "parallel_tokenize"):
         from tokenize_worker import _process_shard_full as _worker_process_shard
+        tokenizer_path = os.path.abspath(tokenizer_path)
         ctx = mp.get_context("spawn")
         with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as executor:
             futs = []
