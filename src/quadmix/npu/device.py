@@ -67,26 +67,25 @@ class DeviceManager:
 
     def _init_device(self) -> Any:
         """Initialize the target device. Returns a torch.device-compatible object."""
+        import torch
         if self.device_type == DeviceType.CPU:
-            return "cpu"
+            return torch.device("cpu")
 
         elif self.device_type == DeviceType.CUDA:
             try:
-                import torch
                 if torch.cuda.is_available():
                     return torch.device("cuda:0")
                 else:
                     print("[WARN] CUDA requested but not available. Falling back to CPU.")
                     self.device_type = DeviceType.CPU
-                    return "cpu"
+                    return torch.device("cpu")
             except ImportError:
                 print("[WARN] PyTorch not installed. Falling back to CPU.")
                 self.device_type = DeviceType.CPU
-                return "cpu"
+                return torch.device("cpu")
 
         elif self.device_type == DeviceType.NPU:
             try:
-                import torch
                 import torch_npu  # type: ignore[import-untyped]
                 npu_count = torch.npu.device_count()
                 if npu_count > 0:
@@ -99,7 +98,7 @@ class DeviceManager:
                 else:
                     print("[WARN] NPU requested but no devices found. Falling back to CPU.")
                     self.device_type = DeviceType.CPU
-                    return "cpu"
+                    return torch.device("cpu")
             except ImportError:
                 print(
                     "[WARN] torch_npu not available. "
@@ -108,7 +107,7 @@ class DeviceManager:
                 )
                 print("[WARN] Falling back to CPU for local testing.")
                 self.device_type = DeviceType.CPU
-                return "cpu"
+                return torch.device("cpu")
 
         else:
             raise ValueError(f"Unsupported device type: {self.device_type}")
