@@ -2232,7 +2232,6 @@ def _tokenize_shard_parallel(
 
     with PerfTimer.section("parallel_tokenize", "parallel_tokenize"):
         from tokenize_worker import _process_shard_full as _worker_process_shard
-        tokenizer_path = os.path.abspath(tokenizer_path)
         ctx = mp.get_context("spawn")
         with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as executor:
             futs = []

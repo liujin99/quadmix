@@ -7,7 +7,11 @@ from typing import List, Tuple
 def _get_tokenizer(tokenizer_path: str):
     """Lazy load tokenizer."""
     from tokenizers import Tokenizer
-    return Tokenizer.from_file(tokenizer_path)
+    import os
+    if os.path.exists(tokenizer_path):
+        return Tokenizer.from_file(tokenizer_path)
+    else:
+        return Tokenizer.from_pretrained(tokenizer_path)
 
 
 def _tokenize_chunk_to_array(
@@ -48,26 +52,6 @@ def _process_shard_full(
         threads_per_worker: int = 4,
 ) -> Tuple[int, np.ndarray, np.ndarray, float, float, float]:
     """Process one shard: IO + tokenize in sequence."""
-    import os as _os
-    import sys
-    
-    print(f"[Worker {sid}] tokenizer_path={tokenizer_path}", flush=True)
-    print(f"[Worker {sid}] exists={_os.path.exists(tokenizer_path)}", flush=True)
-    print(f"[Worker {sid}] cwd={_os.getcwd()}", flush=True)
-    print(f"[Worker {sid}] python={sys.executable}", flush=True)
-    
-    if not _os.path.exists(tokenizer_path):
-        parent_dir = _os.path.dirname(tokenizer_path)
-        print(f"[Worker {sid}] parent_dir={parent_dir}", flush=True)
-        print(f"[Worker {sid}] parent_dir exists={_os.path.exists(parent_dir)}", flush=True)
-        if _os.path.exists(parent_dir):
-            try:
-                contents = _os.listdir(parent_dir)[:10]
-                print(f"[Worker {sid}] parent_dir contents={contents}", flush=True)
-            except Exception as e:
-                print(f"[Worker {sid}] cannot list parent_dir: {e}", flush=True)
-        raise FileNotFoundError(f"Tokenizer not found: {tokenizer_path}")
-    
     io_t0 = time.time()
     import pandas as pd
     df_shard = pd.read_parquet(
