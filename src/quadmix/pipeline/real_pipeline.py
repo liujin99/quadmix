@@ -398,6 +398,8 @@ class QuaDMixPipeline:
         print(f"\n[Stage 4] Running {n_exp} proxy experiments...")
 
         _t_stage4 = time.time()
+        print(f"[Stage 4] parallel_workers={parallel_workers}, "
+              f"proxy_runner.device_type={getattr(proxy_runner, 'device_type', 'N/A')!r}")
         if parallel_workers > 1 and hasattr(proxy_runner, 'precompute_samples'):
             # Parallel mode: pre-sample then dispatch across NPU devices
             # Tokenize Thread runs ahead, Workers pull tasks dynamically
