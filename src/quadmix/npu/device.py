@@ -96,18 +96,17 @@ class DeviceManager:
                     torch.npu.set_device(dev_id)
                     return torch.device(f"npu:{dev_id}")
                 else:
-                    print("[WARN] NPU requested but no devices found. Falling back to CPU.")
-                    self.device_type = DeviceType.CPU
-                    return torch.device("cpu")
+                    raise RuntimeError(
+                        f"NPU requested but no devices found "
+                        f"(torch.npu.device_count()={npu_count}). "
+                        f"Check CANN installation and NPU visibility."
+                    )
             except ImportError:
-                print(
-                    "[WARN] torch_npu not available. "
+                raise RuntimeError(
+                    "torch_npu not available. "
                     "On the target NPU machine, install CANN + torch_npu. "
                     "See: https://www.hiascend.com/software/cann"
                 )
-                print("[WARN] Falling back to CPU for local testing.")
-                self.device_type = DeviceType.CPU
-                return torch.device("cpu")
 
         else:
             raise ValueError(f"Unsupported device type: {self.device_type}")
