@@ -237,8 +237,6 @@ export TOKENIZE_THREADS_PER_WORKER="${TOKENIZE_THREADS_PER_WORKER:-4}"
 # Performance timer: set to 1 to enable detailed timing report
 export QUADMIX_PERF_TIMER="${QUADMIX_PERF_TIMER:-1}"
 
-echo "  [DEBUG] DEVICE_ARG='$DEVICE_ARG'"
-set -x
 python3 "$QUADMIX_DIR/scripts/run_essential_web_v1.py" \
     --preprocessed-dir "$PREPROCESSED_DIR" \
     --num-experiments "$NUM_EXPERIMENTS" \
@@ -252,7 +250,6 @@ python3 "$QUADMIX_DIR/scripts/run_essential_web_v1.py" \
     --output "$OUTPUT_DIR" \
     $DEVICE_ARG \
     "$@" || exit $?
-set +x
 
 echo ""
 echo "═══════════════════════════════════════════"

@@ -309,7 +309,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         self._memory_cache_bytes: int = 0  # total bytes across all cached shards
         self._memory_cache_lru: List[int] = []  # sids in access order (head = LRU)
 
-        self._exp_shm_info: Dict[int, tuple] = {}
+
 
     def _tokenize_texts(self, texts: List[str]) -> torch.Tensor:
         """Tokenize a list of texts into [M, block_size] int64 tensor.
@@ -649,25 +649,24 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         pack_t0 = time.time()
         n_batch = len(batch_exp_ids)
 
-        # Build global index: flat tokens array + sorted global_ids
-        # This avoids per-shard queries for each exp
-        shard_starts = mgr._shard_starts
-        global_ids_list = []
-        tokens_list = []
-        for sid, cache_data in self._memory_cache.items():
-            rows = cache_data["rows"]
-            tokens = cache_data["tokens"]
-            global_ids = shard_starts[sid] + rows
-            global_ids_list.append(global_ids)
-            tokens_list.append(tokens)
+        if hasattr(self, '_global_index') and self._global_index is not None:
+            all_global_ids, all_tokens_flat = self._global_index
+        else:
+            shard_starts = mgr._shard_starts
+            global_ids_list = []
+            tokens_list = []
+            for sid, cache_data in self._memory_cache.items():
+                rows = cache_data["rows"]
+                tokens = cache_data["tokens"]
+                global_ids = shard_starts[sid] + rows
+                global_ids_list.append(global_ids)
+                tokens_list.append(tokens)
 
-        all_global_ids = np.concatenate(global_ids_list).astype(np.int64)
-        all_tokens_flat = np.concatenate(tokens_list, axis=0)
-
-        # Sort by global_id for searchsorted
-        sort_idx = np.argsort(all_global_ids)
-        all_global_ids = all_global_ids[sort_idx]
-        all_tokens_flat = all_tokens_flat[sort_idx]
+            all_global_ids = np.concatenate(global_ids_list).astype(np.int64)
+            all_tokens_flat = np.concatenate(tokens_list, axis=0)
+            sort_idx = np.argsort(all_global_ids)
+            all_global_ids = all_global_ids[sort_idx]
+            all_tokens_flat = all_tokens_flat[sort_idx]
 
         print(f"  [GlobalIndex] {len(all_global_ids):,} docs indexed")
 
@@ -1161,22 +1160,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         _timer_prefix = f"exp{experiment_id:04d}"
 
         # ---- 1. Load / tokenize training data on demand ----
-        _shm_from_self = False
-        if shm_info is None and experiment_id in self._exp_shm_info:
-            shm_info = self._exp_shm_info.pop(experiment_id)
-            _shm_from_self = True
-
         with PerfTimer.section("load_tokens", _timer_prefix):
             train_tokens = self._load_tokens_for_experiment(selected_idx, exp_id=experiment_id, shm_info=shm_info)
-
-        if _shm_from_self and shm_info is not None:
-            from multiprocessing.shared_memory import SharedMemory
-            try:
-                shm = SharedMemory(name=shm_info[0])
-                shm.close()
-                shm.unlink()
-            except Exception:
-                pass
         # Keep on CPU to avoid HBM pressure — move to device per-batch
 
         # ---- 2. Create model ----
@@ -1706,7 +1691,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         print(f"[TokenizeAll] Done: {total_tokenized:,} new docs tokenized, "
               f"{total_cached:,} from cache ({elapsed:.1f}s)")
 
-        all_selected_train = getattr(self, '_all_selected_train', all_selected)
+        pack_t0 = time.time()
         shard_starts = mgr._shard_starts
         global_ids_list = []
         tokens_list = []
@@ -1717,28 +1702,13 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             global_ids_list.append(global_ids)
             tokens_list.append(tokens)
 
-        if global_ids_list:
-            all_global_ids = np.concatenate(global_ids_list).astype(np.int64)
-            all_tokens_flat = np.concatenate(tokens_list, axis=0)
-            sort_idx = np.argsort(all_global_ids)
-            all_global_ids = all_global_ids[sort_idx]
-            all_tokens_flat = all_tokens_flat[sort_idx]
-
-            from multiprocessing.shared_memory import SharedMemory
-            pack_t0 = time.time()
-            for exp_id, selected_idx in enumerate(all_selected_train):
-                positions = np.searchsorted(all_global_ids, selected_idx)
-                result = all_tokens_flat[positions]
-                shm = SharedMemory(create=True, size=result.nbytes)
-                shm_array = np.ndarray(result.shape, dtype=result.dtype, buffer=shm.buf)
-                shm_array[:] = result[:]
-                self._exp_shm_info[exp_id] = (shm.name, result.shape, result.dtype.str)
-                shm.close()
-
-            pack_time = time.time() - pack_t0
-            print(f"[TokenizeAll] Pack {len(all_selected_train)} exps to SharedMemory: {pack_time:.1f}s")
-
-        print(f"[TokenizeAll] All {len(all_selected)} experiments ready (SharedMemory)")
+        all_global_ids = np.concatenate(global_ids_list).astype(np.int64)
+        all_tokens_flat = np.concatenate(tokens_list, axis=0)
+        sort_idx = np.argsort(all_global_ids)
+        self._global_index = (all_global_ids[sort_idx], all_tokens_flat[sort_idx])
+        del global_ids_list, tokens_list, sort_idx
+        print(f"[TokenizeAll] Global index built: {len(self._global_index[0]):,} docs ({time.time() - pack_t0:.1f}s)")
+        print(f"[TokenizeAll] All {len(all_selected)} experiments ready (memory cache)")
 
     # ═══════════════════════════════════════════════════════════
     # Parallel run across multiple NPU devices
@@ -1937,107 +1907,96 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         all_selected_train = getattr(self, '_all_selected_train', all_selected)
 
-        pre_packed = len(self._exp_shm_info) == n_exp
+        # ── 0. AsyncWrite Thread (background write to disk cache) ──────
+        def async_write_thread_func():
+            """Write shard cache to disk in background, non-blocking."""
+            write_count = 0
+            while True:
+                try:
+                    item = async_write_queue.get(timeout=1.0)
+                    if item is None:
+                        break
+                    sid, rows, tokens = item
+                    self._cache_add_rows(sid, rows, torch.from_numpy(tokens))
+                    write_count += 1
+                except thread_queue.Empty:
+                    continue
 
-        if pre_packed:
-            print(f"[DynamicParallel] Reusing pre-packed SharedMemory ({n_exp} exps), skipping tokenize thread")
-            for i in range(n_exp):
-                ready_events[i] = True
-            exp_shm_info = self._exp_shm_info
-            async_write_thread = None
-            tokenize_thread = None
-        else:
-            # ── 0. AsyncWrite Thread (background write to disk cache) ──────
-            def async_write_thread_func():
-                """Write shard cache to disk in background, non-blocking."""
-                write_count = 0
-                while True:
-                    try:
-                        item = async_write_queue.get(timeout=1.0)
-                        if item is None:
-                            break
-                        sid, rows, tokens = item
-                        self._cache_add_rows(sid, rows, torch.from_numpy(tokens))
-                        write_count += 1
-                    except thread_queue.Empty:
-                        continue
+            print(f"[AsyncWrite] Wrote {write_count} shard caches to disk")
 
-                print(f"[AsyncWrite] Wrote {write_count} shard caches to disk")
+        async_write_thread = threading.Thread(target=async_write_thread_func, daemon=True)
+        async_write_thread.start()
 
-            async_write_thread = threading.Thread(target=async_write_thread_func, daemon=True)
-            async_write_thread.start()
+        # ── 1. Tokenize Thread (CPU, batch union mode) ───────────
 
-            # ── 1. Tokenize Thread (CPU, batch union mode) ───────────
+        def tokenize_thread_func():
+            """Continuously pre-tokenize experiments in BATCH UNION mode."""
+            print(f"[TokenizeThread] STARTED at {time.time():.0f}")
+            pos = 0
+            batch_count = 0
+            while pos < n_exp:
+                batch_size = num_workers if batch_count == 0 else tokenize_lookahead
+                end_pos = min(pos + batch_size, n_exp)
+                batch_ids = list(range(pos, end_pos))
+                batch_selected = [all_selected_train[i] for i in batch_ids]
 
-            def tokenize_thread_func():
-                """Continuously pre-tokenize experiments in BATCH UNION mode."""
-                print(f"[TokenizeThread] STARTED at {time.time():.0f}")
-                pos = 0
-                batch_count = 0
-                while pos < n_exp:
-                    batch_size = num_workers if batch_count == 0 else tokenize_lookahead
-                    end_pos = min(pos + batch_size, n_exp)
-                    batch_ids = list(range(pos, end_pos))
-                    batch_selected = [all_selected_train[i] for i in batch_ids]
+                try:
+                    exp_token_paths = self._tokenize_batch_union(
+                        batch_selected, batch_ids, async_write_queue,
+                        shm_store=exp_shm_info,
+                    )
+                    batch_count += 1
 
-                    try:
-                        exp_token_paths = self._tokenize_batch_union(
-                            batch_selected, batch_ids, async_write_queue,
-                            shm_store=exp_shm_info,
-                        )
-                        batch_count += 1
+                    with ready_cond:
+                        for exp_id in batch_ids:
+                            ready_events[exp_id] = True
+                        ready_cond.notify_all()
 
-                        with ready_cond:
-                            for exp_id in batch_ids:
-                                ready_events[exp_id] = True
-                            ready_cond.notify_all()
+                    print(f"[TokenizeThread] Batch {batch_count}: {len(batch_ids)} exps ready ({pos}-{end_pos - 1})")
 
-                        print(f"[TokenizeThread] Batch {batch_count}: {len(batch_ids)} exps ready ({pos}-{end_pos - 1})")
+                except Exception as e:
+                    print(f"[TokenizeThread] ERROR batch {batch_count}: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    with ready_cond:
+                        for exp_id in batch_ids:
+                            ready_events[exp_id] = False
+                        ready_cond.notify_all()
 
-                    except Exception as e:
-                        print(f"[TokenizeThread] ERROR batch {batch_count}: {e}")
-                        import traceback
-                        traceback.print_exc()
-                        with ready_cond:
-                            for exp_id in batch_ids:
-                                ready_events[exp_id] = False
-                            ready_cond.notify_all()
+                pos = end_pos
+                time.sleep(0.05)
 
-                    pos = end_pos
-                    time.sleep(0.05)
+            async_write_queue.put(None)
+            print(
+                f"[TokenizeThread] All {n_exp} experiments tokenized in {batch_count} batches ({time.time() - t_start:.1f}s)")
 
-                async_write_queue.put(None)
-                print(
-                    f"[TokenizeThread] All {n_exp} experiments tokenized in {batch_count} batches ({time.time() - t_start:.1f}s)")
-
-            tokenize_thread = threading.Thread(target=tokenize_thread_func, daemon=True)
-            tokenize_thread.start()
+        tokenize_thread = threading.Thread(target=tokenize_thread_func, daemon=True)
+        tokenize_thread.start()
 
         # ── Wait for first batch to be tokenized ────────────────
-        if not pre_packed:
-            first_batch_end = min(num_workers, n_exp)
-            print(f"[DynamicParallel] Waiting for first batch (exp 0-{first_batch_end - 1}) to be tokenized...")
-            wait_start = time.time()
-            last_progress_time = 0
-            while True:
+        first_batch_end = min(num_workers, n_exp)
+        print(f"[DynamicParallel] Waiting for first batch (exp 0-{first_batch_end - 1}) to be tokenized...")
+        wait_start = time.time()
+        last_progress_time = 0
+        while True:
+            with ready_cond:
+                ready_count = sum(1 for i in range(first_batch_end) if ready_events.get(i, False))
+            if ready_count == first_batch_end:
+                break
+            if time.time() - wait_start > 900:
                 with ready_cond:
-                    ready_count = sum(1 for i in range(first_batch_end) if ready_events.get(i, False))
-                if ready_count == first_batch_end:
-                    break
-                if time.time() - wait_start > 900:
-                    with ready_cond:
-                        for i in range(first_batch_end):
-                            status = ready_events.get(i, None)
-                            print(f"[DynamicParallel] Exp {i} status: {status}")
-                    print("[DynamicParallel] TIMEOUT waiting for first batch - check tokenize errors above")
-                    break
-                now = time.time()
-                if now - last_progress_time > 5:
-                    print(f"[DynamicParallel] tokenizing... {ready_count}/{first_batch_end} ready")
-                    last_progress_time = now
-                with ready_cond:
-                    ready_cond.wait(timeout=5.0)
-            print(f"[DynamicParallel] First batch tokenized ({first_batch_end} exps), starting workers")
+                    for i in range(first_batch_end):
+                        status = ready_events.get(i, None)
+                        print(f"[DynamicParallel] Exp {i} status: {status}")
+                print("[DynamicParallel] TIMEOUT waiting for first batch - check tokenize errors above")
+                break
+            now = time.time()
+            if now - last_progress_time > 5:
+                print(f"[DynamicParallel] tokenizing... {ready_count}/{first_batch_end} ready")
+                last_progress_time = now
+            with ready_cond:
+                ready_cond.wait(timeout=5.0)
+        print(f"[DynamicParallel] First batch tokenized ({first_batch_end} exps), starting workers")
 
         # ── 2. Dispatcher Thread (signal-driven, no busy-wait) ────────
         def dispatcher_thread_func():
@@ -2136,10 +2095,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         # ── 5. Wait for completion ───────────────────────────────
         collector_thread.join()
         dispatcher_thread.join()
-        if tokenize_thread is not None:
-            tokenize_thread.join()
-        if async_write_thread is not None:
-            async_write_thread.join()
+        tokenize_thread.join()
+        async_write_thread.join()
 
         for p in worker_processes:
             p.join(timeout=5.0)
@@ -2172,9 +2129,6 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 pass
         if leaked:
             print(f"[SharedMem] Cleaned up {leaked} leaked token blocks")
-
-        if pre_packed:
-            self._exp_shm_info.clear()
 
         return all_results
 
