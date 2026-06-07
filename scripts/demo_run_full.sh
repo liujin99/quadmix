@@ -214,23 +214,20 @@ cat << PARAMS
   ⏱ 预计耗时: ~$(( NUM_EXPERIMENTS / 8 + 1 ))h ($NUM_EXPERIMENTS exp, 8 NPU 并行)
 PARAMS
 
-if [ -z "$CUDA_VISIBLE_DEVICES" ]; then
-    # Check for NPU (Ascend)
-    if command -v npu-smi &> /dev/null; then
-        NPU_DEVICES="${NPU_DEVICES:-8}"
-        DEVICE_ARG="--device-type npu --npu-devices $NPU_DEVICES"
-        echo "  ✓ NPU 已启用 (Ascend, $NPU_DEVICES 卡)"
-    else
-        DEVICE_ARG=""
-        echo "  ⚠ 当前为 CPU 模式，预计耗时 >4 小时！"
-        echo "     建议: CUDA_VISIBLE_DEVICES=0 bash scripts/demo_run_full.sh"
-        echo ""
-        echo "     CPU 试跑: bash scripts/demo_run_cpu.sh  # 快速验证流程"
-        echo ""
-    fi
-else
+if command -v npu-smi &> /dev/null; then
+    NPU_DEVICES="${NPU_DEVICES:-8}"
+    DEVICE_ARG="--device-type npu --npu-devices $NPU_DEVICES"
+    echo "  ✓ NPU 已启用 (Ascend, $NPU_DEVICES 卡)"
+elif [ -n "$CUDA_VISIBLE_DEVICES" ]; then
     DEVICE_ARG="--device-type cuda"
     echo "  ✓ GPU 已启用 (CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES)"
+else
+    DEVICE_ARG=""
+    echo "  ⚠ 当前为 CPU 模式，预计耗时 >4 小时！"
+    echo "     建议: CUDA_VISIBLE_DEVICES=0 bash scripts/demo_run_full.sh"
+    echo ""
+    echo "     CPU 试跑: bash scripts/demo_run_cpu.sh  # 快速验证流程"
+    echo ""
 fi
 
 # Tokenize parallelism: workers × threads_per_worker ≈ num_cpus

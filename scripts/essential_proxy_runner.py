@@ -1107,6 +1107,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             sampled_doc_count: Original sampled doc count (before budget subsampling).
                                Used for metadata. If None, uses len(selected_idx).
         """
+
         from quadmix.core.proxy_model import ProxyModel
         from quadmix.npu.device import DeviceManager, DeviceType
 
@@ -1123,8 +1124,6 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             npu_device_id=self.npu_device_id,
         )
         device = device_mgr.get_device()
-        print(f"  [Exp {experiment_id:04d}] DEBUG: self.device_type={self.device_type!r}, "
-              f"device={device}, device.type={device.type!r}")
 
         # ---- 0. Compute quality ranks (Eq.1+Eq.2) + sample ----
         selected_idx: Optional[np.ndarray] = None
@@ -2458,8 +2457,6 @@ def _worker_dynamic_loop(
             else:
                 mgr = None  # Legacy mode, no sharded metadata needed
 
-        print(f"[Worker {worker_id}] DEBUG: device_type={device_type!r}, "
-              f"config_dict['device_type']={config_dict.get('device_type')!r}")
         runner = EssentialWebProxyRunner(
             config=config_dict["config"],
             metadata_manager=mgr,
