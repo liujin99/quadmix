@@ -9,11 +9,56 @@ This module implements:
 Based on Sections 3.2 and 3.3 of the paper.
 """
 
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 import numpy as np
 import numpy.typing as npt
 from quadmix.core.types import ParameterSet, QuaDMixConfig, ProxyResult
 from quadmix.pipeline.param_sampler import ParameterSampler
+
+
+def _bootstrap_one(
+    seed: int,
+    params_list: List[ParameterSet],
+    losses: npt.NDArray[np.float64],
+    n_features: int,
+    num_domains: int,
+    num_criteria: int,
+    regression_params: dict,
+) -> Optional[Tuple[float, "RegressionModel"]]:
+    n_total = len(params_list)
+    rng = np.random.default_rng(seed)
+    idx = rng.choice(n_total, size=n_total, replace=True)
+    unique_idx = np.unique(idx)
+
+    oob_mask = np.ones(n_total, dtype=bool)
+    oob_mask[unique_idx] = False
+    oob_idx = np.where(oob_mask)[0]
+
+    if len(unique_idx) < max(10, n_features // 2) or len(oob_idx) < 5:
+        return None
+
+    boot_train_params = [params_list[j] for j in idx]
+    boot_train_losses = losses[idx]
+    oob_params = [params_list[j] for j in oob_idx]
+    oob_losses = losses[oob_idx]
+
+    try:
+        model = RegressionModel(
+            model_type="lightgbm",
+            **regression_params,
+        )
+        model.fit(
+            boot_train_params,
+            boot_train_losses,
+            num_domains=num_domains,
+            num_criteria=num_criteria,
+            eval_params_list=oob_params,
+            eval_losses=oob_losses,
+        )
+        r2 = float(model.score(oob_params, oob_losses))
+        return (r2, model)
+    except Exception:
+        return None
 
 
 class RegressionModel:
@@ -354,46 +399,33 @@ class QuaDMixOptimizer:
         else:
             n_bootstrap = 500
         n_ensemble = min(50, n_bootstrap // 4)
-        rng = np.random.default_rng(42)
+
+        print(f"[QuaDMixOptimizer] Bootstrap: {n_bootstrap} iterations (parallel, full resampling, OOB evaluation)...")
+        from joblib import Parallel, delayed
+        import os
+        n_jobs = min(os.cpu_count() or 4, n_bootstrap)
+        seeds = np.random.default_rng(42).integers(0, 2**31, size=n_bootstrap).tolist()
+
+        results = Parallel(n_jobs=n_jobs, prefer="threads")(
+            delayed(_bootstrap_one)(
+                seed=int(seeds[i]),
+                params_list=params_list,
+                losses=losses,
+                n_features=n_features,
+                num_domains=self.config.num_domains,
+                num_criteria=self.config.num_quality_criteria,
+                regression_params=self.regression_params,
+            )
+            for i in range(n_bootstrap)
+        )
+
         bootstrap_r2s = []
-
-        print(f"[QuaDMixOptimizer] Bootstrap: {n_bootstrap} iterations (full resampling, OOB evaluation)...")
-        for i in range(n_bootstrap):
-            idx = rng.choice(n_total, size=n_total, replace=True)
-            unique_idx = np.unique(idx)
-
-            oob_mask = np.ones(n_total, dtype=bool)
-            oob_mask[unique_idx] = False
-            oob_idx = np.where(oob_mask)[0]
-
-            if len(unique_idx) < max(10, n_features // 2) or len(oob_idx) < 5:
-                continue
-
-            boot_train_params = [params_list[j] for j in idx]
-            boot_train_losses = losses[idx]
-            oob_params = [params_list[j] for j in oob_idx]
-            oob_losses = losses[oob_idx]
-
-            try:
-                model = RegressionModel(
-                    model_type="lightgbm",
-                    **self.regression_params,
-                )
-                model.fit(
-                    boot_train_params,
-                    boot_train_losses,
-                    num_domains=self.config.num_domains,
-                    num_criteria=self.config.num_quality_criteria,
-                    eval_params_list=oob_params,
-                    eval_losses=oob_losses,
-                )
-                r2 = float(model.score(oob_params, oob_losses))
+        for res in results:
+            if res is not None:
+                r2, model = res
                 bootstrap_r2s.append(r2)
-
                 if len(self._bootstrap_models) < n_ensemble:
                     self._bootstrap_models.append(model)
-            except Exception:
-                continue
 
         if len(bootstrap_r2s) < 10:
             print(f"[QuaDMixOptimizer] ⚠️  Bootstrap failed ({len(bootstrap_r2s)} valid < 10), skip all")
