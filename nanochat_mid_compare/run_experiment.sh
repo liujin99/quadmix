@@ -8,12 +8,12 @@
 #   2. Random subset from essential-web (token-count aligned)
 #
 # Usage:
-#   bash experiments/nanochat_compare/run_experiment.sh
+#   bash nanochat_mid_compare/run_experiment.sh
 #
 # Or override config via environment variables:
 #   QUADMIX_DATASET=/path/to/sampled_dataset.parquet \
 #   ESSENTIAL_WEB_DIR=/path/to/essential-web-v1 \
-#   bash experiments/nanochat_compare/run_experiment.sh
+#   bash nanochat_mid_compare/run_experiment.sh
 #
 # ──────────────────────────────────────────────────────────────
 
@@ -39,7 +39,7 @@ BASE_MODEL_TAG="${BASE_MODEL_TAG:-d24_0320}"
 NANOCHAT_ROOT="${NANOCHAT_ROOT:-$HOME/nanochat-npu}"
 
 # Experiment output directory
-EXPERIMENT_DIR="${EXPERIMENT_DIR:-$(cd "$(dirname "$0")/../.." && pwd)/experiments/nanochat_compare/results/$(date +%Y%m%d_%H%M%S)}"
+EXPERIMENT_DIR="${EXPERIMENT_DIR:-$(cd "$(dirname "$0")/.." && pwd)/nanochat_mid_compare/results/$(date +%Y%m%d_%H%M%S)}"
 
 # Mid-training hyperparameters
 TARGET_PARAM_DATA_RATIO="${TARGET_PARAM_DATA_RATIO:-0.1}"

@@ -7,8 +7,9 @@
 ```bash
 QUADMIX_DATASET=/path/to/quadmix/result/sampled_dataset.parquet \
 ESSENTIAL_WEB_DIR=/path/to/essential-web-v1 \
+NANOCHAT_BASE_DIR=/path/to/.cache/nanochat \
 NANOCHAT_ROOT=/path/to/nanochat-npu \
-bash experiments/nanochat_compare/run_experiment.sh
+bash nanochat_mid_compare/run_experiment.sh
 ```
 
 ## Configuration
@@ -50,7 +51,7 @@ bash experiments/nanochat_compare/run_experiment.sh
 ## Output Structure
 
 ```
-experiments/nanochat_compare/results/<timestamp>/
+nanochat_mid_compare/results/<timestamp>/
 ├── data/
 │   ├── quadmix_data/          # QuadMix 子集 (sharded parquet)
 │   ├── random_data/           # 随机基线 (sharded parquet)
