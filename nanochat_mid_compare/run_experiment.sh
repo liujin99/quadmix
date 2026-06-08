@@ -59,7 +59,9 @@ TARGET_PARAM_DATA_RATIO="${TARGET_PARAM_DATA_RATIO:-0.1}"
 DEVICE_BATCH_SIZE="${DEVICE_BATCH_SIZE:-8}"
 NUM_NPU="${NUM_NPU:-8}"
 CORE_METRIC_EVERY="${CORE_METRIC_EVERY:-500}"
-EVAL_EVERY="${EVAL_EVERY:-100}"
+# Val BPB disabled by default (-1) because QuadMix and Random use different data,
+# so their val sets are not comparable. Use CORE metric for comparison instead.
+EVAL_EVERY="${EVAL_EVERY:--1}"
 
 # Data preparation
 SHARD_SIZE="${SHARD_SIZE:-10000}"

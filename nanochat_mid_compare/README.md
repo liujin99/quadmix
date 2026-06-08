@@ -26,7 +26,8 @@ bash nanochat_mid_compare/run_experiment.sh
 | `DEVICE_BATCH_SIZE` | 每卡 batch size | `8` |
 | `NUM_NPU` | NPU 卡数 | `8` |
 | `SHARD_SIZE` | 输出 parquet 每 shard 文档数 | `10000` |
-| `VAL_RATIO` | 验证集比例 | `0.05` |
+| `VAL_RATIO` | 验证集比例 (val BPB 默认禁用，仅用于 dataloader 兼容) | `0.05` |
+| `EVAL_EVERY` | val BPB 评估间隔 (-1 = 禁用，因两组数据 val 不可比) | `-1` |
 | `SEED` | 随机种子 | `42` |
 | `MAX_RANDOM_SCAN` | 随机抽样扫描的最大 shard 数 | `500` |
 
