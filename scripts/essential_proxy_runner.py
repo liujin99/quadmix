@@ -43,7 +43,7 @@ from quadmix.pipeline.proxy_runner import BaseProxyRunner
 from preprocess_essential_web_v1_sharded import DOMAIN_MAP, FASTTEXT_FIELDS
 
 
-def chunked_loss_from_hidden(model, hidden, targets, chunk_size=512):
+def chunked_loss_from_hidden(model, hidden, targets, chunk_size=2048):
     """Compute CE loss chunk-by-chunk from hidden states, never materializing full logits.
 
     hidden: (B, T, C) from model.forward(return_hidden=True)
@@ -65,7 +65,7 @@ def chunked_loss_from_hidden(model, hidden, targets, chunk_size=512):
     return total_loss / n_tokens
 
 
-def chunked_loss_per_token_from_hidden(model, hidden, targets, chunk_size=512):
+def chunked_loss_per_token_from_hidden(model, hidden, targets, chunk_size=2048):
     """Same as chunked_loss_from_hidden but returns per-token losses (reduction='none')."""
     B, T, _ = hidden.shape
     V = model.config.vocab_size
