@@ -49,13 +49,12 @@ MID_CHECKPOINTS_OUTPUT_DIR="${MID_CHECKPOINTS_OUTPUT_DIR:-}"
 EXPERIMENT_DIR="${EXPERIMENT_DIR:-$(cd "$(dirname "$0")" && pwd)/results/$(date +%Y%m%d_%H%M%S)}"
 
 # ── Mid-training hyperparameters ──
-# target-param-data-ratio: controls training token budget
-#   tokens = ratio * num_scaling_params
-#   d24 model: ~500M scaling params
-#   ratio=0.1 -> ~50M tokens (~95 steps)  [quick comparison]
-#   ratio=1.0 -> ~500M tokens (~950 steps) [thorough comparison]
-#   ratio=10.0 -> ~5B tokens (~9500 steps) [full mid-training]
+# Training token budget: min(target_ratio * num_scaling_params, dataset_tokens)
+# - If data < ratio * params: use all data (1 epoch, no overfitting)
+# - If data > ratio * params: cap at ratio * params (no over-training)
+# d24 model: num_scaling_params (total) ≈ 1.3B
 TARGET_PARAM_DATA_RATIO="${TARGET_PARAM_DATA_RATIO:-0.1}"
+NUM_SCALING_PARAMS="${NUM_SCALING_PARAMS:-1300000000}"  # d24 ≈ 1.3B
 DEVICE_BATCH_SIZE="${DEVICE_BATCH_SIZE:-8}"
 NUM_NPU="${NUM_NPU:-8}"
 CORE_METRIC_EVERY="${CORE_METRIC_EVERY:-500}"
@@ -214,6 +213,7 @@ fi
 echo ""
 echo "  Mid-training config:"
 echo "    target-param-data-ratio: $TARGET_PARAM_DATA_RATIO"
+echo "    num-scaling-params:      $NUM_SCALING_PARAMS"
 echo "    device-batch-size:       $DEVICE_BATCH_SIZE"
 echo "    NPU cards:               $NUM_NPU"
 echo ""
@@ -309,11 +309,22 @@ run_mid_training() {
     local MODEL_TAG="$2"
     local RUN_NAME="$3"
     local LOG_FILE="$4"
+    local DATASET_TOKENS="$5"
+
+    local TOTAL_BATCH_SIZE=524288
+    local TARGET_TOKENS=$(python3 -c "print(int($TARGET_PARAM_DATA_RATIO * $NUM_SCALING_PARAMS))")
+    local ACTUAL_TOKENS=$(python3 -c "print(min($TARGET_TOKENS, $DATASET_TOKENS))")
+    local NUM_ITERATIONS=$((ACTUAL_TOKENS / TOTAL_BATCH_SIZE))
+    local ACTUAL_RATIO=$(python3 -c "print(f'{$ACTUAL_TOKENS / $NUM_SCALING_PARAMS:.4f}')")
 
     echo "  Starting mid-training: $RUN_NAME"
     echo "    Data:       $DATA_PATH"
     echo "    Source:     $BASE_MODEL_TAG (base)"
     echo "    Save as:    $MODEL_TAG (mid)"
+    echo "    Dataset:    $DATASET_TOKENS tokens"
+    echo "    Target:     $TARGET_TOKENS tokens (ratio=$TARGET_PARAM_DATA_RATIO)"
+    echo "    Actual:     $ACTUAL_TOKENS tokens (ratio=$ACTUAL_RATIO)"
+    echo "    Steps:      $NUM_ITERATIONS"
     echo "    Log:        $LOG_FILE"
 
     local BASE_CKPT_DIR="$NANOCHAT_BASE_DIR/base_checkpoints/$BASE_MODEL_TAG"
@@ -326,7 +337,8 @@ run_mid_training() {
 
     cd "$NANOCHAT_ROOT"
     torchrun --standalone --nproc_per_node="$NUM_NPU" -m scripts.mid_train -- \
-        --target-param-data-ratio="$TARGET_PARAM_DATA_RATIO" \
+        --num-iterations="$NUM_ITERATIONS" \
+        --target-param-data-ratio="$ACTUAL_RATIO" \
         --device-batch-size="$DEVICE_BATCH_SIZE" \
         --run="$RUN_NAME" \
         --model-tag="$MODEL_TAG" \
@@ -341,12 +353,16 @@ run_mid_training() {
     fi
 }
 
+STATS_FILE="$DATA_DIR/dataset_stats.json"
+QUADMIX_TOKENS=$(python3 -c "import json; print(json.load(open('$STATS_FILE'))['quadmix']['tokens'])")
+RANDOM_TOKENS=$(python3 -c "import json; print(json.load(open('$STATS_FILE'))['random']['tokens'])")
+
 echo ""
 echo "╔══ Step 3a: Mid-training on QuadMix data ══╗"
 echo ""
 
 QUADMIX_LOG="$EXPERIMENT_DIR/mid_train_quadmix.log"
-run_mid_training "$QUADMIX_DATA" "$QUADMIX_MODEL_TAG" "quadmix_mid" "$QUADMIX_LOG"
+run_mid_training "$QUADMIX_DATA" "$QUADMIX_MODEL_TAG" "quadmix_mid" "$QUADMIX_LOG" "$QUADMIX_TOKENS"
 
 echo ""
 echo "╚════════════════════════════════════════════╝"
@@ -357,7 +373,7 @@ echo "╔══ Step 3b: Mid-training on Random data ══╗"
 echo ""
 
 RANDOM_LOG="$EXPERIMENT_DIR/mid_train_random.log"
-run_mid_training "$RANDOM_DATA" "$RANDOM_MODEL_TAG" "random_mid" "$RANDOM_LOG"
+run_mid_training "$RANDOM_DATA" "$RANDOM_MODEL_TAG" "random_mid" "$RANDOM_LOG" "$RANDOM_TOKENS"
 
 echo ""
 echo "╚═══════════════════════════════════════════╝"

@@ -22,7 +22,8 @@ bash nanochat_mid_compare/run_experiment.sh
 | `NANOCHAT_ROOT` | nanochat-npu 仓库根目录 | `~/nanochat-npu` |
 | `BASE_MODEL_TAG` | 预训练 base model tag (两组实验共享) | `d24_0320` |
 | `MID_CHECKPOINTS_OUTPUT_DIR` | mid-training 训练完成后 checkpoint 保存目录 (避免 EVS 空间不足) | `$NANOCHAT_BASE_DIR/mid_checkpoints` |
-| `TARGET_PARAM_DATA_RATIO` | mid-training 数据/参数比 (见下方说明) | `0.1` |
+| `TARGET_PARAM_DATA_RATIO` | 目标 tokens/params 比例 (自动 cap 防止过度训练) | `0.1` |
+| `NUM_SCALING_PARAMS` | 模型 scaling params 数量 (d24 ≈ 1.3B) | `1300000000` |
 | `DEVICE_BATCH_SIZE` | 每卡 batch size | `8` |
 | `NUM_NPU` | NPU 卡数 | `8` |
 | `SHARD_SIZE` | 输出 parquet 每 shard 文档数 | `10000` |
@@ -31,19 +32,29 @@ bash nanochat_mid_compare/run_experiment.sh
 | `SEED` | 随机种子 | `42` |
 | `MAX_RANDOM_SCAN` | 随机抽样扫描的最大 shard 数 | `500` |
 
-## target-param-data-ratio 说明
+## Token Budget 计算策略
 
-控制 mid-training 的 token budget：`tokens = ratio × num_scaling_params`
+训练 token 数取 `min(target_ratio * num_scaling_params, dataset_tokens)`：
 
-d24 模型约 500M scaling params：
+```
+target_tokens = TARGET_PARAM_DATA_RATIO * NUM_SCALING_PARAMS
+actual_tokens = min(target_tokens, dataset_tokens)
+num_iterations = actual_tokens / total_batch_size (524288)
+```
 
-| ratio | tokens | steps (batch=524K) | 适用场景 |
-|-------|--------|-------------------|----------|
-| 0.1 | ~50M | ~95 | 快速对比 |
-| 1.0 | ~500M | ~950 | 较充分对比 |
-| 10.0 | ~5B | ~9500 | 完整 mid-training |
+**两种情况**：
+- **数据稀缺** (data < target): 用全部数据（1 epoch），不重复训练
+- **数据充足** (data > target): 按 ratio 截断，不过度训练
 
-建议先用 `0.1` 快速验证流程，再用 `1.0` 做正式对比。
+**d24 模型示例** (num_scaling_params ≈ 1.3B, ratio=0.1):
+
+| 数据集大小 | target_tokens | actual_tokens | steps | 说明 |
+|-----------|---------------|---------------|-------|------|
+| 50M | 130M | 50M | ~95 | 数据稀缺，全量训练 |
+| 130M | 130M | 130M | ~248 | 刚好匹配 |
+| 300M | 130M | 130M | ~248 | 数据充足，截断训练 |
+
+如需训练更多数据，增大 `TARGET_PARAM_DATA_RATIO`（如 0.23 可用 300M tokens）。
 
 ## Prerequisites
 
