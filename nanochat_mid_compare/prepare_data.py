@@ -24,12 +24,28 @@ import argparse
 import random
 import json
 import pickle
+import multiprocessing as mp
 import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 from pathlib import Path
 from tqdm import tqdm
+
+
+_worker_tokenizer = None
+
+
+def _init_worker(tokenizer_pkl_path):
+    global _worker_tokenizer
+    with open(tokenizer_pkl_path, "rb") as f:
+        _worker_tokenizer = pickle.load(f)
+
+
+def _worker_encode_batch(texts):
+    if hasattr(_worker_tokenizer, "encode_ordinary_batch"):
+        return [len(ids) for ids in _worker_tokenizer.encode_ordinary_batch(texts, num_threads=2)]
+    return [len(_worker_tokenizer.encode_ordinary(t)) for t in texts]
 
 
 def load_tokenizer(tokenizer_pkl_path):
@@ -46,35 +62,30 @@ def load_tokenizer(tokenizer_pkl_path):
         return None
 
 
-def count_tokens_batch(texts, enc, batch_size=2000, num_threads=8):
-    counts = []
-    for i in range(0, len(texts), batch_size):
-        batch = texts[i:i + batch_size]
-        if hasattr(enc, "encode_ordinary_batch"):
-            encoded = enc.encode_ordinary_batch(batch, num_threads=num_threads)
-        else:
-            encoded = [enc.encode_ordinary(t) for t in batch]
-        counts.extend(len(ids) for ids in encoded)
-    return counts
+def count_tokens_mp(texts, tokenizer_pkl_path, num_workers=None, chunk_size=500):
+    if num_workers is None:
+        num_workers = min(mp.cpu_count(), 16)
+    chunks = [texts[i:i + chunk_size] for i in range(0, len(texts), chunk_size)]
+    with mp.Pool(num_workers, initializer=_init_worker, initargs=(tokenizer_pkl_path,)) as pool:
+        results = list(tqdm(
+            pool.imap(_worker_encode_batch, chunks),
+            total=len(chunks),
+            desc=f"  Tokenizing ({num_workers} workers)",
+        ))
+    return [c for batch in results for c in batch]
 
 
 def estimate_tokens(text):
     return len(text) // 4
 
 
-def read_essential_web_shard(shard_path, enc=None):
+def read_essential_web_shard_fast(shard_path):
     df = pq.read_table(shard_path).to_pandas()
     texts = df["text"].tolist() if "text" in df.columns else []
     valid_texts = [t for t in texts if t and len(t) >= 100]
-    if not valid_texts:
-        return []
-    if enc:
-        token_counts = count_tokens_batch(valid_texts, enc)
-    else:
-        token_counts = [estimate_tokens(t) for t in valid_texts]
     return [
-        {"text": t, "char_count": len(t), "token_count": tc}
-        for t, tc in zip(valid_texts, token_counts)
+        {"text": t, "char_count": len(t), "token_count": len(t) // 4}
+        for t in valid_texts
     ]
 
 
@@ -103,6 +114,8 @@ def main():
                         help="Random seed for reproducibility")
     parser.add_argument("--max-random-scan", type=int, default=500,
                         help="Max number of essential-web shards to scan for random baseline (default: 500)")
+    parser.add_argument("--num-workers", type=int, default=None,
+                        help="Number of parallel workers for tokenization (default: min(cpu_count, 16))")
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -127,8 +140,8 @@ def main():
     texts = quadmix_df["text"].tolist()
     valid_texts = [t for t in texts if t and len(t) >= 100]
     print(f"  Counting tokens for {len(valid_texts):,} docs...")
-    if enc:
-        token_counts = count_tokens_batch(valid_texts, enc)
+    if enc and args.tokenizer_pkl:
+        token_counts = count_tokens_mp(valid_texts, args.tokenizer_pkl, num_workers=args.num_workers)
     else:
         token_counts = [estimate_tokens(t) for t in valid_texts]
     quadmix_docs = [
@@ -143,11 +156,11 @@ def main():
     print(f"\n[2/5] Scanning essential-web shards for random sampling...")
     shard_files = sorted(Path(args.essential_web_dir).glob("shard_*.parquet"))
     shard_files = shard_files[:args.max_random_scan]
-    print(f"  Scanning {len(shard_files)} shards...")
+    print(f"  Scanning {len(shard_files)} shards (using char-based estimate)...")
 
     all_candidates = []
     for sf in tqdm(shard_files, desc="  Reading shards"):
-        docs = read_essential_web_shard(str(sf), enc)
+        docs = read_essential_web_shard_fast(str(sf))
         all_candidates.extend(docs)
 
     print(f"  Total candidate docs: {len(all_candidates):,}")
@@ -161,6 +174,14 @@ def main():
             break
         random_docs.append(doc)
         accumulated_tokens += doc["token_count"]
+
+    if enc and args.tokenizer_pkl:
+        print(f"  Re-counting tokens for {len(random_docs):,} selected docs (exact)...")
+        random_texts = [d["text"] for d in random_docs]
+        exact_counts = count_tokens_mp(random_texts, args.tokenizer_pkl, num_workers=args.num_workers)
+        for doc, tc in zip(random_docs, exact_counts):
+            doc["token_count"] = tc
+        accumulated_tokens = sum(d["token_count"] for d in random_docs)
 
     print(f"  Random docs: {len(random_docs):,}")
     print(f"  Tokens ({token_method}): {accumulated_tokens:,}")
