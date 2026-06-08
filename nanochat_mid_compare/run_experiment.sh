@@ -131,6 +131,7 @@ fi
 # ══════════════════════════════════════════════════════════════
 
 export OMP_NUM_THREADS=1
+export WANDB_MODE=offline
 export NANOCHAT_BASE_DIR
 mkdir -p "$NANOCHAT_BASE_DIR"
 

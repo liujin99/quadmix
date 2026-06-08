@@ -214,12 +214,13 @@ def main():
     random.shuffle(all_candidates)
     selected = []
     accumulated_tokens = 0
+    target_with_buffer = int(total_tokens * 1.1)
     for shard_id, doc_id, est_tokens in all_candidates:
-        if accumulated_tokens >= total_tokens:
+        if accumulated_tokens >= target_with_buffer:
             break
         selected.append((shard_id, doc_id))
         accumulated_tokens += est_tokens
-    print(f"  Selected {len(selected):,} docs (estimated ~{accumulated_tokens:,} tokens)")
+    print(f"  Selected {len(selected):,} docs (estimated ~{accumulated_tokens:,} tokens, with 10% buffer)")
 
     print(f"\n[3.5/5] Reading selected documents...")
     random_docs = read_selected_docs(shard_files, selected, num_workers=args.num_workers)
@@ -231,6 +232,19 @@ def main():
         for doc, tc in zip(random_docs, exact_counts):
             doc["token_count"] = tc
         accumulated_tokens = sum(d["token_count"] for d in random_docs)
+        print(f"  Exact tokens before trim: {accumulated_tokens:,} (target: {total_tokens:,})")
+
+        if accumulated_tokens > total_tokens:
+            trimmed = []
+            trim_tokens = 0
+            for doc in random_docs:
+                if trim_tokens + doc["token_count"] > total_tokens:
+                    break
+                trimmed.append(doc)
+                trim_tokens += doc["token_count"]
+            print(f"  Trimmed {len(random_docs) - len(trimmed):,} docs to match target")
+            random_docs = trimmed
+            accumulated_tokens = trim_tokens
 
     print(f"  Random docs: {len(random_docs):,}")
     print(f"  Tokens ({token_method}): {accumulated_tokens:,}")
