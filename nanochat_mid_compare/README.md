@@ -21,7 +21,7 @@ bash nanochat_mid_compare/run_experiment.sh
 | `NANOCHAT_BASE_DIR` | nanochat 基础目录 (含 tokenizer/, base_checkpoints/) | `~/.cache/nanochat` |
 | `NANOCHAT_ROOT` | nanochat-npu 仓库根目录 | `~/nanochat-npu` |
 | `BASE_MODEL_TAG` | 预训练 base model tag (两组实验共享) | `d24_0320` |
-| `MID_CHECKPOINTS_DIR` | mid-training checkpoint 输出目录 (避免 EVS 空间不足) | `$NANOCHAT_BASE_DIR/mid_checkpoints` |
+| `MID_CHECKPOINTS_OUTPUT_DIR` | mid-training 训练完成后 checkpoint 保存目录 (避免 EVS 空间不足) | `$NANOCHAT_BASE_DIR/mid_checkpoints` |
 | `TARGET_PARAM_DATA_RATIO` | mid-training 数据/参数比 (见下方说明) | `0.1` |
 | `DEVICE_BATCH_SIZE` | 每卡 batch size | `8` |
 | `NUM_NPU` | NPU 卡数 | `8` |
@@ -63,7 +63,7 @@ nanochat-npu 的 `scripts/mid_train.py` 需要添加 `--source-model-tag` 参数
    ├── 共享验证集 (从 QuadMix 子集中抽取)
    └── 输出两组 sharded parquet (text column only)
 
-2. 设置 mid_checkpoints 目录 (可选 symlink 到大容量存储)
+2. 设置 checkpoint 输出目录 (可选 symlink 到大容量存储，通过 MID_CHECKPOINTS_OUTPUT_DIR)
 
 3. 分别运行 nanochat mid-training
    ├── 从 BASE_MODEL_TAG 加载 base model (--source-model-tag)
@@ -93,4 +93,4 @@ nanochat_mid_compare/results/<timestamp>/
 - 两组实验共享同一验证集，确保对比公平
 - mid-training 从同一 base model checkpoint 出发 (`--source-model-tag`)
 - 不复制 base checkpoint，节省磁盘空间
-- `MID_CHECKPOINTS_DIR` 可指向大容量存储，通过 symlink 挂载
+- `MID_CHECKPOINTS_OUTPUT_DIR` 可指向大容量存储，训练完成后 checkpoint 保存在此

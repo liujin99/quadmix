@@ -39,10 +39,11 @@ BASE_MODEL_TAG="${BASE_MODEL_TAG:-d24_0320}"
 # Nanochat repo root
 NANOCHAT_ROOT="${NANOCHAT_ROOT:-$HOME/nanochat-npu}"
 
-# Mid-training checkpoint output directory
-# mid_checkpoints will be symlinked here to avoid filling up EVS storage
+# Mid-training checkpoint output directory (where trained models are saved)
+# If set, $NANOCHAT_BASE_DIR/mid_checkpoints will be symlinked here
+# to avoid filling up EVS storage with large checkpoint files
 # Default: $NANOCHAT_BASE_DIR/mid_checkpoints (no symlink)
-MID_CHECKPOINTS_DIR="${MID_CHECKPOINTS_DIR:-}"
+MID_CHECKPOINTS_OUTPUT_DIR="${MID_CHECKPOINTS_OUTPUT_DIR:-}"
 
 # Experiment output directory (logs, data, etc.)
 EXPERIMENT_DIR="${EXPERIMENT_DIR:-$(cd "$(dirname "$0")/.." && pwd)/nanochat_mid_compare/results/$(date +%Y%m%d_%H%M%S)}"
@@ -67,8 +68,8 @@ SEED="${SEED:-42}"
 MAX_RANDOM_SCAN="${MAX_RANDOM_SCAN:-500}"
 
 # Mid-training model tags (auto-generated if empty)
-# --source-model-tag = BASE_MODEL_TAG (load base from here)
-# --model-tag = QUADMIX_MODEL_TAG / RANDOM_MODEL_TAG (save mid-trained here)
+# --source-model-tag = BASE_MODEL_TAG (load base model weights from here)
+# --model-tag = QUADMIX_MODEL_TAG / RANDOM_MODEL_TAG (save mid-trained checkpoint to here)
 QUADMIX_MODEL_TAG="${QUADMIX_MODEL_TAG:-}"
 RANDOM_MODEL_TAG="${RANDOM_MODEL_TAG:-}"
 
@@ -203,8 +204,8 @@ echo "  Nanochat base dir:   $NANOCHAT_BASE_DIR"
 echo "  Nanochat repo:       $NANOCHAT_ROOT"
 echo "  Base model tag:      $BASE_MODEL_TAG (source for both runs)"
 echo "  Experiment output:   $EXPERIMENT_DIR"
-if [ -n "$MID_CHECKPOINTS_DIR" ]; then
-    echo "  Mid checkpoints:    $MID_CHECKPOINTS_DIR"
+if [ -n "$MID_CHECKPOINTS_OUTPUT_DIR" ]; then
+    echo "  Mid checkpoint output: $MID_CHECKPOINTS_OUTPUT_DIR"
 fi
 echo ""
 echo "  Mid-training config:"
@@ -267,12 +268,12 @@ echo ""
 #  STEP 2: SETUP MID_CHECKPOINTS DIRECTORY
 # ══════════════════════════════════════════════════════════════
 
-if [ -n "$MID_CHECKPOINTS_DIR" ]; then
+if [ -n "$MID_CHECKPOINTS_OUTPUT_DIR" ]; then
     echo ""
-    echo "╔══ Step 2: Setup mid_checkpoints directory ══╗"
+    echo "╔══ Step 2: Setup mid-training checkpoint output directory ══╗"
     echo ""
 
-    mkdir -p "$MID_CHECKPOINTS_DIR"
+    mkdir -p "$MID_CHECKPOINTS_OUTPUT_DIR"
     LINK_PATH="$NANOCHAT_BASE_DIR/mid_checkpoints"
 
     if [ -L "$LINK_PATH" ]; then
@@ -281,12 +282,13 @@ if [ -n "$MID_CHECKPOINTS_DIR" ]; then
         echo "  WARNING: $LINK_PATH exists as a directory (not a symlink)."
         echo "  Skipping symlink creation. Mid checkpoints will be saved here."
     else
-        echo "  Creating symlink: $LINK_PATH -> $MID_CHECKPOINTS_DIR"
-        ln -s "$MID_CHECKPOINTS_DIR" "$LINK_PATH"
+        echo "  Mid-training checkpoints will be saved to: $MID_CHECKPOINTS_OUTPUT_DIR"
+        echo "  Creating symlink: $LINK_PATH -> $MID_CHECKPOINTS_OUTPUT_DIR"
+        ln -s "$MID_CHECKPOINTS_OUTPUT_DIR" "$LINK_PATH"
     fi
 
     echo ""
-    echo "╚═════════════════════════════════════════════╝"
+    echo "╚════════════════════════════════════════════════════════════╝"
     echo ""
 fi
 
@@ -381,7 +383,7 @@ echo ""
 #  STEP 5: SUMMARY
 # ══════════════════════════════════════════════════════════════
 
-MID_CKPT_ACTUAL="${MID_CHECKPOINTS_DIR:-$NANOCHAT_BASE_DIR/mid_checkpoints}"
+MID_CKPT_ACTUAL="${MID_CHECKPOINTS_OUTPUT_DIR:-$NANOCHAT_BASE_DIR/mid_checkpoints}"
 
 echo ""
 echo "════════════════════════════════════════════════════════════"
