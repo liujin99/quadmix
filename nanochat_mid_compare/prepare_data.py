@@ -25,7 +25,6 @@ import random
 import json
 import pickle
 import multiprocessing as mp
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 import pandas as pd
 import pyarrow as pa
@@ -91,14 +90,13 @@ def _scan_shard_metadata(shard_path):
 
 def scan_shards_metadata(shard_paths, num_workers=None):
     if num_workers is None:
-        num_workers = min(mp.cpu_count(), 64)
-    with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        futures = {executor.submit(_scan_shard_metadata, str(p)): i for i, p in enumerate(shard_paths)}
-        results = [None] * len(shard_paths)
-        for future in tqdm(as_completed(futures), total=len(futures),
-                          desc=f"  Scanning metadata ({num_workers} threads)"):
-            idx = futures[future]
-            results[idx] = future.result()
+        num_workers = min(mp.cpu_count() // 4, 32) or 1
+    with mp.Pool(num_workers) as pool:
+        results = list(tqdm(
+            pool.imap(_scan_shard_metadata, [str(p) for p in shard_paths]),
+            total=len(shard_paths),
+            desc=f"  Scanning metadata ({num_workers} processes)",
+        ))
     return results
 
 
@@ -114,18 +112,18 @@ def _read_docs_from_shard(args):
 
 def read_selected_docs(shard_paths, selections, num_workers=None):
     if num_workers is None:
-        num_workers = min(mp.cpu_count(), 64)
+        num_workers = min(mp.cpu_count() // 4, 32) or 1
     shard_to_docs = {}
     for shard_id, doc_id in selections:
         if shard_id not in shard_to_docs:
             shard_to_docs[shard_id] = []
         shard_to_docs[shard_id].append(doc_id)
     tasks = [(str(shard_paths[sid]), indices) for sid, indices in shard_to_docs.items()]
-    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+    with mp.Pool(num_workers) as pool:
         results = list(tqdm(
-            executor.map(_read_docs_from_shard, tasks),
+            pool.imap(_read_docs_from_shard, tasks),
             total=len(tasks),
-            desc=f"  Reading selected docs ({num_workers} threads)",
+            desc=f"  Reading selected docs ({num_workers} processes)",
         ))
     return [doc for shard_docs in results for doc in shard_docs]
 
