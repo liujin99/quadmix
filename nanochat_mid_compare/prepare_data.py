@@ -25,6 +25,8 @@ import random
 import json
 import pickle
 import multiprocessing as mp
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 import pandas as pd
 import pyarrow as pa
@@ -69,7 +71,7 @@ def count_tokens_mp(texts, tokenizer_pkl_path, num_workers=None):
     chunks = [texts[i:i + chunk_size] for i in range(0, len(texts), chunk_size)]
     with mp.Pool(num_workers, initializer=_init_worker, initargs=(tokenizer_pkl_path,)) as pool:
         results = list(tqdm(
-            pool.imap(_worker_encode_batch, chunks),
+            pool.imap_unordered(_worker_encode_batch, chunks, chunksize=1),
             total=len(chunks),
             desc=f"  Tokenizing ({num_workers} processes x 4 rust threads)",
         ))
@@ -90,20 +92,21 @@ def _scan_shard_metadata(shard_path):
 
 def scan_shards_metadata(shard_paths, num_workers=None):
     if num_workers is None:
-        num_workers = min(mp.cpu_count() // 4, 32) or 1
-    with mp.Pool(num_workers) as pool:
-        results = list(tqdm(
-            pool.imap(_scan_shard_metadata, [str(p) for p in shard_paths]),
-            total=len(shard_paths),
-            desc=f"  Scanning metadata ({num_workers} processes)",
-        ))
+        num_workers = min(mp.cpu_count(), 64)
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = {executor.submit(_scan_shard_metadata, str(p)): i for i, p in enumerate(shard_paths)}
+        results = [None] * len(shard_paths)
+        for future in tqdm(as_completed(futures), total=len(futures),
+                          desc=f"  Scanning metadata ({num_workers} threads)"):
+            idx = futures[future]
+            results[idx] = future.result()
     return results
 
 
 def _read_docs_from_shard(args):
     shard_path, doc_indices = args
-    df = pq.read_table(shard_path).to_pandas()
-    texts = df["text"].tolist()
+    table = pq.read_table(shard_path, columns=["text"])
+    texts = table["text"].to_pylist()
     return [
         {"text": texts[i], "char_count": len(texts[i]), "token_count": len(texts[i]) // 4}
         for i in doc_indices
@@ -112,19 +115,20 @@ def _read_docs_from_shard(args):
 
 def read_selected_docs(shard_paths, selections, num_workers=None):
     if num_workers is None:
-        num_workers = min(mp.cpu_count() // 4, 32) or 1
+        num_workers = min(mp.cpu_count(), 64)
     shard_to_docs = {}
     for shard_id, doc_id in selections:
         if shard_id not in shard_to_docs:
             shard_to_docs[shard_id] = []
         shard_to_docs[shard_id].append(doc_id)
     tasks = [(str(shard_paths[sid]), indices) for sid, indices in shard_to_docs.items()]
-    with mp.Pool(num_workers) as pool:
-        results = list(tqdm(
-            pool.imap(_read_docs_from_shard, tasks),
-            total=len(tasks),
-            desc=f"  Reading selected docs ({num_workers} processes)",
-        ))
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = {executor.submit(_read_docs_from_shard, task): i for i, task in enumerate(tasks)}
+        results = [None] * len(tasks)
+        for future in tqdm(as_completed(futures), total=len(futures),
+                          desc=f"  Reading selected docs ({num_workers} threads)"):
+            idx = futures[future]
+            results[idx] = future.result()
     return [doc for shard_docs in results for doc in shard_docs]
 
 
