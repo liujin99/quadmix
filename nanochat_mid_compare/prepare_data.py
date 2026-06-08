@@ -64,7 +64,7 @@ def load_tokenizer(tokenizer_pkl_path):
 
 def count_tokens_mp(texts, tokenizer_pkl_path, num_workers=None, chunk_size=500):
     if num_workers is None:
-        num_workers = min(mp.cpu_count(), 16)
+        num_workers = mp.cpu_count()
     chunks = [texts[i:i + chunk_size] for i in range(0, len(texts), chunk_size)]
     with mp.Pool(num_workers, initializer=_init_worker, initargs=(tokenizer_pkl_path,)) as pool:
         results = list(tqdm(
@@ -87,6 +87,18 @@ def read_essential_web_shard_fast(shard_path):
         {"text": t, "char_count": len(t), "token_count": len(t) // 4}
         for t in valid_texts
     ]
+
+
+def read_shards_parallel(shard_paths, num_workers=None):
+    if num_workers is None:
+        num_workers = mp.cpu_count()
+    with mp.Pool(num_workers) as pool:
+        results = list(tqdm(
+            pool.imap(read_essential_web_shard_fast, [str(p) for p in shard_paths]),
+            total=len(shard_paths),
+            desc=f"  Reading shards ({num_workers} workers)",
+        ))
+    return [doc for docs in results for doc in docs]
 
 
 def write_shard(docs, output_path):
@@ -115,7 +127,7 @@ def main():
     parser.add_argument("--max-random-scan", type=int, default=500,
                         help="Max number of essential-web shards to scan for random baseline (default: 500)")
     parser.add_argument("--num-workers", type=int, default=None,
-                        help="Number of parallel workers for tokenization (default: min(cpu_count, 16))")
+                        help="Number of parallel workers (default: all CPUs)")
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -158,10 +170,7 @@ def main():
     shard_files = shard_files[:args.max_random_scan]
     print(f"  Scanning {len(shard_files)} shards (using char-based estimate)...")
 
-    all_candidates = []
-    for sf in tqdm(shard_files, desc="  Reading shards"):
-        docs = read_essential_web_shard_fast(str(sf))
-        all_candidates.extend(docs)
+    all_candidates = read_shards_parallel(shard_files, num_workers=args.num_workers)
 
     print(f"  Total candidate docs: {len(all_candidates):,}")
 
