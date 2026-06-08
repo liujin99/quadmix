@@ -1330,7 +1330,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             tgt = batch[:, 1:self.block_size + 1].contiguous()
 
             hidden = model(inp, return_hidden=True)
-            loss = chunked_loss_from_hidden(model, hidden, tgt, chunk_size=512)
+            loss = chunked_loss_from_hidden(model, hidden, tgt, chunk_size=2048)
 
             is_acc = (iter_ct + 1) % grad_acc != 0
             (loss / grad_acc).backward()
@@ -1491,7 +1491,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 ids_tgt = val_tokens[start:end, 1:]
                 mask_tgt = val_mask[start:end, 1:]
                 hidden = model(ids_in, return_hidden=True)
-                loss = chunked_loss_per_token_from_hidden(model, hidden, ids_tgt, chunk_size=512)
+                loss = chunked_loss_per_token_from_hidden(model, hidden, ids_tgt, chunk_size=2048)
                 assistant_count = mask_tgt.float().sum(dim=1).clamp(min=1)
                 per_doc = (loss * mask_tgt.float()).sum(dim=1) / assistant_count
                 per_doc_losses.append(per_doc)
