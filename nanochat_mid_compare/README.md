@@ -20,8 +20,9 @@ bash nanochat_mid_compare/run_experiment.sh
 | `ESSENTIAL_WEB_DIR` | essential-web 原始 parquet shards 目录 | (required) |
 | `NANOCHAT_BASE_DIR` | nanochat 基础目录 (含 tokenizer/, base_checkpoints/) | `~/.cache/nanochat` |
 | `NANOCHAT_ROOT` | nanochat-npu 仓库根目录 | `~/nanochat-npu` |
-| `BASE_MODEL_TAG` | 预训练 base model tag | `d24_0320` |
-| `TARGET_PARAM_DATA_RATIO` | mid-training 数据/参数比 | `0.1` |
+| `BASE_MODEL_TAG` | 预训练 base model tag (两组实验共享) | `d24_0320` |
+| `MID_CHECKPOINTS_DIR` | mid-training checkpoint 输出目录 (避免 EVS 空间不足) | `$NANOCHAT_BASE_DIR/mid_checkpoints` |
+| `TARGET_PARAM_DATA_RATIO` | mid-training 数据/参数比 (见下方说明) | `0.1` |
 | `DEVICE_BATCH_SIZE` | 每卡 batch size | `8` |
 | `NUM_NPU` | NPU 卡数 | `8` |
 | `SHARD_SIZE` | 输出 parquet 每 shard 文档数 | `10000` |
@@ -29,19 +30,43 @@ bash nanochat_mid_compare/run_experiment.sh
 | `SEED` | 随机种子 | `42` |
 | `MAX_RANDOM_SCAN` | 随机抽样扫描的最大 shard 数 | `500` |
 
+## target-param-data-ratio 说明
+
+控制 mid-training 的 token budget：`tokens = ratio × num_scaling_params`
+
+d24 模型约 500M scaling params：
+
+| ratio | tokens | steps (batch=524K) | 适用场景 |
+|-------|--------|-------------------|----------|
+| 0.1 | ~50M | ~95 | 快速对比 |
+| 1.0 | ~500M | ~950 | 较充分对比 |
+| 10.0 | ~5B | ~9500 | 完整 mid-training |
+
+建议先用 `0.1` 快速验证流程，再用 `1.0` 做正式对比。
+
+## Prerequisites
+
+nanochat-npu 的 `scripts/mid_train.py` 需要添加 `--source-model-tag` 参数支持。
+该参数允许从 base model A 加载，但保存 mid-trained model 到 tag B，避免复制 checkpoint。
+
+修改位置：`nanochat-npu/scripts/mid_train.py`
+- 添加 `--source-model-tag` CLI 参数
+- `load_model()` 和 `load_optimizer_state()` 使用 `source_model_tag` 而非 `model_tag`
+
 ## Pipeline
 
 ```
 1. prepare_data.py
    ├── 读取 QuadMix sampled_dataset.parquet
-   ├── 估算 token 数 (char_count // 4)
+   ├── 使用 nanochat tokenizer 精确计算 token 数
    ├── 从 essential-web 随机抽样等 token 数文档
    ├── 共享验证集 (从 QuadMix 子集中抽取)
    └── 输出两组 sharded parquet (text column only)
 
-2. 复制 base checkpoint 为两个独立 tag
+2. 设置 mid_checkpoints 目录 (可选 symlink 到大容量存储)
 
 3. 分别运行 nanochat mid-training
+   ├── 从 BASE_MODEL_TAG 加载 base model (--source-model-tag)
    ├── QuadMix data -> mid_checkpoints/<tag>_quadmix_<timestamp>/
    └── Random data  -> mid_checkpoints/<tag>_random_<timestamp>/
 
@@ -64,7 +89,8 @@ nanochat_mid_compare/results/<timestamp>/
 
 ## Notes
 
-- 随机基线按 **token 数对齐** QuadMix 子集 (char_count // 4 估算)
+- 随机基线按 **token 数精确对齐** QuadMix 子集 (使用 nanochat tokenizer)
 - 两组实验共享同一验证集，确保对比公平
-- mid-training 从同一 base model checkpoint 出发
-- 默认 `target-param-data-ratio=0.1`，对 d24 模型约 50M tokens
+- mid-training 从同一 base model checkpoint 出发 (`--source-model-tag`)
+- 不复制 base checkpoint，节省磁盘空间
+- `MID_CHECKPOINTS_DIR` 可指向大容量存储，通过 symlink 挂载

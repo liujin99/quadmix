@@ -13,6 +13,7 @@
 # Or override config via environment variables:
 #   QUADMIX_DATASET=/path/to/sampled_dataset.parquet \
 #   ESSENTIAL_WEB_DIR=/path/to/essential-web-v1 \
+#   NANOCHAT_BASE_DIR=/path/to/.cache/nanochat \
 #   bash nanochat_mid_compare/run_experiment.sh
 #
 # ──────────────────────────────────────────────────────────────
@@ -38,10 +39,21 @@ BASE_MODEL_TAG="${BASE_MODEL_TAG:-d24_0320}"
 # Nanochat repo root
 NANOCHAT_ROOT="${NANOCHAT_ROOT:-$HOME/nanochat-npu}"
 
-# Experiment output directory
+# Mid-training checkpoint output directory
+# mid_checkpoints will be symlinked here to avoid filling up EVS storage
+# Default: $NANOCHAT_BASE_DIR/mid_checkpoints (no symlink)
+MID_CHECKPOINTS_DIR="${MID_CHECKPOINTS_DIR:-}"
+
+# Experiment output directory (logs, data, etc.)
 EXPERIMENT_DIR="${EXPERIMENT_DIR:-$(cd "$(dirname "$0")/.." && pwd)/nanochat_mid_compare/results/$(date +%Y%m%d_%H%M%S)}"
 
-# Mid-training hyperparameters
+# ── Mid-training hyperparameters ──
+# target-param-data-ratio: controls training token budget
+#   tokens = ratio * num_scaling_params
+#   d24 model: ~500M scaling params
+#   ratio=0.1 -> ~50M tokens (~95 steps)  [quick comparison]
+#   ratio=1.0 -> ~500M tokens (~950 steps) [thorough comparison]
+#   ratio=10.0 -> ~5B tokens (~9500 steps) [full mid-training]
 TARGET_PARAM_DATA_RATIO="${TARGET_PARAM_DATA_RATIO:-0.1}"
 DEVICE_BATCH_SIZE="${DEVICE_BATCH_SIZE:-8}"
 NUM_NPU="${NUM_NPU:-8}"
@@ -55,6 +67,8 @@ SEED="${SEED:-42}"
 MAX_RANDOM_SCAN="${MAX_RANDOM_SCAN:-500}"
 
 # Mid-training model tags (auto-generated if empty)
+# --source-model-tag = BASE_MODEL_TAG (load base from here)
+# --model-tag = QUADMIX_MODEL_TAG / RANDOM_MODEL_TAG (save mid-trained here)
 QUADMIX_MODEL_TAG="${QUADMIX_MODEL_TAG:-}"
 RANDOM_MODEL_TAG="${RANDOM_MODEL_TAG:-}"
 
@@ -187,15 +201,18 @@ echo "  QuadMix dataset:     $QUADMIX_DATASET"
 echo "  Essential-web dir:   $ESSENTIAL_WEB_DIR"
 echo "  Nanochat base dir:   $NANOCHAT_BASE_DIR"
 echo "  Nanochat repo:       $NANOCHAT_ROOT"
-echo "  Base model tag:      $BASE_MODEL_TAG"
+echo "  Base model tag:      $BASE_MODEL_TAG (source for both runs)"
 echo "  Experiment output:   $EXPERIMENT_DIR"
+if [ -n "$MID_CHECKPOINTS_DIR" ]; then
+    echo "  Mid checkpoints:    $MID_CHECKPOINTS_DIR"
+fi
 echo ""
 echo "  Mid-training config:"
 echo "    target-param-data-ratio: $TARGET_PARAM_DATA_RATIO"
 echo "    device-batch-size:       $DEVICE_BATCH_SIZE"
 echo "    NPU cards:               $NUM_NPU"
 echo ""
-echo "  Model tags:"
+echo "  Model tags (save):"
 echo "    QuadMix: $QUADMIX_MODEL_TAG"
 echo "    Random:  $RANDOM_MODEL_TAG"
 echo ""
@@ -223,6 +240,7 @@ else
         --quadmix-dataset "$QUADMIX_DATASET" \
         --essential-web-dir "$ESSENTIAL_WEB_DIR" \
         --output-dir "$DATA_DIR" \
+        --tokenizer-pkl "$TOKENIZER_DIR/tokenizer.pkl" \
         --shard-size "$SHARD_SIZE" \
         --val-ratio "$VAL_RATIO" \
         --seed "$SEED" \
@@ -235,8 +253,10 @@ python3 -c "
 import json
 stats = json.load(open('$DATA_DIR/dataset_stats.json'))
 q, r = stats['quadmix'], stats['random']
-print(f'    QuadMix: {q[\"train_docs\"]:,} train docs, ~{q[\"estimated_tokens\"]:,} tokens, {q[\"shards\"]} shards')
-print(f'    Random:  {r[\"train_docs\"]:,} train docs, ~{r[\"estimated_tokens\"]:,} tokens, {r[\"shards\"]} shards')
+method = stats['config'].get('token_method', 'unknown')
+print(f'    Token method: {method}')
+print(f'    QuadMix: {q[\"train_docs\"]:,} train docs, {q[\"tokens\"]:,} tokens, {q[\"shards\"]} shards')
+print(f'    Random:  {r[\"train_docs\"]:,} train docs, {r[\"tokens\"]:,} tokens, {r[\"shards\"]} shards')
 print(f'    Shared val: {q[\"val_docs\"]:,} docs')
 "
 echo ""
@@ -244,28 +264,31 @@ echo "╚═══════════════════════�
 echo ""
 
 # ══════════════════════════════════════════════════════════════
-#  STEP 2: COPY BASE CHECKPOINT FOR BOTH RUNS
+#  STEP 2: SETUP MID_CHECKPOINTS DIRECTORY
 # ══════════════════════════════════════════════════════════════
 
-echo ""
-echo "╔══ Step 2: Prepare base checkpoints ══╗"
-echo ""
+if [ -n "$MID_CHECKPOINTS_DIR" ]; then
+    echo ""
+    echo "╔══ Step 2: Setup mid_checkpoints directory ══╗"
+    echo ""
 
-BASE_CKPTS="$NANOCHAT_BASE_DIR/base_checkpoints"
+    mkdir -p "$MID_CHECKPOINTS_DIR"
+    LINK_PATH="$NANOCHAT_BASE_DIR/mid_checkpoints"
 
-for TAG in "$QUADMIX_MODEL_TAG" "$RANDOM_MODEL_TAG"; do
-    TARGET="$BASE_CKPTS/$TAG"
-    if [ -d "$TARGET" ]; then
-        echo "  Checkpoint already exists: $TAG (skipping copy)"
+    if [ -L "$LINK_PATH" ]; then
+        echo "  Symlink already exists: $LINK_PATH -> $(readlink "$LINK_PATH")"
+    elif [ -d "$LINK_PATH" ]; then
+        echo "  WARNING: $LINK_PATH exists as a directory (not a symlink)."
+        echo "  Skipping symlink creation. Mid checkpoints will be saved here."
     else
-        echo "  Copying base checkpoint -> $TAG"
-        cp -r "$BASE_CKPT_DIR" "$TARGET"
+        echo "  Creating symlink: $LINK_PATH -> $MID_CHECKPOINTS_DIR"
+        ln -s "$MID_CHECKPOINTS_DIR" "$LINK_PATH"
     fi
-done
 
-echo ""
-echo "╚══════════════════════════════════════╝"
-echo ""
+    echo ""
+    echo "╚═════════════════════════════════════════════╝"
+    echo ""
+fi
 
 # ══════════════════════════════════════════════════════════════
 #  STEP 3: MID-TRAINING
@@ -281,15 +304,17 @@ run_mid_training() {
     local LOG_FILE="$4"
 
     echo "  Starting mid-training: $RUN_NAME"
-    echo "    Data:  $DATA_PATH"
-    echo "    Model: $MODEL_TAG"
-    echo "    Log:   $LOG_FILE"
+    echo "    Data:       $DATA_PATH"
+    echo "    Source:     $BASE_MODEL_TAG (base)"
+    echo "    Save as:    $MODEL_TAG (mid)"
+    echo "    Log:        $LOG_FILE"
 
     cd "$NANOCHAT_ROOT"
     torchrun --standalone --nproc_per_node="$NUM_NPU" -m scripts.mid_train -- \
         --target-param-data-ratio="$TARGET_PARAM_DATA_RATIO" \
         --device-batch-size="$DEVICE_BATCH_SIZE" \
         --run="$RUN_NAME" \
+        --source-model-tag="$BASE_MODEL_TAG" \
         --model-tag="$MODEL_TAG" \
         --core-metric-every="$CORE_METRIC_EVERY" \
         --eval-every="$EVAL_EVERY" \
@@ -356,6 +381,8 @@ echo ""
 #  STEP 5: SUMMARY
 # ══════════════════════════════════════════════════════════════
 
+MID_CKPT_ACTUAL="${MID_CHECKPOINTS_DIR:-$NANOCHAT_BASE_DIR/mid_checkpoints}"
+
 echo ""
 echo "════════════════════════════════════════════════════════════"
 echo "  Experiment Complete!"
@@ -373,8 +400,8 @@ echo "    ├── mid_train_random.log     # Random mid-training log"
 echo "    ├── eval_quadmix.log         # QuadMix evaluation log"
 echo "    └── eval_random.log          # Random evaluation log"
 echo ""
-echo "  Checkpoints:"
-echo "    $NANOCHAT_BASE_DIR/mid_checkpoints/$QUADMIX_MODEL_TAG/"
-echo "    $NANOCHAT_BASE_DIR/mid_checkpoints/$RANDOM_MODEL_TAG/"
+echo "  Mid-training checkpoints:"
+echo "    $MID_CKPT_ACTUAL/$QUADMIX_MODEL_TAG/"
+echo "    $MID_CKPT_ACTUAL/$RANDOM_MODEL_TAG/"
 echo ""
 echo "════════════════════════════════════════════════════════════"
