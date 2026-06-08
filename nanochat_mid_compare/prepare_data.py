@@ -25,6 +25,7 @@ import random
 import json
 import pickle
 import multiprocessing as mp
+from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import pandas as pd
 import pyarrow as pa
@@ -44,7 +45,7 @@ def _init_worker(tokenizer_pkl_path):
 
 def _worker_encode_batch(texts):
     if hasattr(_worker_tokenizer, "encode_ordinary_batch"):
-        return [len(ids) for ids in _worker_tokenizer.encode_ordinary_batch(texts, num_threads=2)]
+        return [len(ids) for ids in _worker_tokenizer.encode_ordinary_batch(texts, num_threads=4)]
     return [len(_worker_tokenizer.encode_ordinary(t)) for t in texts]
 
 
@@ -62,15 +63,16 @@ def load_tokenizer(tokenizer_pkl_path):
         return None
 
 
-def count_tokens_mp(texts, tokenizer_pkl_path, num_workers=None, chunk_size=500):
+def count_tokens_mp(texts, tokenizer_pkl_path, num_workers=None):
     if num_workers is None:
-        num_workers = mp.cpu_count()
+        num_workers = min(mp.cpu_count() // 4, 32) or 1
+    chunk_size = max(1, len(texts) // (num_workers * 4))
     chunks = [texts[i:i + chunk_size] for i in range(0, len(texts), chunk_size)]
     with mp.Pool(num_workers, initializer=_init_worker, initargs=(tokenizer_pkl_path,)) as pool:
         results = list(tqdm(
             pool.imap(_worker_encode_batch, chunks),
             total=len(chunks),
-            desc=f"  Tokenizing ({num_workers} workers)",
+            desc=f"  Tokenizing ({num_workers} processes x 4 rust threads)",
         ))
     return [c for batch in results for c in batch]
 
@@ -79,7 +81,7 @@ def estimate_tokens(text):
     return len(text) // 4
 
 
-def read_essential_web_shard_fast(shard_path):
+def _read_single_shard(shard_path):
     df = pq.read_table(shard_path).to_pandas()
     texts = df["text"].tolist() if "text" in df.columns else []
     valid_texts = [t for t in texts if t and len(t) >= 100]
@@ -91,12 +93,12 @@ def read_essential_web_shard_fast(shard_path):
 
 def read_shards_parallel(shard_paths, num_workers=None):
     if num_workers is None:
-        num_workers = mp.cpu_count()
-    with mp.Pool(num_workers) as pool:
+        num_workers = min(mp.cpu_count(), 64)
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
         results = list(tqdm(
-            pool.imap(read_essential_web_shard_fast, [str(p) for p in shard_paths]),
+            executor.map(_read_single_shard, [str(p) for p in shard_paths]),
             total=len(shard_paths),
-            desc=f"  Reading shards ({num_workers} workers)",
+            desc=f"  Reading shards ({num_workers} threads)",
         ))
     return [doc for docs in results for doc in docs]
 
@@ -127,7 +129,8 @@ def main():
     parser.add_argument("--max-random-scan", type=int, default=500,
                         help="Max number of essential-web shards to scan for random baseline (default: 500)")
     parser.add_argument("--num-workers", type=int, default=None,
-                        help="Number of parallel workers (default: all CPUs)")
+                        help="Number of parallel workers. Tokenize: processes (each uses 4 rust threads). "
+                             "Shard read: threads. Default: auto")
     args = parser.parse_args()
 
     random.seed(args.seed)
