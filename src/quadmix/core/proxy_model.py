@@ -203,7 +203,7 @@ class ProxyModel(nn.Module):
             elif isinstance(module, RMSNorm):
                 torch.nn.init.ones_(module.weight)
 
-    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def forward(self, input_ids: torch.Tensor, return_hidden: bool = False):
         B, T = input_ids.shape
         assert T <= self.config.block_size, \
             f"Sequence length {T} exceeds block_size {self.config.block_size}"
@@ -214,6 +214,8 @@ class ProxyModel(nn.Module):
             x = layer(x)
 
         x = self.norm(x)
+        if return_hidden:
+            return x
         logits = self.lm_head(x)
         return logits
 

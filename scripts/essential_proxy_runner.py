@@ -43,38 +43,40 @@ from quadmix.pipeline.proxy_runner import BaseProxyRunner
 from preprocess_essential_web_v1_sharded import DOMAIN_MAP, FASTTEXT_FIELDS
 
 
-def chunked_cross_entropy(logits, targets, chunk_size=256):
-    """Memory-efficient cross entropy: chunks along seq dim to avoid fp32 upcast OOM.
+def chunked_loss_from_hidden(model, hidden, targets, chunk_size=512):
+    """Compute CE loss chunk-by-chunk from hidden states, never materializing full logits.
 
-    F.cross_entropy internally upcasts logits to fp32. For (B, T, V) with large V,
-    this materializes B*T*V*4 bytes. Chunking along T limits peak to B*chunk*V*4.
+    hidden: (B, T, C) from model.forward(return_hidden=True)
+    Only chunk_logits (B, chunk, V) exists at any time — full (B, T, V) is never created.
     """
-    B, T, V = logits.shape
-    if B * T <= chunk_size:
-        return F.cross_entropy(logits.reshape(-1, V), targets.reshape(-1))
-    total_loss = torch.tensor(0.0, device=logits.device, dtype=torch.float32)
+    B, T, _ = hidden.shape
+    V = model.config.vocab_size
+    total_loss = torch.tensor(0.0, device=hidden.device, dtype=torch.float32)
     n_tokens = 0
     for i in range(0, T, chunk_size):
-        chunk_logits = logits[:, i:i + chunk_size]
+        chunk_logits = model.lm_head(hidden[:, i:i + chunk_size])
         chunk_tgt = targets[:, i:i + chunk_size]
         n = chunk_tgt.numel()
         total_loss = total_loss + F.cross_entropy(
             chunk_logits.reshape(-1, V), chunk_tgt.reshape(-1)
         ) * n
         n_tokens += n
+        del chunk_logits
     return total_loss / n_tokens
 
 
-def chunked_cross_entropy_per_token(logits, targets, chunk_size=256):
-    """Same as chunked_cross_entropy but returns per-token losses (reduction='none')."""
-    B, T, V = logits.shape
-    per_token = torch.empty(B, T, device=logits.device, dtype=torch.float32)
+def chunked_loss_per_token_from_hidden(model, hidden, targets, chunk_size=512):
+    """Same as chunked_loss_from_hidden but returns per-token losses (reduction='none')."""
+    B, T, _ = hidden.shape
+    V = model.config.vocab_size
+    per_token = torch.empty(B, T, device=hidden.device, dtype=torch.float32)
     for i in range(0, T, chunk_size):
-        chunk_logits = logits[:, i:i + chunk_size]
+        chunk_logits = model.lm_head(hidden[:, i:i + chunk_size])
         chunk_tgt = targets[:, i:i + chunk_size]
         per_token[:, i:i + chunk_size] = F.cross_entropy(
             chunk_logits.reshape(-1, V), chunk_tgt.reshape(-1), reduction="none"
         ).view(chunk_tgt.shape)
+        del chunk_logits
     return per_token
 
 
@@ -1327,8 +1329,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             inp = batch[:, :self.block_size].contiguous()
             tgt = batch[:, 1:self.block_size + 1].contiguous()
 
-            logits = model(inp)
-            loss = chunked_cross_entropy(logits, tgt, chunk_size=256)
+            hidden = model(inp, return_hidden=True)
+            loss = chunked_loss_from_hidden(model, hidden, tgt, chunk_size=512)
 
             is_acc = (iter_ct + 1) % grad_acc != 0
             (loss / grad_acc).backward()
@@ -1488,8 +1490,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 ids_in = val_tokens[start:end, :-1]
                 ids_tgt = val_tokens[start:end, 1:]
                 mask_tgt = val_mask[start:end, 1:]
-                logits = model(ids_in)
-                loss = chunked_cross_entropy_per_token(logits, ids_tgt, chunk_size=256)
+                hidden = model(ids_in, return_hidden=True)
+                loss = chunked_loss_per_token_from_hidden(model, hidden, ids_tgt, chunk_size=512)
                 assistant_count = mask_tgt.float().sum(dim=1).clamp(min=1)
                 per_doc = (loss * mask_tgt.float()).sum(dim=1) / assistant_count
                 per_doc_losses.append(per_doc)
