@@ -46,8 +46,16 @@ def load_tokenizer(tokenizer_pkl_path):
         return None
 
 
-def count_tokens_single(text, enc):
-    return len(enc.encode_ordinary(text))
+def count_tokens_batch(texts, enc, batch_size=2000, num_threads=8):
+    counts = []
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i:i + batch_size]
+        if hasattr(enc, "encode_ordinary_batch"):
+            encoded = enc.encode_ordinary_batch(batch, num_threads=num_threads)
+        else:
+            encoded = [enc.encode_ordinary(t) for t in batch]
+        counts.extend(len(ids) for ids in encoded)
+    return counts
 
 
 def estimate_tokens(text):
@@ -57,17 +65,17 @@ def estimate_tokens(text):
 def read_essential_web_shard(shard_path, enc=None):
     df = pq.read_table(shard_path).to_pandas()
     texts = df["text"].tolist() if "text" in df.columns else []
-    docs = []
-    for text in texts:
-        if not text or len(text) < 100:
-            continue
-        tok = count_tokens_single(text, enc) if enc else estimate_tokens(text)
-        docs.append({
-            "text": text,
-            "char_count": len(text),
-            "token_count": tok,
-        })
-    return docs
+    valid_texts = [t for t in texts if t and len(t) >= 100]
+    if not valid_texts:
+        return []
+    if enc:
+        token_counts = count_tokens_batch(valid_texts, enc)
+    else:
+        token_counts = [estimate_tokens(t) for t in valid_texts]
+    return [
+        {"text": t, "char_count": len(t), "token_count": tc}
+        for t, tc in zip(valid_texts, token_counts)
+    ]
 
 
 def write_shard(docs, output_path):
@@ -116,15 +124,18 @@ def main():
 
     print(f"\n[1/5] Reading QuadMix selected dataset...")
     quadmix_df = pd.read_parquet(args.quadmix_dataset)
-    quadmix_docs = []
-    total_tokens = 0
     texts = quadmix_df["text"].tolist()
-    for text in tqdm(texts, desc="  Counting QuadMix tokens"):
-        if not text or len(text) < 100:
-            continue
-        tok = count_tokens_single(text, enc) if enc else estimate_tokens(text)
-        quadmix_docs.append({"text": text, "token_count": tok})
-        total_tokens += tok
+    valid_texts = [t for t in texts if t and len(t) >= 100]
+    print(f"  Counting tokens for {len(valid_texts):,} docs...")
+    if enc:
+        token_counts = count_tokens_batch(valid_texts, enc)
+    else:
+        token_counts = [estimate_tokens(t) for t in valid_texts]
+    quadmix_docs = [
+        {"text": t, "token_count": tc}
+        for t, tc in zip(valid_texts, token_counts)
+    ]
+    total_tokens = sum(token_counts)
 
     print(f"  QuadMix docs: {len(quadmix_docs):,}")
     print(f"  Tokens ({token_method}): {total_tokens:,}")

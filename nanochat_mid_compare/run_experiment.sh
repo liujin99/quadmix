@@ -68,8 +68,8 @@ SEED="${SEED:-42}"
 MAX_RANDOM_SCAN="${MAX_RANDOM_SCAN:-500}"
 
 # Mid-training model tags (auto-generated if empty)
-# --source-model-tag = BASE_MODEL_TAG (load base model weights from here)
-# --model-tag = QUADMIX_MODEL_TAG / RANDOM_MODEL_TAG (save mid-trained checkpoint to here)
+# The script creates a symlink from BASE_MODEL_TAG to MODEL_TAG in base_checkpoints/
+# so mid_train.py loads the base model and saves to mid_checkpoints/<MODEL_TAG>/
 QUADMIX_MODEL_TAG="${QUADMIX_MODEL_TAG:-}"
 RANDOM_MODEL_TAG="${RANDOM_MODEL_TAG:-}"
 
@@ -312,17 +312,29 @@ run_mid_training() {
     echo "    Save as:    $MODEL_TAG (mid)"
     echo "    Log:        $LOG_FILE"
 
+    local BASE_CKPT_DIR="$NANOCHAT_BASE_DIR/base_checkpoints/$BASE_MODEL_TAG"
+    local LINK_DIR="$NANOCHAT_BASE_DIR/base_checkpoints/$MODEL_TAG"
+
+    if [ ! -e "$LINK_DIR" ]; then
+        echo "    Creating symlink: $LINK_DIR -> $BASE_CKPT_DIR"
+        ln -s "$BASE_CKPT_DIR" "$LINK_DIR"
+    fi
+
     cd "$NANOCHAT_ROOT"
     torchrun --standalone --nproc_per_node="$NUM_NPU" -m scripts.mid_train -- \
         --target-param-data-ratio="$TARGET_PARAM_DATA_RATIO" \
         --device-batch-size="$DEVICE_BATCH_SIZE" \
         --run="$RUN_NAME" \
-        --source-model-tag="$BASE_MODEL_TAG" \
         --model-tag="$MODEL_TAG" \
         --core-metric-every="$CORE_METRIC_EVERY" \
         --eval-every="$EVAL_EVERY" \
         --data-dir="$DATA_PATH" \
         2>&1 | tee "$LOG_FILE"
+
+    if [ -L "$LINK_DIR" ]; then
+        echo "    Cleaning up symlink: $LINK_DIR"
+        rm "$LINK_DIR"
+    fi
 }
 
 echo ""

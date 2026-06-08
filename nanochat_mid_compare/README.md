@@ -46,12 +46,10 @@ d24 模型约 500M scaling params：
 
 ## Prerequisites
 
-nanochat-npu 的 `scripts/mid_train.py` 需要添加 `--source-model-tag` 参数支持。
-该参数允许从 base model A 加载，但保存 mid-trained model 到 tag B，避免复制 checkpoint。
-
-修改位置：`nanochat-npu/scripts/mid_train.py`
-- 添加 `--source-model-tag` CLI 参数
-- `load_model()` 和 `load_optimizer_state()` 使用 `source_model_tag` 而非 `model_tag`
+无需修改 nanochat-npu 代码。脚本通过 symlink 实现 base model 复用：
+- 在 `base_checkpoints/` 下创建 `MODEL_TAG -> BASE_MODEL_TAG` 的 symlink
+- mid_train.py 从 symlink 加载 base model，保存到 `mid_checkpoints/<MODEL_TAG>/`
+- 训练完成后自动清理 symlink
 
 ## Pipeline
 
@@ -66,7 +64,7 @@ nanochat-npu 的 `scripts/mid_train.py` 需要添加 `--source-model-tag` 参数
 2. 设置 checkpoint 输出目录 (可选 symlink 到大容量存储，通过 MID_CHECKPOINTS_OUTPUT_DIR)
 
 3. 分别运行 nanochat mid-training
-   ├── 从 BASE_MODEL_TAG 加载 base model (--source-model-tag)
+   ├── 创建 symlink: base_checkpoints/<tag> -> base_checkpoints/<BASE_MODEL_TAG>
    ├── QuadMix data -> mid_checkpoints/<tag>_quadmix_<timestamp>/
    └── Random data  -> mid_checkpoints/<tag>_random_<timestamp>/
 
@@ -91,6 +89,6 @@ nanochat_mid_compare/results/<timestamp>/
 
 - 随机基线按 **token 数精确对齐** QuadMix 子集 (使用 nanochat tokenizer)
 - 两组实验共享同一验证集，确保对比公平
-- mid-training 从同一 base model checkpoint 出发 (`--source-model-tag`)
-- 不复制 base checkpoint，节省磁盘空间
+- mid-training 从同一 base model checkpoint 出发（通过 symlink）
+- 不复制 base checkpoint，节省磁盘空间（symlink 方式）
 - `MID_CHECKPOINTS_OUTPUT_DIR` 可指向大容量存储，训练完成后 checkpoint 保存在此
