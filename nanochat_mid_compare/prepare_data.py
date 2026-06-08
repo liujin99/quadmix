@@ -25,7 +25,7 @@ import random
 import json
 import pickle
 import multiprocessing as mp
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 import pandas as pd
 import pyarrow as pa
@@ -81,26 +81,53 @@ def estimate_tokens(text):
     return len(text) // 4
 
 
-def _read_single_shard(shard_path):
-    df = pq.read_table(shard_path).to_pandas()
+def _scan_shard_metadata(shard_path):
+    df = pq.read_table(shard_path, columns=["text"]).to_pandas()
     texts = df["text"].tolist() if "text" in df.columns else []
-    valid_texts = [t for t in texts if t and len(t) >= 100]
-    return [
-        {"text": t, "char_count": len(t), "token_count": len(t) // 4}
-        for t in valid_texts
-    ]
+    valid_indices = [i for i, t in enumerate(texts) if t and len(t) >= 100]
+    char_counts = [len(texts[i]) for i in valid_indices]
+    return [(i, c) for i, c in zip(valid_indices, char_counts)]
 
 
-def read_shards_parallel(shard_paths, num_workers=None):
+def scan_shards_metadata(shard_paths, num_workers=None):
     if num_workers is None:
         num_workers = min(mp.cpu_count(), 64)
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = {executor.submit(_scan_shard_metadata, str(p)): i for i, p in enumerate(shard_paths)}
+        results = [None] * len(shard_paths)
+        for future in tqdm(as_completed(futures), total=len(futures),
+                          desc=f"  Scanning metadata ({num_workers} threads)"):
+            idx = futures[future]
+            results[idx] = future.result()
+    return results
+
+
+def _read_docs_from_shard(args):
+    shard_path, doc_indices = args
+    df = pq.read_table(shard_path).to_pandas()
+    texts = df["text"].tolist()
+    return [
+        {"text": texts[i], "char_count": len(texts[i]), "token_count": len(texts[i]) // 4}
+        for i in doc_indices
+    ]
+
+
+def read_selected_docs(shard_paths, selections, num_workers=None):
+    if num_workers is None:
+        num_workers = min(mp.cpu_count(), 64)
+    shard_to_docs = {}
+    for shard_id, doc_id in selections:
+        if shard_id not in shard_to_docs:
+            shard_to_docs[shard_id] = []
+        shard_to_docs[shard_id].append(doc_id)
+    tasks = [(str(shard_paths[sid]), indices) for sid, indices in shard_to_docs.items()]
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
         results = list(tqdm(
-            executor.map(_read_single_shard, [str(p) for p in shard_paths]),
-            total=len(shard_paths),
-            desc=f"  Reading shards ({num_workers} threads)",
+            executor.map(_read_docs_from_shard, tasks),
+            total=len(tasks),
+            desc=f"  Reading selected docs ({num_workers} threads)",
         ))
-    return [doc for docs in results for doc in docs]
+    return [doc for shard_docs in results for doc in shard_docs]
 
 
 def write_shard(docs, output_path):
@@ -168,27 +195,35 @@ def main():
     print(f"  QuadMix docs: {len(quadmix_docs):,}")
     print(f"  Tokens ({token_method}): {total_tokens:,}")
 
-    print(f"\n[2/5] Scanning essential-web shards for random sampling...")
+    print(f"\n[2/5] Scanning essential-web shards metadata...")
     shard_files = sorted(Path(args.essential_web_dir).glob("shard_*.parquet"))
     shard_files = shard_files[:args.max_random_scan]
-    print(f"  Scanning {len(shard_files)} shards (using char-based estimate)...")
+    print(f"  Scanning {len(shard_files)} shards (metadata only)...")
 
-    all_candidates = read_shards_parallel(shard_files, num_workers=args.num_workers)
+    shard_metadata = scan_shards_metadata(shard_files, num_workers=args.num_workers)
 
+    all_candidates = []
+    for shard_id, docs in enumerate(shard_metadata):
+        for doc_id, char_count in docs:
+            all_candidates.append((shard_id, doc_id, char_count // 4))
     print(f"  Total candidate docs: {len(all_candidates):,}")
 
     print(f"\n[3/5] Random sampling (target: {total_tokens:,} tokens)...")
     random.shuffle(all_candidates)
-    random_docs = []
+    selected = []
     accumulated_tokens = 0
-    for doc in all_candidates:
+    for shard_id, doc_id, est_tokens in all_candidates:
         if accumulated_tokens >= total_tokens:
             break
-        random_docs.append(doc)
-        accumulated_tokens += doc["token_count"]
+        selected.append((shard_id, doc_id))
+        accumulated_tokens += est_tokens
+    print(f"  Selected {len(selected):,} docs (estimated ~{accumulated_tokens:,} tokens)")
+
+    print(f"\n[3.5/5] Reading selected documents...")
+    random_docs = read_selected_docs(shard_files, selected, num_workers=args.num_workers)
 
     if enc and args.tokenizer_pkl:
-        print(f"  Re-counting tokens for {len(random_docs):,} selected docs (exact)...")
+        print(f"  Re-counting tokens for {len(random_docs):,} docs (exact)...")
         random_texts = [d["text"] for d in random_docs]
         exact_counts = count_tokens_mp(random_texts, args.tokenizer_pkl, num_workers=args.num_workers)
         for doc, tc in zip(random_docs, exact_counts):
