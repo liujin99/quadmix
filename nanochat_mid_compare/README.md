@@ -21,7 +21,7 @@ bash nanochat_mid_compare/run_experiment.sh
 | `NANOCHAT_BASE_DIR` | nanochat 基础目录 (含 tokenizer/, base_checkpoints/) | `~/.cache/nanochat` |
 | `NANOCHAT_ROOT` | nanochat-npu 仓库根目录 | `~/nanochat-npu` |
 | `BASE_MODEL_TAG` | 预训练 base model tag (两组实验共享) | `d24_0320` |
-| `MID_CHECKPOINTS_OUTPUT_DIR` | mid-training 训练完成后 checkpoint 保存目录 (避免 EVS 空间不足) | `$NANOCHAT_BASE_DIR/mid_checkpoints` |
+| `MID_CHECKPOINTS_OUTPUT_DIR` | mid-training 训练完成后 checkpoint 保存目录 (避免 EVS 空间不足) | `$HOME/.cache/nanochat_mid_compare/mid_checkpoints` |
 | `TARGET_PARAM_DATA_RATIO` | 目标 tokens/params 比例 (自动 cap 防止过度训练) | `0.5` |
 | `NUM_SCALING_PARAMS` | 模型 scaling params 数量 (d24 ≈ 1.3B) | `1300000000` |
 | `DEVICE_BATCH_SIZE` | 每卡 batch size | `8` |
@@ -29,6 +29,7 @@ bash nanochat_mid_compare/run_experiment.sh
 | `SHARD_SIZE` | 输出 parquet 每 shard 文档数 | `10000` |
 | `VAL_RATIO` | 验证集比例 (0=全量训练，写 dummy val shard 兼容 dataloader) | `0` |
 | `EVAL_EVERY` | val BPB 评估间隔 (-1 = 禁用，因两组数据 val 不可比) | `-1` |
+| `CORE_METRIC_EVERY` | 训练中 CORE metric 评估间隔 (-1 = 禁用，子集测试意义不大) | `-1` |
 | `SEED` | 随机种子 | `42` |
 | `MAX_RANDOM_SCAN` | 随机抽样扫描的最大 shard 数 | `500` |
 
@@ -79,7 +80,8 @@ num_iterations = actual_tokens / total_batch_size (524288)
    ├── QuadMix data -> mid_checkpoints/<tag>_quadmix_<timestamp>/
    └── Random data  -> mid_checkpoints/<tag>_random_<timestamp>/
 
-4. 分别运行评估 (base_eval --model-type=mid)
+4. 分别运行评估 (base_eval --eval=core --model-type=mid)
+   └── 仅运行 CORE metric 评估（不跑 BPB 和 sample，避免数据目录缺失错误）
 ```
 
 ## Output Structure
@@ -93,8 +95,19 @@ nanochat_mid_compare/results/<timestamp>/
 ├── mid_train_quadmix.log
 ├── mid_train_random.log
 ├── eval_quadmix.log
-└── eval_random.log
+├── eval_random.log
+└── experiment_report.md       # 对比报告
 ```
+
+## Base Model Evaluation
+
+如需对比 base model 的 CORE metric（作为 baseline）：
+
+```bash
+bash nanochat_mid_compare/eval_base_model.sh
+```
+
+输出保存到 `results/base_eval/eval_base_<model_tag>.log`，可手动对比三个日志中的 CORE metric。
 
 ## Notes
 

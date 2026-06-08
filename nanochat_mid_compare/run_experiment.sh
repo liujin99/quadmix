@@ -42,8 +42,7 @@ NANOCHAT_ROOT="${NANOCHAT_ROOT:-$HOME/nanochat-npu}"
 # Mid-training checkpoint output directory (where trained models are saved)
 # If set, $NANOCHAT_BASE_DIR/mid_checkpoints will be symlinked here
 # to avoid filling up EVS storage with large checkpoint files
-# Default: $NANOCHAT_BASE_DIR/mid_checkpoints (no symlink)
-MID_CHECKPOINTS_OUTPUT_DIR="${MID_CHECKPOINTS_OUTPUT_DIR:-}"
+MID_CHECKPOINTS_OUTPUT_DIR="${MID_CHECKPOINTS_OUTPUT_DIR:-$HOME/.cache/nanochat_mid_compare/mid_checkpoints}"
 
 # Experiment output directory (logs, data, etc.)
 EXPERIMENT_DIR="${EXPERIMENT_DIR:-$(cd "$(dirname "$0")" && pwd)/results/$(date +%Y%m%d_%H%M%S)}"
@@ -57,7 +56,7 @@ TARGET_PARAM_DATA_RATIO="${TARGET_PARAM_DATA_RATIO:-0.5}"
 NUM_SCALING_PARAMS="${NUM_SCALING_PARAMS:-1300000000}"  # d24 ≈ 1.3B
 DEVICE_BATCH_SIZE="${DEVICE_BATCH_SIZE:-8}"
 NUM_NPU="${NUM_NPU:-8}"
-CORE_METRIC_EVERY="${CORE_METRIC_EVERY:-500}"
+CORE_METRIC_EVERY="${CORE_METRIC_EVERY:--1}"
 # Val BPB disabled by default (-1) because QuadMix and Random use different data,
 # so their val sets are not comparable. Use CORE metric for comparison instead.
 EVAL_EVERY="${EVAL_EVERY:--1}"
@@ -253,6 +252,21 @@ else
         --num-npu "$NUM_NPU"
 fi
 
+python3 -c "
+import json
+stats_path = '$DATA_DIR/dataset_stats.json'
+stats = json.load(open(stats_path))
+stats['config'].update({
+    'base_model_tag': '$BASE_MODEL_TAG',
+    'target_param_data_ratio': $TARGET_PARAM_DATA_RATIO,
+    'num_scaling_params': $NUM_SCALING_PARAMS,
+    'device_batch_size': $DEVICE_BATCH_SIZE,
+    'num_npu': $NUM_NPU,
+})
+with open(stats_path, 'w') as f:
+    json.dump(stats, f, indent=2)
+"
+
 echo ""
 echo "  Dataset stats:"
 python3 -c "
@@ -392,6 +406,7 @@ run_eval() {
 
     cd "$NANOCHAT_ROOT"
     torchrun --standalone --nproc_per_node="$NUM_NPU" -m scripts.base_eval -- \
+        --eval=core \
         --device-batch-size=32 \
         --model-tag="$MODEL_TAG" \
         --model-type="$MODEL_TYPE" \
@@ -413,10 +428,30 @@ echo "╚═══════════════════════�
 echo ""
 
 # ══════════════════════════════════════════════════════════════
-#  STEP 5: SUMMARY
+#  STEP 5: GENERATE REPORT
 # ══════════════════════════════════════════════════════════════
 
-MID_CKPT_ACTUAL="${MID_CHECKPOINTS_OUTPUT_DIR:-$NANOCHAT_BASE_DIR/mid_checkpoints}"
+echo ""
+echo "╔══ Step 5: Generate experiment report ══╗"
+echo ""
+
+python3 "$SCRIPT_DIR/generate_report.py" \
+    --experiment-dir "$EXPERIMENT_DIR" \
+    --dataset-stats "$DATA_DIR/dataset_stats.json" \
+    --quadmix-train-log "$QUADMIX_LOG" \
+    --random-train-log "$RANDOM_LOG" \
+    --quadmix-eval-log "$QUADMIX_EVAL_LOG" \
+    --random-eval-log "$RANDOM_EVAL_LOG"
+
+echo ""
+echo "╚════════════════════════════════════════╝"
+echo ""
+
+# ══════════════════════════════════════════════════════════════
+#  SUMMARY
+# ══════════════════════════════════════════════════════════════
+
+MID_CKPT_ACTUAL="$MID_CHECKPOINTS_OUTPUT_DIR"
 
 echo ""
 echo "════════════════════════════════════════════════════════════"
@@ -433,7 +468,8 @@ echo "    │   └── dataset_stats.json   # Dataset statistics"
 echo "    ├── mid_train_quadmix.log    # QuadMix mid-training log"
 echo "    ├── mid_train_random.log     # Random mid-training log"
 echo "    ├── eval_quadmix.log         # QuadMix evaluation log"
-echo "    └── eval_random.log          # Random evaluation log"
+echo "    ├── eval_random.log          # Random evaluation log"
+echo "    └── experiment_report.md     # Comparison report"
 echo ""
 echo "  Mid-training checkpoints:"
 echo "    $MID_CKPT_ACTUAL/$QUADMIX_MODEL_TAG/"
