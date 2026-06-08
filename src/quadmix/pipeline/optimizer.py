@@ -45,6 +45,7 @@ def _bootstrap_one(
     try:
         model = RegressionModel(
             model_type="lightgbm",
+            n_jobs=1,
             **regression_params,
         )
         model.fit(
@@ -406,7 +407,7 @@ class QuaDMixOptimizer:
         n_jobs = min(os.cpu_count() or 4, n_bootstrap)
         seeds = np.random.default_rng(42).integers(0, 2**31, size=n_bootstrap).tolist()
 
-        results = Parallel(n_jobs=n_jobs, prefer="threads")(
+        results = Parallel(n_jobs=n_jobs, prefer="processes")(
             delayed(_bootstrap_one)(
                 seed=int(seeds[i]),
                 params_list=params_list,
