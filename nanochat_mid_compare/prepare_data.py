@@ -20,7 +20,6 @@ Usage:
 """
 
 import os
-import sys
 import argparse
 import random
 import json
@@ -47,15 +46,6 @@ def load_tokenizer(tokenizer_pkl_path):
         return None
 
 
-def count_tokens_batch(texts, enc, batch_size=1000):
-    total = 0
-    for i in range(0, len(texts), batch_size):
-        batch = texts[i:i+batch_size]
-        for text in batch:
-            total += len(enc.encode_ordinary(text))
-    return total
-
-
 def count_tokens_single(text, enc):
     return len(enc.encode_ordinary(text))
 
@@ -66,9 +56,9 @@ def estimate_tokens(text):
 
 def read_essential_web_shard(shard_path, enc=None):
     df = pq.read_table(shard_path).to_pandas()
+    texts = df["text"].tolist() if "text" in df.columns else []
     docs = []
-    for _, row in df.iterrows():
-        text = row.get("text", "")
+    for text in texts:
         if not text or len(text) < 100:
             continue
         tok = count_tokens_single(text, enc) if enc else estimate_tokens(text)
@@ -128,8 +118,8 @@ def main():
     quadmix_df = pd.read_parquet(args.quadmix_dataset)
     quadmix_docs = []
     total_tokens = 0
-    for _, row in quadmix_df.iterrows():
-        text = row["text"]
+    texts = quadmix_df["text"].tolist()
+    for text in tqdm(texts, desc="  Counting QuadMix tokens"):
         if not text or len(text) < 100:
             continue
         tok = count_tokens_single(text, enc) if enc else estimate_tokens(text)
@@ -165,15 +155,14 @@ def main():
     print(f"  Tokens ({token_method}): {accumulated_tokens:,}")
 
     print(f"\n[4/5] Splitting train/val (val_ratio={args.val_ratio})...")
-    n_val_quadmix = max(1, int(len(quadmix_docs) * args.val_ratio))
-    n_val_random = max(1, int(len(random_docs) * args.val_ratio))
+    n_val = max(1, int(len(quadmix_docs) * args.val_ratio))
 
     random.shuffle(quadmix_docs)
     random.shuffle(random_docs)
 
-    val_docs = quadmix_docs[:n_val_quadmix]
-    quadmix_train = quadmix_docs[n_val_quadmix:]
-    random_train = random_docs[n_val_random:]
+    val_docs = quadmix_docs[:n_val]
+    quadmix_train = quadmix_docs[n_val:]
+    random_train = random_docs[n_val:]
 
     print(f"  QuadMix train: {len(quadmix_train):,}, val: {len(val_docs):,}")
     print(f"  Random  train: {len(random_train):,}, val: {len(val_docs):,} (shared)")

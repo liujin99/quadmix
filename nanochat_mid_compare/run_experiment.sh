@@ -46,7 +46,7 @@ NANOCHAT_ROOT="${NANOCHAT_ROOT:-$HOME/nanochat-npu}"
 MID_CHECKPOINTS_OUTPUT_DIR="${MID_CHECKPOINTS_OUTPUT_DIR:-}"
 
 # Experiment output directory (logs, data, etc.)
-EXPERIMENT_DIR="${EXPERIMENT_DIR:-$(cd "$(dirname "$0")/.." && pwd)/nanochat_mid_compare/results/$(date +%Y%m%d_%H%M%S)}"
+EXPERIMENT_DIR="${EXPERIMENT_DIR:-$(cd "$(dirname "$0")" && pwd)/results/$(date +%Y%m%d_%H%M%S)}"
 
 # ── Mid-training hyperparameters ──
 # target-param-data-ratio: controls training token budget
@@ -152,7 +152,8 @@ elif [ -z "${ASCEND_DEVICE_ID:-}" ]; then
     export ASCEND_DEVICE_ID=0
 fi
 
-export ASCEND_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+ASCEND_DEVICE_LIST=$(seq -s, 0 $((NUM_NPU - 1)))
+export ASCEND_VISIBLE_DEVICES="$ASCEND_DEVICE_LIST"
 export RANK_SIZE=$NUM_NPU
 export MASTER_ADDR=127.0.0.1
 export MASTER_PORT=29500
