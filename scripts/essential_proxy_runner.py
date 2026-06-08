@@ -43,6 +43,41 @@ from quadmix.pipeline.proxy_runner import BaseProxyRunner
 from preprocess_essential_web_v1_sharded import DOMAIN_MAP, FASTTEXT_FIELDS
 
 
+def chunked_cross_entropy(logits, targets, chunk_size=256):
+    """Memory-efficient cross entropy: chunks along seq dim to avoid fp32 upcast OOM.
+
+    F.cross_entropy internally upcasts logits to fp32. For (B, T, V) with large V,
+    this materializes B*T*V*4 bytes. Chunking along T limits peak to B*chunk*V*4.
+    """
+    B, T, V = logits.shape
+    if B * T <= chunk_size:
+        return F.cross_entropy(logits.reshape(-1, V), targets.reshape(-1))
+    total_loss = torch.tensor(0.0, device=logits.device, dtype=torch.float32)
+    n_tokens = 0
+    for i in range(0, T, chunk_size):
+        chunk_logits = logits[:, i:i + chunk_size]
+        chunk_tgt = targets[:, i:i + chunk_size]
+        n = chunk_tgt.numel()
+        total_loss = total_loss + F.cross_entropy(
+            chunk_logits.reshape(-1, V), chunk_tgt.reshape(-1)
+        ) * n
+        n_tokens += n
+    return total_loss / n_tokens
+
+
+def chunked_cross_entropy_per_token(logits, targets, chunk_size=256):
+    """Same as chunked_cross_entropy but returns per-token losses (reduction='none')."""
+    B, T, V = logits.shape
+    per_token = torch.empty(B, T, device=logits.device, dtype=torch.float32)
+    for i in range(0, T, chunk_size):
+        chunk_logits = logits[:, i:i + chunk_size]
+        chunk_tgt = targets[:, i:i + chunk_size]
+        per_token[:, i:i + chunk_size] = F.cross_entropy(
+            chunk_logits.reshape(-1, V), chunk_tgt.reshape(-1), reduction="none"
+        ).view(chunk_tgt.shape)
+    return per_token
+
+
 class PerfTimer:
     """Lightweight performance timer with nesting support."""
     _timings: Dict[str, List[float]] = {}
@@ -1293,9 +1328,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             tgt = batch[:, 1:self.block_size + 1].contiguous()
 
             logits = model(inp)
-            loss = F.cross_entropy(
-                logits.view(-1, self.model_config.vocab_size), tgt.view(-1)
-            )
+            loss = chunked_cross_entropy(logits, tgt, chunk_size=256)
 
             is_acc = (iter_ct + 1) % grad_acc != 0
             (loss / grad_acc).backward()
@@ -1456,12 +1489,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 ids_tgt = val_tokens[start:end, 1:]
                 mask_tgt = val_mask[start:end, 1:]
                 logits = model(ids_in)
-                loss = F.cross_entropy(
-                    logits.view(-1, self.model_config.vocab_size),
-                    ids_tgt.reshape(-1),
-                    reduction="none",
-                )
-                loss = loss.view(ids_tgt.shape)
+                loss = chunked_cross_entropy_per_token(logits, ids_tgt, chunk_size=256)
                 assistant_count = mask_tgt.float().sum(dim=1).clamp(min=1)
                 per_doc = (loss * mask_tgt.float()).sum(dim=1) / assistant_count
                 per_doc_losses.append(per_doc)
@@ -1681,9 +1709,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             with PerfTimer.section("cache_results", "tokenize_all"):
                 for sid, parsed_rows, miss_tokens, io_time, tokenize_time, total_time in parallel_results:
                     self._memory_cache_add_rows(sid, parsed_rows, miss_tokens)
-                    self._cache_add_rows(sid, parsed_rows, torch.from_numpy(miss_tokens))
                     total_tokenized += len(parsed_rows)
-                    print(f"  [Shard {sid}] tokenized {len(parsed_rows):,} docs (IO {io_time:.1f}s, tok {tokenize_time:.1f}s)")
         else:
             print(f"[TokenizeAll] All {len(shard_groups)} shards fully cached, 0 miss rows")
 

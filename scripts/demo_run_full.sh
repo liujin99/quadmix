@@ -204,7 +204,7 @@ cat << PARAMS
   │ seq_len (block_size)       │       2,048  │
   │ 训练步数                   │       5,000  │
   │ 全局 batch size            │          64  │
-  │ 微批大小                   │          32  │ (ga=2)
+  │ 微批大小                   │          64  │ (ga=1)
   │ warmup                     │         4%   │
   │ 验证集                     │   全量 10k   │
   │ 排名参考集大小             │      10,000  │
@@ -244,7 +244,7 @@ python3 "$QUADMIX_DIR/scripts/run_essential_web_v1.py" \
     --top-k 5 \
     --block-size 2048 \
     --tiny-steps 5000 \
-    --micro-batch-size 32 \
+    --micro-batch-size 64 \
     --global-batch-size 64 \
     --rank-ref-size 10000 \
     --output "$OUTPUT_DIR" \
