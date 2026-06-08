@@ -26,7 +26,7 @@ bash nanochat_mid_compare/run_experiment.sh
 | `DEVICE_BATCH_SIZE` | 每卡 batch size | `8` |
 | `NUM_NPU` | NPU 卡数 | `8` |
 | `SHARD_SIZE` | 输出 parquet 每 shard 文档数 | `10000` |
-| `VAL_RATIO` | 验证集比例 (val BPB 默认禁用，仅用于 dataloader 兼容) | `0.05` |
+| `VAL_RATIO` | 验证集比例 (0=全量训练，写 dummy val shard 兼容 dataloader) | `0` |
 | `EVAL_EVERY` | val BPB 评估间隔 (-1 = 禁用，因两组数据 val 不可比) | `-1` |
 | `SEED` | 随机种子 | `42` |
 | `MAX_RANDOM_SCAN` | 随机抽样扫描的最大 shard 数 | `500` |
@@ -59,7 +59,7 @@ d24 模型约 500M scaling params：
    ├── 读取 QuadMix sampled_dataset.parquet
    ├── 使用 nanochat tokenizer 精确计算 token 数
    ├── 从 essential-web 随机抽样等 token 数文档
-   ├── 共享验证集 (从 QuadMix 子集中抽取)
+   ├── val_ratio=0 时全量训练 (写 dummy val shard 兼容 dataloader)
    └── 输出两组 sharded parquet (text column only)
 
 2. 设置 checkpoint 输出目录 (可选 symlink 到大容量存储，通过 MID_CHECKPOINTS_OUTPUT_DIR)

@@ -25,8 +25,6 @@ import random
 import json
 import pickle
 import multiprocessing as mp
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 import pandas as pd
 import pyarrow as pa
@@ -90,16 +88,23 @@ def _scan_shard_metadata(shard_path):
     return [(i, c) for i, c in zip(valid_indices, char_counts)]
 
 
+def _scan_shard_metadata_indexed(args):
+    idx, shard_path = args
+    return idx, _scan_shard_metadata(shard_path)
+
+
 def scan_shards_metadata(shard_paths, num_workers=None):
     if num_workers is None:
-        num_workers = min(mp.cpu_count(), 64)
-    with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        futures = {executor.submit(_scan_shard_metadata, str(p)): i for i, p in enumerate(shard_paths)}
+        num_workers = min(mp.cpu_count() // 4, 32) or 1
+    tasks = [(i, str(p)) for i, p in enumerate(shard_paths)]
+    with mp.Pool(num_workers) as pool:
         results = [None] * len(shard_paths)
-        for future in tqdm(as_completed(futures), total=len(futures),
-                          desc=f"  Scanning metadata ({num_workers} threads)"):
-            idx = futures[future]
-            results[idx] = future.result()
+        for idx, docs in tqdm(
+            pool.imap_unordered(_scan_shard_metadata_indexed, tasks, chunksize=1),
+            total=len(tasks),
+            desc=f"  Scanning metadata ({num_workers} processes)",
+        ):
+            results[idx] = docs
     return results
 
 
@@ -115,20 +120,19 @@ def _read_docs_from_shard(args):
 
 def read_selected_docs(shard_paths, selections, num_workers=None):
     if num_workers is None:
-        num_workers = min(mp.cpu_count(), 64)
+        num_workers = min(mp.cpu_count() // 4, 32) or 1
     shard_to_docs = {}
     for shard_id, doc_id in selections:
         if shard_id not in shard_to_docs:
             shard_to_docs[shard_id] = []
         shard_to_docs[shard_id].append(doc_id)
     tasks = [(str(shard_paths[sid]), indices) for sid, indices in shard_to_docs.items()]
-    with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        futures = {executor.submit(_read_docs_from_shard, task): i for i, task in enumerate(tasks)}
-        results = [None] * len(tasks)
-        for future in tqdm(as_completed(futures), total=len(futures),
-                          desc=f"  Reading selected docs ({num_workers} threads)"):
-            idx = futures[future]
-            results[idx] = future.result()
+    with mp.Pool(num_workers) as pool:
+        results = list(tqdm(
+            pool.imap_unordered(_read_docs_from_shard, tasks, chunksize=1),
+            total=len(tasks),
+            desc=f"  Reading selected docs ({num_workers} processes)",
+        ))
     return [doc for shard_docs in results for doc in shard_docs]
 
 
@@ -253,17 +257,22 @@ def main():
     print(f"  Tokens ({token_method}): {accumulated_tokens:,}")
 
     print(f"\n[4/5] Splitting train/val (val_ratio={args.val_ratio})...")
-    n_val = max(1, int(len(quadmix_docs) * args.val_ratio))
+    n_val = int(len(quadmix_docs) * args.val_ratio) if args.val_ratio > 0 else 0
 
     random.shuffle(quadmix_docs)
     random.shuffle(random_docs)
 
-    val_docs = quadmix_docs[:n_val]
-    quadmix_train = quadmix_docs[n_val:]
-    random_train = random_docs[n_val:]
+    if n_val > 0:
+        val_docs = quadmix_docs[:n_val]
+        quadmix_train = quadmix_docs[n_val:]
+        random_train = random_docs[n_val:]
+    else:
+        val_docs = []
+        quadmix_train = quadmix_docs
+        random_train = random_docs
 
     print(f"  QuadMix train: {len(quadmix_train):,}, val: {len(val_docs):,}")
-    print(f"  Random  train: {len(random_train):,}, val: {len(val_docs):,} (shared)")
+    print(f"  Random  train: {len(random_train):,}, val: {len(val_docs):,}")
 
     print(f"\n[5/5] Writing sharded parquet files...")
 
@@ -276,8 +285,13 @@ def main():
             out_path = data_dir / f"shard_{i:05d}.parquet"
             write_shard(shard_docs, str(out_path), args.num_npu)
         val_path = data_dir / f"shard_{n_shards:05d}.parquet"
-        write_shard(val_docs, str(val_path), args.num_npu)
-        print(f"  {name}: {n_shards} train shards + 1 val shard -> {data_dir}")
+        if val_docs:
+            write_shard(val_docs, str(val_path), args.num_npu)
+        else:
+            dummy_val = [{"text": "dummy"}]
+            write_shard(dummy_val, str(val_path), args.num_npu)
+        val_label = f"{len(val_docs)} val" if val_docs else "1 dummy val"
+        print(f"  {name}: {n_shards} train shards + {val_label} -> {data_dir}")
 
     write_dataset(quadmix_train, quadmix_dir, "QuadMix")
     write_dataset(random_train, random_dir, "Random")
