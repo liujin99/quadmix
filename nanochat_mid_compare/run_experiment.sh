@@ -53,7 +53,7 @@ EXPERIMENT_DIR="${EXPERIMENT_DIR:-$(cd "$(dirname "$0")" && pwd)/results/$(date 
 # - If data < ratio * params: use all data (1 epoch, no overfitting)
 # - If data > ratio * params: cap at ratio * params (no over-training)
 # d24 model: num_scaling_params (total) ≈ 1.3B
-TARGET_PARAM_DATA_RATIO="${TARGET_PARAM_DATA_RATIO:-0.1}"
+TARGET_PARAM_DATA_RATIO="${TARGET_PARAM_DATA_RATIO:-0.5}"
 NUM_SCALING_PARAMS="${NUM_SCALING_PARAMS:-1300000000}"  # d24 ≈ 1.3B
 DEVICE_BATCH_SIZE="${DEVICE_BATCH_SIZE:-8}"
 NUM_NPU="${NUM_NPU:-8}"
