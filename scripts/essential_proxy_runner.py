@@ -1495,7 +1495,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 assistant_count = mask_tgt.float().sum(dim=1).clamp(min=1)
                 per_doc = (loss * mask_tgt.float()).sum(dim=1) / assistant_count
                 per_doc_losses.append(per_doc)
-                del logits, loss, per_doc
+                del hidden, loss, per_doc
             val_loss = float(torch.cat(per_doc_losses).mean())
         del val_tokens, val_mask, per_doc_losses
         if device.type == "npu":
