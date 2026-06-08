@@ -247,7 +247,8 @@ else
         --shard-size "$SHARD_SIZE" \
         --val-ratio "$VAL_RATIO" \
         --seed "$SEED" \
-        --max-random-scan "$MAX_RANDOM_SCAN"
+        --max-random-scan "$MAX_RANDOM_SCAN" \
+        --num-npu "$NUM_NPU"
 fi
 
 echo ""

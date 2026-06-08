@@ -132,10 +132,11 @@ def read_selected_docs(shard_paths, selections, num_workers=None):
     return [doc for shard_docs in results for doc in shard_docs]
 
 
-def write_shard(docs, output_path):
+def write_shard(docs, output_path, num_npu=8):
     texts = [d["text"] for d in docs]
     table = pa.table({"text": texts})
-    pq.write_table(table, output_path, row_group_size=1024)
+    rg_size = max(1, len(docs) // (num_npu * 2))
+    pq.write_table(table, output_path, row_group_size=rg_size)
 
 
 def main():
@@ -160,6 +161,8 @@ def main():
     parser.add_argument("--num-workers", type=int, default=None,
                         help="Number of parallel workers. Tokenize: processes (each uses 4 rust threads). "
                              "Shard read: threads. Default: auto")
+    parser.add_argument("--num-npu", type=int, default=8,
+                        help="Number of NPUs for DDP (ensures enough row groups per shard)")
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -271,9 +274,9 @@ def main():
             end = min(start + args.shard_size, len(docs))
             shard_docs = docs[start:end]
             out_path = data_dir / f"shard_{i:05d}.parquet"
-            write_shard(shard_docs, str(out_path))
+            write_shard(shard_docs, str(out_path), args.num_npu)
         val_path = data_dir / f"shard_{n_shards:05d}.parquet"
-        write_shard(val_docs, str(val_path))
+        write_shard(val_docs, str(val_path), args.num_npu)
         print(f"  {name}: {n_shards} train shards + 1 val shard -> {data_dir}")
 
     write_dataset(quadmix_train, quadmix_dir, "QuadMix")
