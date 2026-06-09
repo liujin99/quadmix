@@ -8,10 +8,10 @@ QuaDMix uses a 1M-parameter proxy model to rapidly evaluate different data sampl
 
 We provide two validation sets:
 
-| Validation Set | Purpose | Source | Docs |
-|----------------|---------|--------|------|
-| **OpenHermes-10k** | General instruction-following quality | OpenHermes-2.5-1M | [Below](#openhermes-10k) |
-| **CORE-22tasks** | Benchmark-aligned capability | DCLM CORE benchmark | [Below](#core-22tasks-recommended) |
+| Validation Set | Purpose | Source | Docs | Loss Strategy |
+|----------------|---------|--------|------|---------------|
+| **OpenHermes-10k** | General instruction-following quality | OpenHermes-2.5-1M | [Below](#openhermes-10k) | Full sequence |
+| **CORE-22tasks** | Benchmark-aligned capability | DCLM CORE benchmark | [Below](#core-22tasks-recommended) | Continuation-only |
 
 Both sets share the same file format and are automatically downloaded from HuggingFace when first used.
 
@@ -101,85 +101,77 @@ The `continuation` is the correct answer or completion. For `multiple_choice` ta
 
 Each task specifies a `continuation_delimiter` in `core.yaml` (typically `" "` or `"\nAnswer: "`). This delimiter is inserted between context and continuation, affecting tokenization at the boundary. We read this from the YAML config to ensure correct token boundaries.
 
-### Loss Strategy: Full Sequence Loss
+### Loss Strategy: Continuation-Only Loss
 
-**Design choice:** The loss mask marks **all non-padding tokens** as `True`.
+**Design choice:** The loss mask marks **only continuation tokens** as `True`.
 
 ```
 [context tokens] [continuation tokens] [padding]
-      True              True            False
+      False             True            False
 ```
 
-#### Evolution: Continuation-Only → Full Sequence
+#### Why Continuation-Only Loss
 
-We initially implemented **continuation-only loss** — masking only the answer/completion tokens, matching the scoring scope of the actual CORE metric evaluation. The reasoning was that context tokens (the question) are easy to predict and would dilute the signal.
+We initially implemented **full sequence loss** — masking all non-padding tokens (context + continuation), following the QuaDMix paper's approach. However, empirical testing revealed a critical problem: **16 proxy model experiments showed only std=0.0626 loss variance**, indicating the validation set could not discriminate between different data mixtures.
 
-However, this created a severe token count problem:
+**Root cause analysis:**
 
-| Strategy | Docs | Tokens | vs OpenHermes Gap | SE Ratio |
-|----------|------|--------|-------------------|----------|
-| Continuation-only (cap-1000) | 16,345 | 100,018 | 22.4x | 4.7x |
-| Full sequence (cap-1000) | 16,345 | 1,540,450 | 1.5x | 1.2x |
-| Full sequence (cap-2000) | 27,163 | 2,837,174 | 0.79x | 0.89x |
+| Component | Tokens | % of Total | Signal Quality |
+|-----------|--------|------------|----------------|
+| Context (questions) | 5,848,442 | 94.8% | Near-zero (identical across experiments) |
+| Continuation (answers) | 317,561 | 5.2% | High (varies by data mixture quality) |
 
-The continuation-only approach produced only ~100k tokens because benchmark answers are inherently short:
+The problem: 94.8% of the loss came from predicting context tokens (benchmark questions), which are identical regardless of training data. The actual signal — how well the model predicts answers — was drowned out by this noise.
 
-| Continuation Length | Tasks | Avg tokens/doc |
-|---------------------|-------|----------------|
-| Very short (<5 chars) | BoolQ (yes/no), BigBench Operators (numbers), BigBench Dyck (brackets) | ~1-2 |
-| Short (5-15 chars) | LAMBADA (last word), SQuAD (extractive QA), CommonsenseQA (option text) | ~3-6 |
-| Medium (15-50 chars) | ARC, PIQA, HellaSwag (full sentence answers) | ~10-30 |
-
-Even with all available data (80,995 docs), continuation-only loss yields only ~530k tokens — still a 4.2x gap vs OpenHermes. This is a fundamental property of benchmark task design, not an extraction bug.
-
-**Why full sequence loss is valid for our use case:**
-
-We are comparing data mixtures (QuadMix vs Random), not measuring absolute model capability. The comparison signal is:
+**Why continuation-only loss works:**
 
 ```
 Δloss = loss_A - loss_B
-      = (L_context_A + L_answer_A) - (L_context_B + L_answer_B)
-      = (L_context_A - L_context_B) + (L_answer_A - L_answer_B)
+      = L_answer_A - L_answer_B  (context masked out)
 ```
 
-- `L_answer_A - L_answer_B`: the signal we care about (which mixture teaches better answers)
-- `L_context_A - L_context_B`: adds noise from context prediction differences, but since both groups see the same validation set, this term is small and symmetric
+By masking context tokens, we eliminate the noise term entirely. The tradeoff: fewer total tokens (317k vs 2.84M), but **100% signal purity**.
 
-The additional context tokens (~15x more) reduce variance far more than the added noise increases it. This matches the QuaDMix paper's approach, which computes loss on the full benchmark sequence without distinguishing context from continuation.
+**Compensation strategy:**
 
-### Sampling Strategy: Cap-2000
+To offset the reduced token count, we increased the cap from 2000 to **5000 docs/task**, yielding 46,926 documents. While continuation tokens per doc are few (avg 6.8), the large doc count provides sufficient statistical power through the standard error formula:
 
-Each task samples `min(2000, available_data)` documents — no up-sampling:
+```
+SE = σ / √n
+```
 
-- **Data-rich tasks** (e.g., HellaSwag with 10,042 docs): sample 2,000
+With n=46,926 independent documents, the SE is small enough to detect meaningful differences between data mixtures.
+
+### Sampling Strategy: Cap-5000
+
+Each task samples `min(5000, available_data)` documents — no up-sampling:
+
+- **Data-rich tasks** (e.g., HellaSwag with 10,042 docs): sample 5,000
 - **Data-poor tasks** (e.g., COPA with 100 docs, bigbench_repeat_copy_logic with 32): use all available
 
 #### Cap Selection Process
 
-We evaluated multiple cap values to find the best tradeoff between token coverage and evaluation time:
+With continuation-only loss, each document contributes few signal tokens (avg 6.8 continuation tokens). We need more documents to compensate:
 
-| Cap | Docs | Tokens | vs OH Gap | SE Ratio | Eval Time | File Size |
-|-----|------|--------|-----------|----------|-----------|-----------|
-| 500 | 8,845 | 0.52M | 42.9x | 6.5x | 0.9x | 69 MB |
-| 1000 | 16,345 | 1.54M | 1.5x | 1.2x | 1.6x | 287 MB |
-| 1500 | 22,325 | 2.10M | 1.1x | 1.0x | 2.2x | 392 MB |
-| **2000** | **27,163** | **2.84M** | **0.79x** | **0.89x** | **2.7x** | **478 MB** |
-| 3000 | 34,656 | 3.27M | 0.68x | 0.83x | 3.5x | 547 MB |
-| 5000 | 46,926 | 4.42M | 0.51x | 0.71x | 4.7x | 741 MB |
-| All | 80,995 | 7.63M | 0.29x | 0.54x | 8.1x | 1.3 GB |
+| Cap | Docs | Cont Tokens | Eval Time | File Size |
+|-----|------|-------------|-----------|-----------|
+| 1000 | 16,345 | ~110k | 1.6x | 287 MB |
+| 2000 | 27,163 | ~185k | 2.7x | 478 MB |
+| **5000** | **46,926** | **318k** | **4.7x** | **825 MB** |
+| All | 80,995 | ~530k | 8.1x | 1.3 GB |
 
-- **SE Ratio** = standard error of CORE loss estimate / standard error of OpenHermes loss estimate. Lower is better; 1.0x means equal precision.
-- **Eval Time** = relative to OpenHermes-10k (10,000 docs). Proxy model evaluation time scales linearly with doc count.
-- **vs OH Gap** = OpenHermes tokens / CORE tokens. <1.0x means CORE has more tokens.
+- **Cont Tokens** = total continuation tokens (loss_mask=True). This is the actual signal.
+- **Eval Time** = relative to OpenHermes-10k (10,000 docs).
+- **File Size** = size of the tokenized .pt file.
 
-We chose **cap-2000** because:
-1. It exceeds OpenHermes in token count (2.84M vs 2.24M), giving SE ratio 0.89x — slightly better precision than OpenHermes
-2. Empirically, OpenHermes-10k produces ~8% val loss difference between QuadMix and Random strategies. Matching its token count ensures CORE has comparable statistical power to detect similar effect sizes
-3. The 2.7x evaluation time cost is acceptable given the improved signal-to-noise ratio
+We chose **cap-5000** because:
+1. Continuation-only loss requires more documents to achieve statistical power (fewer tokens per doc)
+2. 46,926 docs provides ~4.7x evaluation time vs OpenHermes, acceptable for the improved signal purity
+3. All 21 tasks are retained (no filtering), preserving capability diversity
 
 #### Why No Up-Sampling for Data-Poor Tasks?
 
-6 tasks have fewer than 2,000 documents:
+Several tasks have fewer than 5,000 documents:
 
 | Task | Available | Reason |
 |------|-----------|--------|
@@ -189,6 +181,14 @@ We chose **cap-2000** because:
 | agi_eval_lsat_ar | 230 | LSAT analytical reasoning |
 | openbook_qa | 500 | Science questions |
 | winograd | 273 | Winograd Schema Challenge |
+| bigbench_dyck_languages | 1,000 | Symbolic bracket completion |
+| arc_challenge | 1,172 | Hard science questions |
+| commonsense_qa | 1,221 | Commonsense reasoning |
+| winogrande | 1,267 | Pronoun resolution |
+| piqa | 1,838 | Physical intuition QA |
+| jeopardy | 2,117 | Trivia questions |
+| arc_easy | 2,376 | Easy science questions |
+| boolq | 3,270 | Yes/no reading comprehension |
 
 Up-sampling (sampling with replacement) would artificially inflate their token count but not their information content — the proxy model would see the same documents multiple times, reducing effective diversity. We use all available data without replacement.
 
@@ -196,7 +196,7 @@ Up-sampling (sampling with replacement) would artificially inflate their token c
 
 The original CORE benchmark includes `hellaswag_zeroshot` (0-shot) and `hellaswag` (10-shot), which reference the same underlying dataset. Since the proxy model has no few-shot capability, these would produce identical text. We deduplicate by `dataset_uri`, keeping only the first occurrence.
 
-**Result:** 21 unique tasks, capped at 2,000 docs/task = **27,163 documents** (exact count depends on per-task data availability)
+**Result:** 21 unique tasks, capped at 5,000 docs/task = **46,926 documents** (exact count depends on per-task data availability)
 
 ### Task Coverage
 
@@ -225,7 +225,7 @@ If you need to regenerate the validation set (e.g., to customize parameters):
 ```bash
 python scripts/validation_set/prepare_core_val_set.py \
   --eval-bundle /path/to/eval_bundle \
-  --num-samples-per-task 2000 \
+  --num-samples-per-task 5000 \
   --block-size 2048 \
   --output-dir data
 ```
@@ -241,12 +241,10 @@ python scripts/validation_set/prepare_core_val_set.py \
 |--------|----------------|--------------|
 | **Focus** | General instruction quality | Benchmark-aligned capabilities |
 | **Source** | OpenHermes-2.5-1M (chat data) | DCLM CORE benchmark (21 tasks) |
-| **Loss mask** | All non-padding tokens | All non-padding tokens |
-| **Tokens** | 2.24M | 2.84M |
-| **SE ratio** | 1.0x (baseline) | 0.89x |
-| **Sampling** | 10,000 docs from single source | Cap-2000 per task (no up-sampling) |
-| **Size** | 10,000 docs | ~27,000 docs (21 tasks, capped at 2000) |
-| **Eval time** | 1.0x | ~2.7x |
+| **Loss mask** | All non-padding tokens | Continuation tokens only |
+| **Signal tokens** | 2.24M (100% of non-padding) | 318k (5.2% of non-padding) |
+| **Docs** | 10,000 | 46,926 |
+| **Eval time** | 1.0x | ~4.7x |
 | **Best for** | General-purpose mix | Capability-targeted mixes |
 
 ---

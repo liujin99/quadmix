@@ -3,9 +3,9 @@
 Prepare CORE benchmark-based validation set for QuaDMix proxy model.
 
 Loads 22 tasks from the CORE eval bundle, extracts context + continuation
-per task type, tokenizes with GPT-NeoX-20B. The loss_mask marks ALL
-non-padding tokens (full sequence loss), following the QuaDMix paper's
-approach of using benchmark training data as the validation target.
+per task type, tokenizes with GPT-NeoX-20B. The loss_mask marks ONLY
+continuation tokens (continuation-only loss), maximizing signal-to-noise
+ratio for discriminating between data mixtures.
 
 Text extraction per icl_task_type (context | continuation):
   - multiple_choice:    query + delimiter  |  choices[gold]
@@ -17,7 +17,7 @@ Usage:
 
 Output: core_22tasks_tokenized.pt
   - token_ids:    LongTensor [num_docs, block_size]   padded
-  - loss_mask:    BoolTensor  [num_docs, block_size]   True for all non-padding tokens
+  - loss_mask:    BoolTensor  [num_docs, block_size]   True for continuation tokens only
   - task_labels:  list[str]   per-doc task label (e.g., "hellaswag_zeroshot")
   - metadata:     dict        source info
 """
@@ -38,7 +38,8 @@ EVAL_BUNDLE_DIR = "/home/ma-user/work/nanochat-master-multi/eval_bundle"
 OUTPUT_DIR = "data"
 SEED = 42
 BLOCK_SIZE = 2048
-NUM_SAMPLES_PER_TASK = 2000
+NUM_SAMPLES_PER_TASK = 5000
+MIN_CONTINUATION_TOKENS = 1
 
 
 def parse_choice_from_query(query, choice_label):
@@ -111,7 +112,9 @@ def main():
     parser.add_argument("--eval-bundle", type=str, default=EVAL_BUNDLE_DIR,
                         help=f"Path to CORE eval bundle directory (default: {EVAL_BUNDLE_DIR})")
     parser.add_argument("--num-samples-per-task", type=int, default=NUM_SAMPLES_PER_TASK,
-                        help=f"Number of samples per task (default: {NUM_SAMPLES_PER_TASK})")
+                        help=f"Max samples per task, 0=all available (default: {NUM_SAMPLES_PER_TASK})")
+    parser.add_argument("--min-continuation-tokens", type=int, default=MIN_CONTINUATION_TOKENS,
+                        help=f"Min continuation tokens to keep a sample (default: {MIN_CONTINUATION_TOKENS})")
     parser.add_argument("--seed", type=int, default=SEED,
                         help=f"Random seed (default: {SEED})")
     args = parser.parse_args()
@@ -136,10 +139,11 @@ def main():
     tasks = core_config["icl_tasks"]
     print(f"Loaded {len(tasks)} tasks from core.yaml")
 
-    # Per-task collection: list of (context, continuation, task_label) tuples
+    min_cont_tok = args.min_continuation_tokens
     all_samples = []
     task_meta = []
     seen_uris = set()
+    filtered_tasks = []
 
     for task in tasks:
         label = task["label"]
@@ -147,7 +151,6 @@ def main():
         dataset_uri = task["dataset_uri"]
         delimiter = task.get("continuation_delimiter", " ")
 
-        # Deduplicate: skip if same dataset_uri already processed (e.g., hellaswag 0-shot vs 10-shot)
         if dataset_uri in seen_uris:
             print(f"\nSkipping task: {label} (duplicate of {dataset_uri})")
             continue
@@ -157,23 +160,33 @@ def main():
         items = load_task_items(args.eval_bundle, dataset_uri)
         print(f"  Total items: {len(items)}")
 
-        # Extract (context, continuation) for each item
         pairs = []
         for item in items:
             ctx, cont = extract_context_continuation(task_type, item, delimiter)
             if cont.strip():
-                pairs.append((ctx, cont))
+                cont_tok = tokenizer.encode(cont, add_special_tokens=False)
+                if len(cont_tok) >= min_cont_tok:
+                    pairs.append((ctx, cont, len(cont_tok)))
 
-        print(f"  Valid pairs (non-empty continuation): {len(pairs)}")
+        print(f"  Valid pairs (continuation >= {min_cont_tok} tokens): {len(pairs)}")
 
-        # Cap at available data (no up-sampling)
-        target = min(args.num_samples_per_task, len(pairs))
-        sampled = random.sample(pairs, target)
-        capped = len(pairs) > target
+        if len(pairs) == 0:
+            print(f"  FILTERED OUT: no samples with >= {min_cont_tok} continuation tokens")
+            filtered_tasks.append(label)
+            continue
 
-        print(f"  Sampled: {len(sampled)}" + (f" (capped from {len(pairs)})" if capped else f" (all {len(pairs)} used)"))
+        if args.num_samples_per_task > 0:
+            target = min(args.num_samples_per_task, len(pairs))
+            sampled = random.sample(pairs, target)
+            capped = len(pairs) > target
+        else:
+            sampled = pairs
+            capped = False
 
-        all_samples.extend([(ctx, cont, label) for ctx, cont in sampled])
+        avg_cont_tok = sum(ct for _, _, ct in sampled) / len(sampled)
+        print(f"  Sampled: {len(sampled)}" + (f" (capped from {len(pairs)})" if capped else f" (all {len(pairs)} used)") + f", avg cont tokens: {avg_cont_tok:.1f}")
+
+        all_samples.extend([(ctx, cont, label) for ctx, cont, _ in sampled])
         task_meta.append({
             "label": label,
             "task_type": task_type,
@@ -183,54 +196,64 @@ def main():
             "valid_pairs": len(pairs),
             "sampled": len(sampled),
             "capped": capped,
+            "avg_continuation_tokens": round(avg_cont_tok, 1),
         })
+
+    if filtered_tasks:
+        print(f"\n{'='*60}")
+        print(f"Filtered out {len(filtered_tasks)} tasks (continuation < {min_cont_tok} tokens):")
+        for t in filtered_tasks:
+            print(f"  - {t}")
 
     print(f"\n{'='*60}")
     print(f"Total samples across all tasks: {len(all_samples)}")
 
-    # Tokenize with full sequence loss mask (all non-padding tokens)
-    print(f"\nTokenizing (block_size={block_size})...")
+    print(f"\nTokenizing (block_size={block_size}, continuation-only loss)...")
     all_ids = []
     all_masks = []
     task_labels = []
 
     for idx, (context, continuation, task_label) in enumerate(all_samples):
-        full_text = context + continuation
-        full_ids = tokenizer.encode(full_text, add_special_tokens=False)
+        ctx_ids = tokenizer.encode(context, add_special_tokens=False) if context else []
+        cont_ids = tokenizer.encode(continuation, add_special_tokens=False)
+        full_ids = ctx_ids + cont_ids
+
+        ctx_len = len(ctx_ids)
+        cont_len = len(cont_ids)
+        seq_len = min(len(full_ids), block_size)
 
         ids_tensor = torch.LongTensor(full_ids)
-        seq_len = min(len(ids_tensor), block_size)
-
-        # Truncate or pad to block_size
         if len(ids_tensor) > block_size:
             ids_tensor = ids_tensor[:block_size]
+            cont_end = block_size
         else:
+            cont_end = seq_len
             pad_len = block_size - len(ids_tensor)
             ids_tensor = torch.cat([ids_tensor, torch.zeros(pad_len, dtype=torch.long)])
 
-        # Loss mask: True for all non-padding tokens (full sequence loss)
+        cont_start = min(ctx_len, block_size)
         loss_mask = torch.zeros(block_size, dtype=torch.bool)
-        loss_mask[:seq_len] = True
+        if cont_start < cont_end:
+            loss_mask[cont_start:cont_end] = True
 
         all_ids.append(ids_tensor)
         all_masks.append(loss_mask)
         task_labels.append(task_label)
 
-        if (idx + 1) % 2000 == 0:
+        if (idx + 1) % 5000 == 0:
             print(f"  {idx+1}/{len(all_samples)}")
 
     token_ids = torch.stack(all_ids)
     loss_mask = torch.stack(all_masks)
 
-    # Stats
     total_tokens = token_ids.numel()
     non_padding = (token_ids != tokenizer.pad_token_id).sum().item()
     masked_tokens = loss_mask.sum().item()
     print(f"\n  Tokenized: {token_ids.shape}")
     print(f"  Non-padding tokens: {non_padding:,} / {total_tokens:,} ({non_padding/total_tokens*100:.1f}%)")
-    print(f"  Loss tokens (loss_mask=True): {masked_tokens:,} ({masked_tokens/non_padding*100:.1f}% of non-padding)")
+    print(f"  Continuation tokens (loss_mask=True): {masked_tokens:,} ({masked_tokens/non_padding*100:.1f}% of non-padding)")
+    print(f"  Context tokens (masked out): {non_padding - masked_tokens:,}")
 
-    # Save
     output = {
         "token_ids": token_ids,
         "loss_mask": loss_mask,
@@ -241,15 +264,16 @@ def main():
             "tokenizer": "gpt-neox-20b",
             "tokenizer_vocab": tokenizer.vocab_size,
             "model_vocab": 50432,
-            "loss_strategy": "full_sequence",
+            "loss_strategy": "continuation_only",
+            "min_continuation_tokens": min_cont_tok,
             "source": f"CORE-benchmark-{len(task_meta)}tasks",
             "eval_bundle": args.eval_bundle,
             "num_samples_per_task": args.num_samples_per_task,
             "seed": seed,
             "description": (
                 f"CORE benchmark {len(task_meta)}-task validation set (deduplicated); "
-                "loss_mask=True on all non-padding tokens (full sequence loss), "
-                "following QuaDMix paper's approach of using benchmark data as validation target"
+                "loss_mask=True on continuation tokens only (continuation-only loss), "
+                "maximizing signal-to-noise for discriminating data mixtures"
             ),
             "tasks": task_meta,
         }

@@ -54,30 +54,75 @@ DEFAULT_EVAL_BUNDLE = os.environ.get(
 )
 
 
-def ensure_val_data(val_path: str) -> str:
-    """
-    Ensure the validation set exists locally.
-    Downloads from HuggingFace if not found.
-    Returns the path to the file.
-    """
-    if os.path.exists(val_path):
-        return val_path
+def _hf_remote_size(repo_id: str, filename: str) -> int:
+    """Get remote file size from HuggingFace via HEAD request. Returns 0 if failed."""
+    url = f"{HF_ENDPOINT}/datasets/{repo_id}/resolve/main/{filename}"
+    try:
+        req = urllib.request.Request(url, method="HEAD")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return int(resp.headers.get("Content-Length", 0))
+    except Exception:
+        pass
+    return 0
 
-    # Try downloading
-    os.makedirs(os.path.dirname(val_path), exist_ok=True)
-    url = HF_RESOLVE.format(repo=HF_DATASET, file=HF_VAL_FILENAME)
-    print(f"\n[Setup] Validation set not found at:\n  {val_path}")
+
+def _download_hf_file(repo_id: str, filename: str, local_path: str) -> bool:
+    """Download a file from HuggingFace. Returns True on success."""
+    url = HF_RESOLVE.format(repo=repo_id, file=filename)
     if HF_ENDPOINT != "https://huggingface.co":
         print(f"[Setup] Using HF mirror: {HF_ENDPOINT}")
     print(f"[Setup] Downloading from:\n  {url}")
     try:
-        urllib.request.urlretrieve(url, val_path)
-        size_mb = os.path.getsize(val_path) / 1024**2
-        print(f"[Setup] Downloaded: {val_path} ({size_mb:.0f} MB)")
+        urllib.request.urlretrieve(url, local_path)
+        size_mb = os.path.getsize(local_path) / 1024**2
+        print(f"[Setup] Downloaded: {local_path} ({size_mb:.0f} MB)")
+        return True
     except Exception as e:
+        print(f"[Setup] Download failed: {e}")
+        return False
+
+
+def ensure_val_data(val_path: str) -> str:
+    """
+    Ensure the validation set exists locally and is up-to-date.
+    Downloads from HuggingFace if not found or version mismatch.
+    Returns the path to the file.
+    """
+    os.makedirs(os.path.dirname(val_path), exist_ok=True)
+
+    local_size = os.path.getsize(val_path) if os.path.exists(val_path) else 0
+    remote_size = _hf_remote_size(HF_DATASET, HF_VAL_FILENAME)
+
+    if remote_size == 0:
+        if local_size > 0:
+            print(f"\n[Setup] Warning: Cannot connect to HuggingFace to check {HF_VAL_FILENAME}")
+            print(f"[Setup] Using local file ({local_size / 1024**2:.0f} MB)")
+            print(f"[Setup] To force re-download, delete: {val_path}")
+            return val_path
+        else:
+            raise RuntimeError(
+                f"Cannot connect to HuggingFace and no local file.\n"
+                f"  Please download manually from:\n"
+                f"    https://huggingface.co/datasets/{HF_DATASET}\n"
+                f"  And place at: {val_path}"
+            )
+
+    if local_size == remote_size:
+        print(f"[Setup] Validation set up-to-date: {HF_VAL_FILENAME} ({local_size / 1024**2:.0f} MB)")
+        return val_path
+
+    if local_size > 0:
+        print(f"\n[Setup] {HF_VAL_FILENAME} version mismatch")
+        print(f"[Setup]   Local:  {local_size / 1024**2:.0f} MB")
+        print(f"[Setup]   Remote: {remote_size / 1024**2:.0f} MB")
+        print(f"[Setup]   Re-downloading...")
+        os.remove(val_path)
+    else:
+        print(f"\n[Setup] Validation set not found at:\n  {val_path}")
+
+    if not _download_hf_file(HF_DATASET, HF_VAL_FILENAME, val_path):
         raise RuntimeError(
-            f"Failed to download validation set from {url}.\n"
-            f"  Error: {e}\n"
+            f"Failed to download validation set.\n"
             f"  You can manually download from:\n"
             f"    https://huggingface.co/datasets/{HF_DATASET}\n"
             f"  Or place the file at: {val_path}"
@@ -86,29 +131,39 @@ def ensure_val_data(val_path: str) -> str:
 
 def ensure_core_val_data(val_path: str, eval_bundle: str) -> str:
     """
-    Ensure the CORE benchmark validation set exists.
-    First tries downloading from HuggingFace, then falls back to local generation.
+    Ensure the CORE benchmark validation set exists and is up-to-date.
+    Checks remote version, downloads from HuggingFace, or falls back to local generation.
     Returns the path to the file.
     """
-    if os.path.exists(val_path):
-        return val_path
-
     os.makedirs(os.path.dirname(val_path), exist_ok=True)
 
-    # Try downloading from HuggingFace first
-    url = HF_RESOLVE.format(repo=HF_CORE_DATASET, file=CORE_VAL_FILENAME)
-    print(f"\n[Setup] CORE validation set not found at:\n  {val_path}")
-    if HF_ENDPOINT != "https://huggingface.co":
-        print(f"[Setup] Using HF mirror: {HF_ENDPOINT}")
-    print(f"[Setup] Trying to download from:\n  {url}")
-    try:
-        urllib.request.urlretrieve(url, val_path)
-        size_mb = os.path.getsize(val_path) / 1024**2
-        print(f"[Setup] Downloaded: {val_path} ({size_mb:.0f} MB)")
+    local_size = os.path.getsize(val_path) if os.path.exists(val_path) else 0
+    remote_size = _hf_remote_size(HF_CORE_DATASET, CORE_VAL_FILENAME)
+
+    if remote_size == 0:
+        if local_size > 0:
+            print(f"\n[Setup] Warning: Cannot connect to HuggingFace to check {CORE_VAL_FILENAME}")
+            print(f"[Setup] Using local file ({local_size / 1024**2:.0f} MB)")
+            print(f"[Setup] To force re-download, delete: {val_path}")
+            return val_path
+    elif local_size == remote_size:
+        print(f"[Setup] CORE validation set up-to-date: {CORE_VAL_FILENAME} ({local_size / 1024**2:.0f} MB)")
         return val_path
-    except Exception as e:
-        print(f"[Setup] Download failed: {e}")
+    elif local_size > 0:
+        print(f"\n[Setup] {CORE_VAL_FILENAME} version mismatch")
+        print(f"[Setup]   Local:  {local_size / 1024**2:.0f} MB")
+        print(f"[Setup]   Remote: {remote_size / 1024**2:.0f} MB")
+        print(f"[Setup]   Re-downloading...")
+        os.remove(val_path)
+    else:
+        print(f"\n[Setup] CORE validation set not found at:\n  {val_path}")
+
+    if remote_size > 0:
+        if _download_hf_file(HF_CORE_DATASET, CORE_VAL_FILENAME, val_path):
+            return val_path
         print(f"[Setup] Falling back to local generation...")
+    else:
+        print(f"[Setup] Trying local generation...")
 
     # Fall back to local generation
     script_dir = os.path.dirname(os.path.abspath(__file__))

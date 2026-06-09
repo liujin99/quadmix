@@ -35,32 +35,9 @@ PREPROCESSED_DIR="$QUADMIX_TEMP_DIR/preprocessed"
 RAW_DATA_DIR="$QUADMIX_DIR/data/essential-web-v1"
 VAL_FILE="$QUADMIX_DIR/data/core_22tasks_tokenized.pt"
 
-# ── 驗證集下載 ──────────────────────────────────
-if [ ! -f "$VAL_FILE" ]; then
-    echo "╔══ 驗證集就緒: 從 HuggingFace 下載 ═══╗"
-    echo ""
-    echo "  驗證集不存在: $VAL_FILE"
-    echo "  從 liujin99/quadmix-core-22tasks 下載..."
-
-    # Support HF mirror via environment variable
-    HF_ENDPOINT="${HF_ENDPOINT:-https://huggingface.co}"
-    if [ "$HF_ENDPOINT" != "https://huggingface.co" ]; then
-        echo "  使用 HF 镜像: $HF_ENDPOINT"
-    fi
-
-    VAL_URL="$HF_ENDPOINT/datasets/liujin99/quadmix-core-22tasks/resolve/main/core_22tasks_tokenized.pt?download=true"
-
-    mkdir -p "$(dirname "$VAL_FILE")"
-    if command -v wget &>/dev/null; then
-        wget -q --show-progress "$VAL_URL" -O "$VAL_FILE"
-    else
-        curl -L -o "$VAL_FILE" "$VAL_URL"
-    fi
-    echo "  ✓ 驗證集下載完成: $(du -h "$VAL_FILE" | cut -f1)"
-    echo ""
-    echo "╚══════════════════════════════════════╝"
-    echo ""
-fi
+# ── 驗證集下載（帶版本檢查）──────────────────────────────────
+source "$QUADMIX_DIR/scripts/ensure_val_data.sh"
+ensure_val_data "liujin99/quadmix-core-22tasks" "core_22tasks_tokenized.pt" "$VAL_FILE"
 
 # ── 数据就绪检查（逐个 shard 检查，补充下载）──────────────────
 NUM_SHARDS=2  # quick demo 只需要 2 个 shard
@@ -199,6 +176,7 @@ python3 "$QUADMIX_DIR/scripts/run_essential_web_v1.py" \
     --micro-batch-size 2 \
     --global-batch-size 8 \
     --rank-ref-size 200 \
+    --checkpoint-interval 0 \
     --val-set core \
     --output "$OUTPUT_DIR" \
     "$@" || exit $?
