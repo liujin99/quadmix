@@ -133,9 +133,6 @@ fi
 if [ -z "$RANDOM_MODEL_TAG" ]; then
     RANDOM_MODEL_TAG="${BASE_MODEL_TAG}_random_${TIMESTAMP}"
 fi
-if [ -z "$QUALITY_MODEL_TAG" ] && [ -n "$PREPROCESSED_DIR" ]; then
-    QUALITY_MODEL_TAG="${BASE_MODEL_TAG}_quality_${QUALITY_METHOD}_${TIMESTAMP}"
-fi
 
 IFS=',' read -ra QUALITY_METHOD_ARRAY <<< "$QUALITY_METHODS"
 
