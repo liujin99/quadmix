@@ -392,7 +392,7 @@ run_mid_training() {
     fi
 
     cd "$NANOCHAT_ROOT"
-    torchrun --standalone --nproc_per_node="$NUM_NPU" -m scripts.mid_train -- \
+    python3 -m torch.distributed.run --standalone --nproc_per_node="$NUM_NPU" -m scripts.mid_train -- \
         --num-iterations="$NUM_ITERATIONS" \
         --target-param-data-ratio="$ACTUAL_RATIO" \
         --device-batch-size="$DEVICE_BATCH_SIZE" \
@@ -465,7 +465,7 @@ run_eval() {
     echo "  Evaluating: $MODEL_TAG ($MODEL_TYPE)"
 
     cd "$NANOCHAT_ROOT"
-    torchrun --standalone --nproc_per_node="$NUM_NPU" -m scripts.base_eval -- \
+    python3 -m torch.distributed.run --standalone --nproc_per_node="$NUM_NPU" -m scripts.base_eval -- \
         --eval=core \
         --device-batch-size=32 \
         --model-tag="$MODEL_TAG" \
