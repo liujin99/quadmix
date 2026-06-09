@@ -18,6 +18,8 @@ Usage:
 
 The validation set (openhermes_10k_assistant_tokenized.pt) will be
 automatically downloaded from HuggingFace if not found locally.
+Alternatively, use --val-set=core to use a CORE benchmark-based
+validation set (auto-generated from eval_bundle).
 """
 
 import argparse, os, sys, time, urllib.request
@@ -42,6 +44,14 @@ HF_DATASET = "liujin99/quadmix-openhermes-10k"
 HF_VAL_FILENAME = "openhermes_10k_assistant_tokenized.pt"
 HF_ENDPOINT = os.environ.get("HF_ENDPOINT", "https://huggingface.co")
 HF_RESOLVE = f"{HF_ENDPOINT}/datasets/{{repo}}/resolve/main/{{file}}"
+
+# CORE benchmark validation set
+CORE_VAL_FILENAME = "core_22tasks_tokenized.pt"
+HF_CORE_DATASET = "liujin99/quadmix-core-22tasks"
+DEFAULT_EVAL_BUNDLE = os.environ.get(
+    "EVAL_BUNDLE_DIR",
+    "/home/ma-user/work/nanochat-master-multi/eval_bundle",
+)
 
 
 def ensure_val_data(val_path: str) -> str:
@@ -73,6 +83,74 @@ def ensure_val_data(val_path: str) -> str:
             f"  Or place the file at: {val_path}"
         )
     return val_path
+
+def ensure_core_val_data(val_path: str, eval_bundle: str) -> str:
+    """
+    Ensure the CORE benchmark validation set exists.
+    First tries downloading from HuggingFace, then falls back to local generation.
+    Returns the path to the file.
+    """
+    if os.path.exists(val_path):
+        return val_path
+
+    os.makedirs(os.path.dirname(val_path), exist_ok=True)
+
+    # Try downloading from HuggingFace first
+    url = HF_RESOLVE.format(repo=HF_CORE_DATASET, file=CORE_VAL_FILENAME)
+    print(f"\n[Setup] CORE validation set not found at:\n  {val_path}")
+    if HF_ENDPOINT != "https://huggingface.co":
+        print(f"[Setup] Using HF mirror: {HF_ENDPOINT}")
+    print(f"[Setup] Trying to download from:\n  {url}")
+    try:
+        urllib.request.urlretrieve(url, val_path)
+        size_mb = os.path.getsize(val_path) / 1024**2
+        print(f"[Setup] Downloaded: {val_path} ({size_mb:.0f} MB)")
+        return val_path
+    except Exception as e:
+        print(f"[Setup] Download failed: {e}")
+        print(f"[Setup] Falling back to local generation...")
+
+    # Fall back to local generation
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    prepare_script = os.path.join(script_dir, "validation_set", "prepare_core_val_set.py")
+
+    if not os.path.exists(prepare_script):
+        raise FileNotFoundError(
+            f"CORE validation set not found at:\n  {val_path}\n"
+            f"Preparation script also missing:\n  {prepare_script}\n"
+            f"You can manually download from:\n"
+            f"  https://huggingface.co/datasets/{HF_CORE_DATASET}"
+        )
+
+    print(f"[Setup] Auto-generating from eval_bundle: {eval_bundle}")
+
+    import subprocess
+    result = subprocess.run(
+        [
+            sys.executable, prepare_script,
+            "--output-dir", os.path.dirname(val_path),
+            "--eval-bundle", eval_bundle,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Failed to generate CORE validation set.\n"
+            f"  stdout: {result.stdout}\n"
+            f"  stderr: {result.stderr}\n"
+            f"You can manually download from:\n"
+            f"  https://huggingface.co/datasets/{HF_CORE_DATASET}"
+        )
+    print(result.stdout)
+    if not os.path.exists(val_path):
+        raise RuntimeError(
+            f"CORE validation set generation completed but file not found:\n  {val_path}"
+        )
+    size_mb = os.path.getsize(val_path) / 1024**2
+    print(f"[Setup] Generated: {val_path} ({size_mb:.0f} MB)")
+    return val_path
+
 
 DOMAIN_NAMES = [
     "Industrial arts, Technology, and Engineering",  # 0
@@ -131,9 +209,15 @@ def build_parser():
                    help="Record val_loss every N steps during proxy training "
                         "(default: 1000, 0 = disable). "
                         "Results saved to each exp dir as checkpoint_trajectory.json.")
+    p.add_argument("--val-set", type=str, default="openhermes",
+                   choices=["openhermes", "core"],
+                   help="Validation set: 'openhermes' (default, auto-download) or "
+                        "'core' (CORE benchmark 22-task, auto-generate from eval_bundle)")
     p.add_argument("--val-path", type=str, default=None,
-                   help="Path to validation .pt file "
-                        "(default: auto-download from liujin99/quadmix-openhermes-10k to project data/)")
+                   help="Path to validation .pt file (overrides --val-set)")
+    p.add_argument("--eval-bundle", type=str, default=DEFAULT_EVAL_BUNDLE,
+                   help="Path to CORE eval bundle directory "
+                        "(used when --val-set=core, default: $EVAL_BUNDLE_DIR)")
     return p
 
 
@@ -142,9 +226,17 @@ def create_proxy_runner(config, args, output_dir, metadata_manager):
     from essential_proxy_runner import EssentialWebProxyRunner
     proxy_dir = os.path.join(output_dir, "proxy_experiments")
 
-    # Ensure validation data exists (auto-download if needed)
-    val_path = args.val_path or DEFAULT_VAL_PATH
-    val_path = ensure_val_data(val_path)
+    # Resolve validation path
+    if args.val_path:
+        val_path = args.val_path
+        if not os.path.exists(val_path):
+            raise FileNotFoundError(f"Validation file not found: {val_path}")
+    elif args.val_set == "core":
+        val_path = os.path.join(DEFAULT_VAL_DIR, CORE_VAL_FILENAME)
+        val_path = ensure_core_val_data(val_path, args.eval_bundle)
+    else:
+        val_path = os.path.join(DEFAULT_VAL_DIR, HF_VAL_FILENAME)
+        val_path = ensure_val_data(val_path)
 
     # Parse checkpoint interval
     checkpoint_interval = args.checkpoint_interval if args.checkpoint_interval else 1000
@@ -236,7 +328,7 @@ def main():
 
     print(f"\n[Setup] Proxy runner: {n_exp} experiments, "
          f"{args.tiny_steps} steps each, "
-         f"val=full (all 10k docs)"
+         f"val={args.val_set}"
          f"{', ' + str(args.npu_devices) + ' NPU devices' if args.npu_devices > 1 else ''}")
 
     pipeline.run(

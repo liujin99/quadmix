@@ -40,21 +40,21 @@ export QUADMIX_TEMP_DIR="${QUADMIX_TEMP_DIR:-$HOME/.cache/QuaDMix/temp}"
 
 PREPROCESSED_DIR="$QUADMIX_TEMP_DIR/preprocessed"
 RAW_DATA_DIR="$QUADMIX_DIR/data/essential-web-v1"
-VAL_FILE="$QUADMIX_DIR/data/openhermes_10k_assistant_tokenized.pt"
+VAL_FILE="$QUADMIX_DIR/data/core_22tasks_tokenized.pt"
 
 # ── 驗證集下載 ──────────────────────────────────
 if [ ! -f "$VAL_FILE" ]; then
     echo "╔══ 驗證集就緒: 從 HuggingFace 下載 ═══╗"
     echo ""
     echo "  驗證集不存在: $VAL_FILE"
-    echo "  從 liujin99/quadmix-openhermes-10k 下載..."
+    echo "  從 liujin99/quadmix-core-22tasks 下載..."
 
     HF_ENDPOINT="${HF_ENDPOINT:-https://huggingface.co}"
     if [ "$HF_ENDPOINT" != "https://huggingface.co" ]; then
         echo "  使用 HF 镜像: $HF_ENDPOINT"
     fi
 
-    VAL_URL="$HF_ENDPOINT/datasets/liujin99/quadmix-openhermes-10k/resolve/main/openhermes_10k_assistant_tokenized.pt?download=true"
+    VAL_URL="$HF_ENDPOINT/datasets/liujin99/quadmix-core-22tasks/resolve/main/core_22tasks_tokenized.pt?download=true"
 
     mkdir -p "$(dirname "$VAL_FILE")"
     if command -v wget &>/dev/null; then
@@ -211,7 +211,7 @@ cat << PARAMS
   │ 全局 batch size            │          64  │
   │ 微批大小                   │          32  │ (ga=2)
   │ warmup                     │         4%   │
-  │ 验证集                     │   全量 10k   │
+  │ 验证集                     │   CORE 22task│
   │ 排名参考集大小             │      10,000  │
   │ 代理模型                   │  tinyllama_1M│
   └────────────────────────────┴──────────────┘
@@ -250,6 +250,7 @@ python3 "$QUADMIX_DIR/scripts/run_essential_web_v1.py" \
     --micro-batch-size 32 \
     --global-batch-size 64 \
     --rank-ref-size 10000 \
+    --val-set core \
     --output "$OUTPUT_DIR" \
     $DEVICE_ARG \
     "$@" || exit $?
