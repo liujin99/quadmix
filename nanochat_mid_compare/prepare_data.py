@@ -1,12 +1,11 @@
 """
-Prepare two nanochat-compatible training datasets for comparison:
+Prepare nanochat-compatible training datasets for comparison:
   1. QuadMix-selected subset from essential-web
   2. Random subset from essential-web (token-count aligned)
+  3. Quality-Only Top-K subsets (token-count aligned, optional, multiple methods)
 
-Both datasets are written as sharded parquet files with a single "text" column,
+All datasets are written as sharded parquet files with a single "text" column,
 compatible with nanochat's dataloader (last shard = validation).
-
-A shared validation shard is used for fair comparison.
 
 Usage:
     python prepare_data.py \
@@ -14,12 +13,15 @@ Usage:
         --essential-web-dir /path/to/essential-web-v1 \
         --output-dir /path/to/experiment/data \
         --tokenizer-pkl /path/to/nanochat/tokenizer/tokenizer.pkl \
+        [--preprocessed-dir /path/to/preprocessed] \
+        [--quality-method dclm,fineweb_edu] \
         [--shard-size 10000] \
         [--val-ratio 0.05] \
         [--seed 42]
 """
 
 import os
+import sys
 import argparse
 import random
 import json
@@ -32,6 +34,14 @@ import pyarrow.parquet as pq
 from pathlib import Path
 from tqdm import tqdm
 
+
+QUALITY_SCORE_MAP = {
+    "dclm": "qs_dclm",
+    "fineweb_edu": "qs_fineweb_edu_approx",
+    "english": "qs_english",
+    "math_general": "qs_eai_general_math",
+    "math_openweb": "qs_eai_open_web_math",
+}
 
 _worker_tokenizer = None
 
@@ -118,7 +128,7 @@ def _read_docs_from_shard(args):
     ]
 
 
-def read_selected_docs(shard_paths, selections, num_workers=None):
+def read_docs_from_shards(shard_paths, selections, num_workers=None, desc=None):
     if num_workers is None:
         num_workers = min(mp.cpu_count() // 4, 32) or 1
     shard_to_docs = {}
@@ -131,9 +141,36 @@ def read_selected_docs(shard_paths, selections, num_workers=None):
         results = list(tqdm(
             pool.imap_unordered(_read_docs_from_shard, tasks, chunksize=1),
             total=len(tasks),
-            desc=f"  Reading selected docs ({num_workers} processes)",
+            desc=desc or f"  Reading selected docs ({num_workers} processes)",
         ))
     return [doc for shard_docs in results for doc in shard_docs]
+
+
+def _scan_preprocessed_shard_indexed(args):
+    idx, shard_path = args
+    df = pq.read_table(shard_path, columns=["text", "doc_char_count"]).to_pandas()
+    texts = df["text"].tolist()
+    char_counts = df["doc_char_count"].tolist()
+    valid = [(i, cc) for i, cc in enumerate(char_counts) if texts[i] and len(texts[i]) >= 100]
+    return idx, valid
+
+
+def scan_preprocessed_shards(preprocessed_dir, num_workers=None):
+    if num_workers is None:
+        num_workers = min(mp.cpu_count() // 4, 32) or 1
+    shard_files = sorted(Path(preprocessed_dir).glob("preprocessed_*.parquet"))
+    if not shard_files:
+        raise FileNotFoundError(f"No preprocessed_*.parquet files found in {preprocessed_dir}")
+    tasks = [(i, str(p)) for i, p in enumerate(shard_files)]
+    with mp.Pool(num_workers) as pool:
+        results = [None] * len(shard_files)
+        for idx, docs in tqdm(
+            pool.imap_unordered(_scan_preprocessed_shard_indexed, tasks, chunksize=1),
+            total=len(tasks),
+            desc=f"  Scanning preprocessed shards ({num_workers} processes)",
+        ):
+            results[idx] = docs
+    return shard_files, results
 
 
 def write_shard(docs, output_path, num_npu=8):
@@ -143,6 +180,76 @@ def write_shard(docs, output_path, num_npu=8):
     pq.write_table(table, output_path, row_group_size=rg_size)
 
 
+def trim_docs_to_target(docs, target_tokens):
+    trimmed = []
+    trim_tokens = 0
+    for doc in docs:
+        if trim_tokens + doc["token_count"] > target_tokens:
+            break
+        trimmed.append(doc)
+        trim_tokens += doc["token_count"]
+    return trimmed, trim_tokens
+
+
+def select_quality_topk(preprocessed_dir, quality_method, total_tokens,
+                        tokenizer_pkl=None, num_workers=None, enc=None):
+    quality_col = QUALITY_SCORE_MAP[quality_method]
+    print(f"  Scanning preprocessed shards...")
+    prep_files, prep_metadata = scan_preprocessed_shards(
+        preprocessed_dir, num_workers=num_workers)
+    print(f"  Found {len(prep_files)} preprocessed shards")
+
+    print(f"  Reading quality scores ({quality_col})...")
+    all_quality_docs = []
+    for shard_id, docs in enumerate(prep_metadata):
+        if not docs:
+            continue
+        df = pq.read_table(str(prep_files[shard_id]), columns=[quality_col]).to_pandas()
+        scores = df[quality_col].to_numpy()
+        for doc_id, char_count in docs:
+            all_quality_docs.append((shard_id, doc_id, float(scores[doc_id]), char_count // 4))
+    print(f"  Total candidate docs: {len(all_quality_docs):,}")
+
+    all_quality_docs.sort(key=lambda x: x[2], reverse=True)
+
+    target_with_buffer = int(total_tokens * 1.1)
+    q_selected = []
+    q_accumulated = 0
+    for shard_id, doc_id, score, est_tokens in all_quality_docs:
+        if q_accumulated >= target_with_buffer:
+            break
+        q_selected.append((shard_id, doc_id))
+        q_accumulated += est_tokens
+    cutoff_idx = min(len(q_selected) - 1, len(all_quality_docs) - 1)
+    print(f"  Selected {len(q_selected):,} top-quality docs (estimated ~{q_accumulated:,} tokens)")
+    print(f"  Quality score range: {all_quality_docs[0][2]:.4f} (best) -> {all_quality_docs[cutoff_idx][2]:.4f} (cutoff)")
+
+    quality_docs = read_docs_from_shards(
+        prep_files, q_selected, num_workers=num_workers,
+        desc=f"  Reading quality docs ({num_workers or 'auto'} processes)")
+
+    quality_tokens = 0
+    if enc and tokenizer_pkl:
+        print(f"  Re-counting tokens for {len(quality_docs):,} docs (exact)...")
+        q_texts = [d["text"] for d in quality_docs]
+        q_exact = count_tokens_mp(q_texts, tokenizer_pkl, num_workers=num_workers)
+        for doc, tc in zip(quality_docs, q_exact):
+            doc["token_count"] = tc
+        quality_tokens = sum(d["token_count"] for d in quality_docs)
+        print(f"  Exact tokens before trim: {quality_tokens:,} (target: {total_tokens:,})")
+
+        if quality_tokens > total_tokens:
+            n_before = len(quality_docs)
+            quality_docs, quality_tokens = trim_docs_to_target(quality_docs, total_tokens)
+            print(f"  Trimmed {n_before - len(quality_docs):,} docs to match target")
+    else:
+        quality_tokens = sum(d["token_count"] for d in quality_docs)
+
+    print(f"  Quality docs: {len(quality_docs):,}")
+    print(f"  Tokens: {quality_tokens:,}")
+    return quality_docs, quality_tokens
+
+
 def main():
     parser = argparse.ArgumentParser(description="Prepare comparison datasets for nanochat mid-training")
     parser.add_argument("--quadmix-dataset", type=str, required=True,
@@ -150,10 +257,15 @@ def main():
     parser.add_argument("--essential-web-dir", type=str, required=True,
                         help="Path to essential-web-v1 raw parquet shards directory")
     parser.add_argument("--output-dir", type=str, required=True,
-                        help="Output directory for the two datasets")
+                        help="Output directory for the datasets")
     parser.add_argument("--tokenizer-pkl", type=str, default=None,
                         help="Path to nanochat tokenizer.pkl for accurate token counting. "
                              "Falls back to char_count//4 if not provided.")
+    parser.add_argument("--preprocessed-dir", type=str, default=None,
+                        help="Path to preprocessed shards directory (for quality baseline)")
+    parser.add_argument("--quality-method", type=str, default="dclm",
+                        help="Comma-separated quality score methods for top-k selection. "
+                             f"Options: {', '.join(QUALITY_SCORE_MAP.keys())} (default: dclm)")
     parser.add_argument("--shard-size", type=int, default=10000,
                         help="Documents per output shard (default: 10000)")
     parser.add_argument("--val-ratio", type=float, default=0.05,
@@ -175,18 +287,44 @@ def main():
     enc = load_tokenizer(args.tokenizer_pkl)
     token_method = "nanochat tokenizer" if enc else "char_count // 4 (estimate)"
 
+    quality_methods = [m.strip() for m in args.quality_method.split(",") if m.strip()]
+    for m in quality_methods:
+        if m not in QUALITY_SCORE_MAP:
+            print(f"ERROR: Unknown quality method '{m}'. Options: {', '.join(QUALITY_SCORE_MAP.keys())}")
+            sys.exit(1)
+    do_quality = args.preprocessed_dir is not None and len(quality_methods) > 0
+
+    if do_quality and not os.path.isdir(args.preprocessed_dir):
+        print(f"ERROR: Preprocessed directory not found: {args.preprocessed_dir}")
+        sys.exit(1)
+
     output_dir = Path(args.output_dir)
     quadmix_dir = output_dir / "quadmix_data"
     random_dir = output_dir / "random_data"
+    quality_dirs = {}
+    if do_quality:
+        for m in quality_methods:
+            qd = output_dir / f"quality_data_{m}"
+            qd.mkdir(parents=True, exist_ok=True)
+            quality_dirs[m] = qd
     quadmix_dir.mkdir(parents=True, exist_ok=True)
     random_dir.mkdir(parents=True, exist_ok=True)
+
+    baselines = ["quadmix", "random"]
+    if do_quality:
+        for m in quality_methods:
+            baselines.append(f"quality_{m}")
 
     print("=" * 60)
     print("  Nanochat Comparison Dataset Preparation")
     print("=" * 60)
     print(f"  Token counting: {token_method}")
+    print(f"  Baselines: {', '.join(baselines)}")
+    if do_quality:
+        for m in quality_methods:
+            print(f"  Quality method: {m} ({QUALITY_SCORE_MAP[m]})")
 
-    print(f"\n[1/5] Reading QuadMix selected dataset...")
+    print(f"\n[1/6] Reading QuadMix selected dataset...")
     quadmix_df = pd.read_parquet(args.quadmix_dataset)
     texts = quadmix_df["text"].tolist()
     valid_texts = [t for t in texts if t and len(t) >= 100]
@@ -204,7 +342,7 @@ def main():
     print(f"  QuadMix docs: {len(quadmix_docs):,}")
     print(f"  Tokens ({token_method}): {total_tokens:,}")
 
-    print(f"\n[2/5] Scanning essential-web shards metadata...")
+    print(f"\n[2/6] Scanning essential-web shards metadata...")
     shard_files = sorted(Path(args.essential_web_dir).glob("shard_*.parquet"))
     shard_files = shard_files[:args.max_random_scan]
     print(f"  Scanning {len(shard_files)} shards (metadata only)...")
@@ -217,7 +355,7 @@ def main():
             all_candidates.append((shard_id, doc_id, char_count // 4))
     print(f"  Total candidate docs: {len(all_candidates):,}")
 
-    print(f"\n[3/5] Random sampling (target: {total_tokens:,} tokens)...")
+    print(f"\n[3/6] Random sampling (target: {total_tokens:,} tokens)...")
     random.shuffle(all_candidates)
     selected = []
     accumulated_tokens = 0
@@ -229,8 +367,9 @@ def main():
         accumulated_tokens += est_tokens
     print(f"  Selected {len(selected):,} docs (estimated ~{accumulated_tokens:,} tokens, with 10% buffer)")
 
-    print(f"\n[3.5/5] Reading selected documents...")
-    random_docs = read_selected_docs(shard_files, selected, num_workers=args.num_workers)
+    print(f"\n[3.5/6] Reading selected documents...")
+    random_docs = read_docs_from_shards(shard_files, selected, num_workers=args.num_workers,
+                                        desc=f"  Reading random docs ({args.num_workers or 'auto'} processes)")
 
     if enc and args.tokenizer_pkl:
         print(f"  Re-counting tokens for {len(random_docs):,} docs (exact)...")
@@ -242,39 +381,49 @@ def main():
         print(f"  Exact tokens before trim: {accumulated_tokens:,} (target: {total_tokens:,})")
 
         if accumulated_tokens > total_tokens:
-            trimmed = []
-            trim_tokens = 0
-            for doc in random_docs:
-                if trim_tokens + doc["token_count"] > total_tokens:
-                    break
-                trimmed.append(doc)
-                trim_tokens += doc["token_count"]
-            print(f"  Trimmed {len(random_docs) - len(trimmed):,} docs to match target")
-            random_docs = trimmed
-            accumulated_tokens = trim_tokens
+            n_before = len(random_docs)
+            random_docs, accumulated_tokens = trim_docs_to_target(random_docs, total_tokens)
+            print(f"  Trimmed {n_before - len(random_docs):,} docs to match target")
 
     print(f"  Random docs: {len(random_docs):,}")
     print(f"  Tokens ({token_method}): {accumulated_tokens:,}")
 
-    print(f"\n[4/5] Splitting train/val (val_ratio={args.val_ratio})...")
+    quality_datasets = {}
+    if do_quality:
+        for mi, method in enumerate(quality_methods):
+            print(f"\n[4.{mi+1}/6] Quality-Only Top-K selection ({method})...")
+            q_docs, q_tokens = select_quality_topk(
+                args.preprocessed_dir, method, total_tokens,
+                tokenizer_pkl=args.tokenizer_pkl, num_workers=args.num_workers, enc=enc)
+            quality_datasets[method] = (q_docs, q_tokens)
+    else:
+        print(f"\n[4/6] Quality baseline skipped (no --preprocessed-dir)")
+
+    print(f"\n[5/6] Splitting train/val (val_ratio={args.val_ratio})...")
     n_val = int(len(quadmix_docs) * args.val_ratio) if args.val_ratio > 0 else 0
 
     random.shuffle(quadmix_docs)
     random.shuffle(random_docs)
+    for method in quality_datasets:
+        random.shuffle(quality_datasets[method][0])
 
     if n_val > 0:
         val_docs = quadmix_docs[:n_val]
         quadmix_train = quadmix_docs[n_val:]
         random_train = random_docs[n_val:]
+        quality_trains = {m: d[n_val:] for m, (d, _) in quality_datasets.items()}
     else:
         val_docs = []
         quadmix_train = quadmix_docs
         random_train = random_docs
+        quality_trains = {m: d for m, (d, _) in quality_datasets.items()}
 
     print(f"  QuadMix train: {len(quadmix_train):,}, val: {len(val_docs):,}")
     print(f"  Random  train: {len(random_train):,}, val: {len(val_docs):,}")
+    for m, qt in quality_trains.items():
+        print(f"  Quality ({m}) train: {len(qt):,}, val: {len(val_docs):,}")
 
-    print(f"\n[5/5] Writing sharded parquet files...")
+    print(f"\n[6/6] Writing sharded parquet files...")
 
     def write_dataset(docs, data_dir, name):
         n_shards = max(1, (len(docs) + args.shard_size - 1) // args.shard_size)
@@ -295,6 +444,8 @@ def main():
 
     write_dataset(quadmix_train, quadmix_dir, "QuadMix")
     write_dataset(random_train, random_dir, "Random")
+    for m, qt in quality_trains.items():
+        write_dataset(qt, quality_dirs[m], f"Quality ({m})")
 
     stats = {
         "quadmix": {
@@ -316,17 +467,33 @@ def main():
             "token_method": token_method,
             "quadmix_source": args.quadmix_dataset,
             "essential_web_source": args.essential_web_dir,
+            "baselines": baselines,
         }
     }
+    if quality_trains:
+        stats["config"]["preprocessed_source"] = args.preprocessed_dir
+        stats["config"]["quality_methods"] = quality_methods
+        for m, qt in quality_trains.items():
+            stats[f"quality_{m}"] = {
+                "train_docs": len(qt),
+                "val_docs": len(val_docs),
+                "tokens": sum(d["token_count"] for d in qt),
+                "shards": max(1, (len(qt) + args.shard_size - 1) // args.shard_size),
+                "method": m,
+                "quality_column": QUALITY_SCORE_MAP[m],
+            }
+
     stats_path = output_dir / "dataset_stats.json"
     with open(stats_path, "w") as f:
         json.dump(stats, f, indent=2)
     print(f"\n  Stats saved to: {stats_path}")
 
     print("\n" + "=" * 60)
-    print("  Done! Two datasets ready for nanochat mid-training:")
+    print(f"  Done! {len(baselines)} datasets ready for nanochat mid-training:")
     print(f"    QuadMix: {quadmix_dir}")
     print(f"    Random:  {random_dir}")
+    for m in quality_datasets:
+        print(f"    Quality ({m}): {quality_dirs[m]}")
     print("=" * 60)
 
 

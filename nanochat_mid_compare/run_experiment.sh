@@ -30,6 +30,14 @@ QUADMIX_DATASET="${QUADMIX_DATASET:-}"
 # Essential-web raw parquet shards directory (shard_XXXXX.parquet)
 ESSENTIAL_WEB_DIR="${ESSENTIAL_WEB_DIR:-}"
 
+# Preprocessed shards directory (for Quality-Only Top-K baseline)
+# If not set, quality baseline is skipped
+PREPROCESSED_DIR="${PREPROCESSED_DIR:-}"
+
+# Quality score methods for top-k selection (comma-separated)
+# Options: dclm, fineweb_edu, english, math_general, math_openweb
+QUALITY_METHODS="${QUALITY_METHODS:-dclm,fineweb_edu}"
+
 # Nanochat base directory (contains tokenizer/, base_checkpoints/)
 NANOCHAT_BASE_DIR="${NANOCHAT_BASE_DIR:-$HOME/.cache/nanochat}"
 
@@ -125,6 +133,22 @@ fi
 if [ -z "$RANDOM_MODEL_TAG" ]; then
     RANDOM_MODEL_TAG="${BASE_MODEL_TAG}_random_${TIMESTAMP}"
 fi
+if [ -z "$QUALITY_MODEL_TAG" ] && [ -n "$PREPROCESSED_DIR" ]; then
+    QUALITY_MODEL_TAG="${BASE_MODEL_TAG}_quality_${QUALITY_METHOD}_${TIMESTAMP}"
+fi
+
+IFS=',' read -ra QUALITY_METHOD_ARRAY <<< "$QUALITY_METHODS"
+
+DO_QUALITY=0
+if [ -n "$PREPROCESSED_DIR" ]; then
+    if [ ! -d "$PREPROCESSED_DIR" ]; then
+        echo "WARNING: PREPROCESSED_DIR set but not found: $PREPROCESSED_DIR"
+        echo "  Quality baseline will be skipped."
+        PREPROCESSED_DIR=""
+    else
+        DO_QUALITY=1
+    fi
+fi
 
 # ══════════════════════════════════════════════════════════════
 #  NPU ENVIRONMENT SETUP (from nanochat speedrun.sh)
@@ -204,10 +228,16 @@ echo "  QuadMix dataset:     $QUADMIX_DATASET"
 echo "  Essential-web dir:   $ESSENTIAL_WEB_DIR"
 echo "  Nanochat base dir:   $NANOCHAT_BASE_DIR"
 echo "  Nanochat repo:       $NANOCHAT_ROOT"
-echo "  Base model tag:      $BASE_MODEL_TAG (source for both runs)"
+echo "  Base model tag:      $BASE_MODEL_TAG (source for all runs)"
 echo "  Experiment output:   $EXPERIMENT_DIR"
 if [ -n "$MID_CHECKPOINTS_OUTPUT_DIR" ]; then
     echo "  Mid checkpoint output: $MID_CHECKPOINTS_OUTPUT_DIR"
+fi
+if [ "$DO_QUALITY" -eq 1 ]; then
+    echo "  Preprocessed dir:    $PREPROCESSED_DIR"
+    echo "  Quality methods:     ${QUALITY_METHOD_ARRAY[*]}"
+else
+    echo "  Quality baseline:    DISABLED (set PREPROCESSED_DIR to enable)"
 fi
 echo ""
 echo "  Mid-training config:"
@@ -219,6 +249,11 @@ echo ""
 echo "  Model tags (save):"
 echo "    QuadMix: $QUADMIX_MODEL_TAG"
 echo "    Random:  $RANDOM_MODEL_TAG"
+if [ "$DO_QUALITY" -eq 1 ]; then
+    for method in "${QUALITY_METHOD_ARRAY[@]}"; do
+        echo "    Quality ($method): ${BASE_MODEL_TAG}_quality_${method}_${TIMESTAMP}"
+    done
+fi
 echo ""
 echo "════════════════════════════════════════════════════════════"
 echo ""
@@ -240,16 +275,21 @@ if [ -f "$DATA_DIR/dataset_stats.json" ]; then
     echo "  Datasets already exist. Skipping preparation."
     echo "  (Delete $DATA_DIR to regenerate)"
 else
-    python3 "$SCRIPT_DIR/prepare_data.py" \
-        --quadmix-dataset "$QUADMIX_DATASET" \
-        --essential-web-dir "$ESSENTIAL_WEB_DIR" \
-        --output-dir "$DATA_DIR" \
-        --tokenizer-pkl "$TOKENIZER_DIR/tokenizer.pkl" \
-        --shard-size "$SHARD_SIZE" \
-        --val-ratio "$VAL_RATIO" \
-        --seed "$SEED" \
-        --max-random-scan "$MAX_RANDOM_SCAN" \
+    PREP_ARGS=(
+        --quadmix-dataset "$QUADMIX_DATASET"
+        --essential-web-dir "$ESSENTIAL_WEB_DIR"
+        --output-dir "$DATA_DIR"
+        --tokenizer-pkl "$TOKENIZER_DIR/tokenizer.pkl"
+        --shard-size "$SHARD_SIZE"
+        --val-ratio "$VAL_RATIO"
+        --seed "$SEED"
+        --max-random-scan "$MAX_RANDOM_SCAN"
         --num-npu "$NUM_NPU"
+    )
+    if [ "$DO_QUALITY" -eq 1 ]; then
+        PREP_ARGS+=(--preprocessed-dir "$PREPROCESSED_DIR" --quality-method "$QUALITY_METHODS")
+    fi
+    python3 "$SCRIPT_DIR/prepare_data.py" "${PREP_ARGS[@]}"
 fi
 
 python3 -c "
@@ -277,6 +317,11 @@ method = stats['config'].get('token_method', 'unknown')
 print(f'    Token method: {method}')
 print(f'    QuadMix: {q[\"train_docs\"]:,} train docs, {q[\"tokens\"]:,} tokens, {q[\"shards\"]} shards')
 print(f'    Random:  {r[\"train_docs\"]:,} train docs, {r[\"tokens\"]:,} tokens, {r[\"shards\"]} shards')
+for key in stats:
+    if key.startswith('quality_'):
+        method = key[len('quality_'):]
+        ql = stats[key]
+        print(f'    Quality ({method}): {ql[\"train_docs\"]:,} train docs, {ql[\"tokens\"]:,} tokens, {ql[\"shards\"]} shards')
 print(f'    Shared val: {q[\"val_docs\"]:,} docs')
 "
 echo ""
@@ -393,6 +438,24 @@ echo ""
 echo "╚═══════════════════════════════════════════╝"
 echo ""
 
+if [ "$DO_QUALITY" -eq 1 ]; then
+    for method in "${QUALITY_METHOD_ARRAY[@]}"; do
+        echo ""
+        echo "╔══ Step 3c: Mid-training on Quality Top-K ($method) data ══╗"
+        echo ""
+
+        QUALITY_DATA="$DATA_DIR/quality_data_${method}"
+        QUALITY_MODEL_TAG="${BASE_MODEL_TAG}_quality_${method}_${TIMESTAMP}"
+        QUALITY_LOG="$EXPERIMENT_DIR/mid_train_quality_${method}.log"
+        QUALITY_TOKENS=$(python3 -c "import json; print(json.load(open('$STATS_FILE'))['quality_${method}']['tokens'])")
+        run_mid_training "$QUALITY_DATA" "$QUALITY_MODEL_TAG" "quality_${method}_mid" "$QUALITY_LOG" "$QUALITY_TOKENS"
+
+        echo ""
+        echo "╚════════════════════════════════════════════════╝"
+        echo ""
+    done
+fi
+
 # ══════════════════════════════════════════════════════════════
 #  STEP 4: EVALUATION
 # ══════════════════════════════════════════════════════════════
@@ -423,10 +486,20 @@ run_eval "$QUADMIX_MODEL_TAG" "mid" "$QUADMIX_EVAL_LOG"
 RANDOM_EVAL_LOG="$EXPERIMENT_DIR/eval_random.log"
 run_eval "$RANDOM_MODEL_TAG" "mid" "$RANDOM_EVAL_LOG"
 
+if [ "$DO_QUALITY" -eq 1 ]; then
+    for method in "${QUALITY_METHOD_ARRAY[@]}"; do
+        QUALITY_MODEL_TAG="${BASE_MODEL_TAG}_quality_${method}_${TIMESTAMP}"
+        QUALITY_EVAL_LOG="$EXPERIMENT_DIR/eval_quality_${method}.log"
+        run_eval "$QUALITY_MODEL_TAG" "mid" "$QUALITY_EVAL_LOG"
+    done
+fi
+
 echo ""
-echo "╚════════════════════════╝"
+echo "╚══════════════════════════════════════════╝"
 echo ""
 
+# ══════════════════════════════════════════════════════════════
+#  STEP 5: GENERATE REPORT
 # ══════════════════════════════════════════════════════════════
 #  STEP 5: GENERATE REPORT
 # ══════════════════════════════════════════════════════════════
@@ -435,13 +508,25 @@ echo ""
 echo "╔══ Step 5: Generate experiment report ══╗"
 echo ""
 
-python3 "$SCRIPT_DIR/generate_report.py" \
-    --experiment-dir "$EXPERIMENT_DIR" \
-    --dataset-stats "$DATA_DIR/dataset_stats.json" \
-    --quadmix-train-log "$QUADMIX_LOG" \
-    --random-train-log "$RANDOM_LOG" \
-    --quadmix-eval-log "$QUADMIX_EVAL_LOG" \
+REPORT_ARGS=(
+    --experiment-dir "$EXPERIMENT_DIR"
+    --dataset-stats "$DATA_DIR/dataset_stats.json"
+    --quadmix-train-log "$QUADMIX_LOG"
+    --random-train-log "$RANDOM_LOG"
+    --quadmix-eval-log "$QUADMIX_EVAL_LOG"
     --random-eval-log "$RANDOM_EVAL_LOG"
+)
+if [ "$DO_QUALITY" -eq 1 ]; then
+    QUALITY_TRAIN_LOGS=()
+    QUALITY_EVAL_LOGS=()
+    for method in "${QUALITY_METHOD_ARRAY[@]}"; do
+        QUALITY_TRAIN_LOGS+=("$EXPERIMENT_DIR/mid_train_quality_${method}.log")
+        QUALITY_EVAL_LOGS+=("$EXPERIMENT_DIR/eval_quality_${method}.log")
+    done
+    REPORT_ARGS+=(--quality-train-log "${QUALITY_TRAIN_LOGS[@]}")
+    REPORT_ARGS+=(--quality-eval-log "${QUALITY_EVAL_LOGS[@]}")
+fi
+python3 "$SCRIPT_DIR/generate_report.py" "${REPORT_ARGS[@]}"
 
 echo ""
 echo "╚════════════════════════════════════════╝"
@@ -464,15 +549,35 @@ echo "  Files:"
 echo "    ├── data/                    # Training datasets"
 echo "    │   ├── quadmix_data/        # QuadMix-selected shards"
 echo "    │   ├── random_data/         # Random baseline shards"
+if [ "$DO_QUALITY" -eq 1 ]; then
+    for method in "${QUALITY_METHOD_ARRAY[@]}"; do
+echo "    │   ├── quality_data_${method}/  # Quality ($method) shards"
+    done
+fi
 echo "    │   └── dataset_stats.json   # Dataset statistics"
 echo "    ├── mid_train_quadmix.log    # QuadMix mid-training log"
 echo "    ├── mid_train_random.log     # Random mid-training log"
+if [ "$DO_QUALITY" -eq 1 ]; then
+    for method in "${QUALITY_METHOD_ARRAY[@]}"; do
+echo "    ├── mid_train_quality_${method}.log  # Quality ($method) training log"
+    done
+fi
 echo "    ├── eval_quadmix.log         # QuadMix evaluation log"
 echo "    ├── eval_random.log          # Random evaluation log"
+if [ "$DO_QUALITY" -eq 1 ]; then
+    for method in "${QUALITY_METHOD_ARRAY[@]}"; do
+echo "    ├── eval_quality_${method}.log     # Quality ($method) evaluation log"
+    done
+fi
 echo "    └── experiment_report.md     # Comparison report"
 echo ""
 echo "  Mid-training checkpoints:"
 echo "    $MID_CKPT_ACTUAL/$QUADMIX_MODEL_TAG/"
 echo "    $MID_CKPT_ACTUAL/$RANDOM_MODEL_TAG/"
+if [ "$DO_QUALITY" -eq 1 ]; then
+    for method in "${QUALITY_METHOD_ARRAY[@]}"; do
+echo "    $MID_CKPT_ACTUAL/${BASE_MODEL_TAG}_quality_${method}_${TIMESTAMP}/"
+    done
+fi
 echo ""
 echo "════════════════════════════════════════════════════════════"

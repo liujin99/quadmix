@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Generate experiment comparison report from QuadMix vs Random mid-training logs."""
+"""Generate experiment comparison report from mid-training logs.
+
+Supports N baselines: QuadMix, Random, and optionally multiple Quality-Only Top-K methods.
+"""
 
 import argparse
 import json
@@ -25,7 +28,7 @@ def parse_training_log(path):
         "core_metrics_during_training": [],
     }
 
-    if not os.path.exists(path):
+    if not path or not os.path.exists(path):
         return info
 
     with open(path) as f:
@@ -69,7 +72,7 @@ def parse_eval_log(path):
         "tasks": {},
     }
 
-    if not os.path.exists(path):
+    if not path or not os.path.exists(path):
         return info
 
     task_pattern = re.compile(
@@ -95,120 +98,177 @@ def parse_eval_log(path):
     return info
 
 
+def fmt(val, spec="", suffix=""):
+    if val is None:
+        return "N/A"
+    return f"{val:{spec}}{suffix}"
+
+
 def generate_report(args):
     stats = parse_dataset_stats(args.dataset_stats)
-    quadmix_train = parse_training_log(args.quadmix_train_log)
-    random_train = parse_training_log(args.random_train_log)
-    quadmix_eval = parse_eval_log(args.quadmix_eval_log)
-    random_eval = parse_eval_log(args.random_eval_log)
-
-    q = stats["quadmix"]
-    r = stats["random"]
     config = stats["config"]
+    baselines = config.get("baselines", ["quadmix", "random"])
 
-    q_core = quadmix_eval["core_metric"]
-    r_core = random_eval["core_metric"]
+    quality_methods = config.get("quality_methods", [])
+    if not quality_methods:
+        for key in stats:
+            if key.startswith("quality_"):
+                method = key[len("quality_"):]
+                if method not in quality_methods:
+                    quality_methods.append(method)
 
-    if q_core is not None and r_core is not None:
-        diff = q_core - r_core
-        winner = "QuadMix" if diff > 0 else "Random" if diff < 0 else "Tie"
-        pct = abs(diff) / max(r_core, 1e-9) * 100
-    else:
-        diff = None
-        winner = "N/A"
-        pct = 0
+    train_logs = {}
+    eval_logs = {}
+    log_map = {
+        "quadmix": (args.quadmix_train_log, args.quadmix_eval_log),
+        "random": (args.random_train_log, args.random_eval_log),
+    }
+    if args.quality_train_log:
+        for i, train_log in enumerate(args.quality_train_log):
+            eval_log = args.quality_eval_log[i] if args.quality_eval_log and i < len(args.quality_eval_log) else None
+            if i < len(quality_methods):
+                log_map[f"quality_{quality_methods[i]}"] = (train_log, eval_log)
+
+    for b in baselines:
+        if b in log_map:
+            train_logs[b] = parse_training_log(log_map[b][0])
+            eval_logs[b] = parse_eval_log(log_map[b][1])
+
+    labels = {"quadmix": "QuadMix", "random": "Random"}
+    for m in quality_methods:
+        labels[f"quality_{m}"] = f"Quality ({m})"
 
     lines = []
-    lines.append("# QuadMix vs Random — Mid-Training Experiment Report")
+    title_parts = [labels[b] for b in baselines]
+    title = " vs ".join(title_parts)
+    lines.append(f"# {title} — Mid-Training Experiment Report")
     lines.append("")
     lines.append(f"**Generated**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append(f"**Base Model**: `{config.get('base_model_tag', 'N/A')}`")
     lines.append(f"**Experiment Dir**: `{args.experiment_dir}`")
+    if quality_methods:
+        for m in quality_methods:
+            qcol = stats.get(f"quality_{m}", {}).get("quality_column", "N/A")
+            lines.append(f"**Quality Method**: `{m}` ({qcol})")
     lines.append("")
 
     lines.append("## Summary")
     lines.append("")
-    if diff is not None:
-        emoji = "+" if diff > 0 else ""
-        lines.append(f"| | QuadMix | Random | Delta |")
-        lines.append(f"|---|---|---|---|")
-        lines.append(f"| **CORE metric** | **{q_core:.4f}** | **{r_core:.4f}** | **{emoji}{diff:.4f} ({emoji}{pct:.1f}%)** |")
-        lines.append("")
-        lines.append(f"**Winner: {winner}**")
-    else:
-        lines.append("CORE metric evaluation results not available.")
+    header = "| | " + " | ".join(labels[b] for b in baselines) + " |"
+    sep = "|---|" + "|".join("---" for _ in baselines) + "|"
+    lines.append(header)
+    lines.append(sep)
+
+    core_vals = {}
+    for b in baselines:
+        core_vals[b] = eval_logs.get(b, {}).get("core_metric")
+
+    core_row = "| **CORE metric** |"
+    for b in baselines:
+        v = core_vals[b]
+        core_row += f" **{v:.4f}** |" if v is not None else " N/A |"
+    lines.append(core_row)
     lines.append("")
+
+    ref_b = baselines[1] if len(baselines) > 1 else baselines[0]
+    ref_core = core_vals.get(ref_b)
+    if core_vals.get(baselines[0]) is not None and ref_core is not None:
+        lines.append("### Pairwise Deltas")
+        lines.append("")
+        lines.append("| Comparison | Delta | % |")
+        lines.append("|---|---|---|")
+        for i, b1 in enumerate(baselines):
+            for b2 in baselines[i+1:]:
+                v1, v2 = core_vals.get(b1), core_vals.get(b2)
+                if v1 is not None and v2 is not None:
+                    d = v1 - v2
+                    pct = abs(d) / max(v2, 1e-9) * 100
+                    sign = "+" if d > 0 else ""
+                    winner = labels[b1] if d > 0 else labels[b2] if d < 0 else "Tie"
+                    lines.append(f"| {labels[b1]} vs {labels[b2]} | {sign}{d:.4f} | {sign}{pct:.1f}% ({winner}) |")
+        lines.append("")
 
     lines.append("## Dataset Statistics")
     lines.append("")
-    lines.append("| | QuadMix | Random |")
-    lines.append("|---|---|---|")
-    lines.append(f"| Train docs | {q['train_docs']:,} | {r['train_docs']:,} |")
-    lines.append(f"| Tokens | {q['tokens']:,} | {r['tokens']:,} |")
-    lines.append(f"| Shards | {q['shards']} | {r['shards']} |")
-    lines.append(f"| Val docs | {q['val_docs']:,} | {r['val_docs']:,} |")
+    lines.append(header)
+    lines.append(sep)
+    for field, fmt_spec in [("train_docs", ","), ("tokens", ","), ("shards", ""), ("val_docs", ",")]:
+        row = f"| {field.replace('_', ' ').title()} |"
+        for b in baselines:
+            v = stats.get(b, {}).get(field)
+            row += f" {v:{fmt_spec}} |" if v is not None else " N/A |"
+        lines.append(row)
     lines.append("")
 
     lines.append("## Training Statistics")
     lines.append("")
-    lines.append("| | QuadMix | Random |")
-    lines.append("|---|---|---|")
-    def fmt(val, spec="", suffix=""):
-        if val is None:
-            return "N/A"
-        return f"{val:{spec}}{suffix}"
-
-    lines.append(f"| Steps | {fmt(quadmix_train['num_steps'])} | {fmt(random_train['num_steps'])} |")
-    lines.append(f"| Final loss | {fmt(quadmix_train['final_loss'], '.6f')} | {fmt(random_train['final_loss'], '.6f')} |")
-    lines.append(f"| Training time | {fmt(quadmix_train['total_time'], '.1f', 'm')} | {fmt(random_train['total_time'], '.1f', 'm')} |")
-    lines.append(f"| Tokens/sec | {fmt(quadmix_train['final_tok_per_sec'], ',')} | {fmt(random_train['final_tok_per_sec'], ',')} |")
-    lines.append(f"| MFU | {fmt(quadmix_train['final_mfu'], '.2f', '%')} | {fmt(random_train['final_mfu'], '.2f', '%')} |")
-    lines.append(f"| Peak memory | {fmt(quadmix_train['peak_memory'], '.0f', ' MiB')} | {fmt(random_train['peak_memory'], '.0f', ' MiB')} |")
+    lines.append(header)
+    lines.append(sep)
+    for field, spec, suffix in [
+        ("num_steps", "", ""),
+        ("final_loss", ".6f", ""),
+        ("total_time", ".1f", "m"),
+        ("final_tok_per_sec", ",", ""),
+        ("final_mfu", ".2f", "%"),
+        ("peak_memory", ".0f", " MiB"),
+    ]:
+        label = field.replace("_", " ").title()
+        row = f"| {label} |"
+        for b in baselines:
+            v = train_logs.get(b, {}).get(field)
+            row += f" {fmt(v, spec, suffix)} |"
+        lines.append(row)
     lines.append("")
 
-    if quadmix_train["core_metrics_during_training"] or random_train["core_metrics_during_training"]:
+    any_core_during = any(
+        train_logs.get(b, {}).get("core_metrics_during_training") for b in baselines
+    )
+    if any_core_during:
         lines.append("## CORE Metric During Training")
         lines.append("")
-        lines.append("| Step | QuadMix | Random |")
-        lines.append("|---|---|---|")
-        q_cm = dict(quadmix_train["core_metrics_during_training"])
-        r_cm = dict(random_train["core_metrics_during_training"])
-        all_steps = sorted(set(list(q_cm.keys()) + list(r_cm.keys())))
+        lines.append(header.replace("| |", "| Step |", 1))
+        lines.append(sep)
+        all_cm = {b: dict(train_logs.get(b, {}).get("core_metrics_during_training", [])) for b in baselines}
+        all_steps = sorted(set(s for cm in all_cm.values() for s in cm.keys()))
         for s in all_steps:
-            qv = f"{q_cm[s]:.4f}" if s in q_cm else "-"
-            rv = f"{r_cm[s]:.4f}" if s in r_cm else "-"
-            lines.append(f"| {s} | {qv} | {rv} |")
+            row = f"| {s} |"
+            for b in baselines:
+                v = all_cm[b].get(s)
+                row += f" {v:.4f} |" if v is not None else " - |"
+            lines.append(row)
         lines.append("")
 
-    if quadmix_eval["tasks"] or random_eval["tasks"]:
+    all_tasks = set()
+    for b in baselines:
+        all_tasks.update(eval_logs.get(b, {}).get("tasks", {}).keys())
+
+    if all_tasks:
         lines.append("## CORE Metric — Per-Task Breakdown")
         lines.append("")
-        lines.append("| Task | QuadMix (centered) | Random (centered) | Delta |")
-        lines.append("|---|---|---|---|")
-        all_tasks = sorted(set(list(quadmix_eval["tasks"].keys()) + list(random_eval["tasks"].keys())))
-        for task in all_tasks:
-            qc = quadmix_eval["tasks"].get(task, {}).get("centered")
-            rc = random_eval["tasks"].get(task, {}).get("centered")
-            qc_str = f"{qc:.4f}" if qc is not None else "-"
-            rc_str = f"{rc:.4f}" if rc is not None else "-"
-            if qc is not None and rc is not None:
-                d = qc - rc
-                d_str = f"{d:+.4f}"
-            else:
-                d_str = "-"
-            lines.append(f"| {task} | {qc_str} | {rc_str} | {d_str} |")
+        task_header = "| Task | " + " (centered) | ".join(labels[b] for b in baselines) + " (centered) |"
+        task_sep = "|---|" + "|".join("---" for _ in baselines) + "|"
+        lines.append(task_header)
+        lines.append(task_sep)
+        for task in sorted(all_tasks):
+            row = f"| {task} |"
+            for b in baselines:
+                c = eval_logs.get(b, {}).get("tasks", {}).get(task, {}).get("centered")
+                row += f" {c:.4f} |" if c is not None else " - |"
+            lines.append(row)
         lines.append("")
 
     lines.append("## Configuration")
     lines.append("")
-    lines.append(f"| Parameter | Value |")
-    lines.append(f"|---|---|")
+    lines.append("| Parameter | Value |")
+    lines.append("|---|---|")
     lines.append(f"| Target param-data ratio | {config.get('target_param_data_ratio', 'N/A')} |")
     lines.append(f"| Num scaling params | {config.get('num_scaling_params', 'N/A'):,} |")
     lines.append(f"| Device batch size | {config.get('device_batch_size', 'N/A')} |")
     lines.append(f"| Num NPU | {config.get('num_npu', 'N/A')} |")
     lines.append(f"| Seed | {config.get('seed', 'N/A')} |")
     lines.append(f"| Token method | {config.get('token_method', 'N/A')} |")
+    if quality_methods:
+        lines.append(f"| Quality methods | {', '.join(quality_methods)} |")
     lines.append("")
 
     report_text = "\n".join(lines)
@@ -223,13 +283,17 @@ def generate_report(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate QuadMix vs Random experiment report")
+    parser = argparse.ArgumentParser(description="Generate mid-training experiment comparison report")
     parser.add_argument("--experiment-dir", required=True)
     parser.add_argument("--dataset-stats", required=True)
     parser.add_argument("--quadmix-train-log", required=True)
     parser.add_argument("--random-train-log", required=True)
     parser.add_argument("--quadmix-eval-log", required=True)
     parser.add_argument("--random-eval-log", required=True)
+    parser.add_argument("--quality-train-log", nargs="+", default=None,
+                        help="Quality baseline training logs (one per method, in order)")
+    parser.add_argument("--quality-eval-log", nargs="+", default=None,
+                        help="Quality baseline evaluation logs (one per method, in order)")
     args = parser.parse_args()
     generate_report(args)
 
