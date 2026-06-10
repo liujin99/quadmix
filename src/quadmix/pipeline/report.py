@@ -196,7 +196,7 @@ def generate_report(
     output_dir, data_path, optimal_params, optimal_selected_indices,
     domain_labels, token_counts, num_domains=10, num_criteria=5,
     config=None, metrics=None, elapsed=None,
-    use_sharded=False, reliability=None,
+    use_sharded=False, reliability=None, proxy_loss_stats=None,
 ):
     """Generate MD report with separate PNG figures."""
     # Compute distributions
@@ -280,6 +280,17 @@ def generate_report(
             parts.append("**Recommendations:**\n")
             parts.extend(warnings)
             parts.append("")
+
+    if proxy_loss_stats:
+        parts.append("## Proxy Experiment Loss Stats\n")
+        parts.append("| Metric | Mean | Std | Min | Max |")
+        parts.append("|:-------|:-----|:----|:----|:----|")
+        for name, stats in proxy_loss_stats.items():
+            if isinstance(stats, dict):
+                parts.append(f"| {name} | {stats['mean']:.4f} | {stats['std']:.4f} | {stats['min']:.4f} | {stats['max']:.4f} |")
+            elif isinstance(stats, float):
+                parts.append(f"| {name} | {stats:.4f} | — | — | — |")
+        parts.append("")
 
     parts += [
         "## 采样概览\n",

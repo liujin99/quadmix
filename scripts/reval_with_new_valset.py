@@ -428,6 +428,17 @@ def main():
             "best_predicted_loss": float(predicted_losses.min()),
             "top_k_avg_loss": top_k_avg_loss,
         },
+        "proxy_loss_stats": {
+            "new_val_loss": {
+                "mean": float(losses.mean()), "std": float(losses.std()),
+                "min": float(losses.min()), "max": float(losses.max()),
+            },
+            "old_val_loss": {
+                "mean": float(old_losses.mean()), "std": float(old_losses.std()),
+                "min": float(old_losses.min()), "max": float(old_losses.max()),
+            },
+            "old_new_correlation": float(corr),
+        },
         "reliability": {
             "val_r2_bootstrap_mean": pipeline._optimizer.val_r2_bootstrap_mean,
             "val_r2_ci_lower": pipeline._optimizer.val_r2_ci_lower,

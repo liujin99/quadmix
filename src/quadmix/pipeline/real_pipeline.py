@@ -462,6 +462,19 @@ class QuaDMixPipeline:
         losses = np.array([r.validation_loss for r in results])
         print(f"  Loss stats: mean={losses.mean():.4f}, std={losses.std():.4f}, "
               f"min={losses.min():.4f}, max={losses.max():.4f}")
+        _train_losses = np.array([r.metadata["train_loss"] for r in results if "train_loss" in r.metadata])
+        _val_losses = np.array([r.metadata["val_loss"] for r in results if "val_loss" in r.metadata])
+        _proxy_loss_stats = {}
+        if len(_train_losses) > 0:
+            _proxy_loss_stats["train_loss"] = {
+                "mean": float(_train_losses.mean()), "std": float(_train_losses.std()),
+                "min": float(_train_losses.min()), "max": float(_train_losses.max()),
+            }
+        if len(_val_losses) > 0:
+            _proxy_loss_stats["val_loss"] = {
+                "mean": float(_val_losses.mean()), "std": float(_val_losses.std()),
+                "min": float(_val_losses.min()), "max": float(_val_losses.max()),
+            }
 
         # ── Stage 5: LightGBM Regression ────────────────────
         _t = time.time()
@@ -611,6 +624,7 @@ class QuaDMixPipeline:
                 "best_predicted_loss": float(predicted_losses.min()),
                 "top_k_avg_loss": top_k_avg_loss,
             },
+            "proxy_loss_stats": _proxy_loss_stats,
             "reliability": {
                 "val_r2_bootstrap_mean": self._optimizer.val_r2_bootstrap_mean,
                 "val_r2_ci_lower": self._optimizer.val_r2_ci_lower,
@@ -693,6 +707,7 @@ class QuaDMixPipeline:
             elapsed=elapsed,
             use_sharded=(text_source == "sharded"),
             reliability=summary.get("reliability"),
+            proxy_loss_stats=summary.get("proxy_loss_stats"),
         )
         save_report(report, output_dir)
         stage_times["stage9_report"] = time.time() - _t
