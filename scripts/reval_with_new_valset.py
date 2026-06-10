@@ -419,6 +419,7 @@ def main():
             "num_quality_criteria": config.num_quality_criteria,
             "num_proxy_experiments": len(experiments),
             "num_search_points": n_search,
+            "val_set": val_set_name,
         },
         "metrics": {
             "train_r2": pipeline._optimizer.train_r2,

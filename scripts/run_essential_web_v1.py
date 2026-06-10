@@ -398,6 +398,7 @@ def main():
         quality_names=QUALITY_NAMES,
         proxy_runner=proxy_runner,
         parallel_workers=args.npu_devices,
+        val_set=args.val_set,
     )
     return 0
 

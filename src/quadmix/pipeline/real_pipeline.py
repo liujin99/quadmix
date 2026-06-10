@@ -317,6 +317,8 @@ class QuaDMixPipeline:
         quality_names: Optional[List[str]] = None,
         # Parallel training across multiple NPU devices
         parallel_workers: int = 1,
+        # Validation set info (for recording in summary)
+        val_set: Optional[str] = None,
         **load_kwargs,
     ) -> PipelineOutput:
         """
@@ -600,6 +602,7 @@ class QuaDMixPipeline:
                 "num_proxy_experiments": n_exp,
                 "num_search_points": n_search,
                 "normalizer": normalizer,
+                "val_set": val_set,
             },
             "metrics": {
                 "train_r2": self._optimizer.train_r2,
