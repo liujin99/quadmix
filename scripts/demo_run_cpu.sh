@@ -33,11 +33,11 @@ export QUADMIX_TEMP_DIR="${QUADMIX_TEMP_DIR:-$HOME/.cache/QuaDMix/temp}"
 
 PREPROCESSED_DIR="$QUADMIX_TEMP_DIR/preprocessed"
 RAW_DATA_DIR="$QUADMIX_DIR/data/essential-web-v1"
-VAL_FILE="$QUADMIX_DIR/data/core_22tasks_tokenized.pt"
+VAL_FILE="$QUADMIX_DIR/data/core_bmk_10tasks_v2_tokenized.pt"
 
 # ── 驗證集下載（帶版本檢查）──────────────────────────────────
 source "$QUADMIX_DIR/scripts/ensure_val_data.sh"
-ensure_val_data "liujin99/quadmix-core-22tasks" "core_22tasks_tokenized.pt" "$VAL_FILE"
+ensure_val_data "liujin99/quadmix-core-bmk-v2" "core_bmk_10tasks_v2_tokenized.pt" "$VAL_FILE"
 
 # ── 数据就绪检查（逐个 shard 检查，补充下载）──────────────────
 NUM_SHARDS=2  # quick demo 只需要 2 个 shard
@@ -159,7 +159,7 @@ cat << PARAMS
   │ 训练步数 (tiny_steps)      │       3  │
   │ 全局 batch size            │       8  │
   │ 微批大小                   │       2  │ (ga=4)
-  │ 验证集                     │ CORE 22task│
+  │ 验证集                     │ CORE BMK v2│
   │ 排名参考集大小             │     200  │
   └────────────────────────────┴──────────┘
 
@@ -177,7 +177,7 @@ python3 "$QUADMIX_DIR/scripts/run_essential_web_v1.py" \
     --global-batch-size 8 \
     --rank-ref-size 200 \
     --checkpoint-interval 0 \
-    --val-set core \
+    --val-set core_bmk_v2 \
     --output "$OUTPUT_DIR" \
     "$@" || exit $?
 
