@@ -17,6 +17,7 @@ venv/
 temp/
 result/
 data/essential-web/
+data/*.parquet
 
 # Large binary artifacts
 *.npy

@@ -1448,6 +1448,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             np.save(os.path.join(exp_dir, "selected_indices.npy"), selected_idx)
             with open(os.path.join(exp_dir, "meta.json"), "w") as f:
                 json.dump(meta, f, indent=2)
+            torch.save(model.state_dict(), os.path.join(exp_dir, "model.pt"))
 
             ckpt_results = dict(self._ckpt_results) if hasattr(self, '_ckpt_results') else {}
             if ckpt_results:
@@ -1503,6 +1504,28 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         elif device.type == "cuda":
             torch.cuda.empty_cache()
         model.train()
+        return val_loss
+
+    def revalidate_from_saved(
+        self, model_path: str, device_type: str = "cpu",
+    ) -> float:
+        from quadmix.core.proxy_model import ProxyModel
+        from quadmix.npu.device import DeviceManager, DeviceType
+        device_mgr = DeviceManager(device_type=DeviceType(device_type))
+        device = device_mgr.get_device(0)
+        model = ProxyModel(config=self.model_config).to(device)
+        if device.type == "npu":
+            model = model.to(torch.bfloat16)
+        state_dict = torch.load(model_path, map_location=device, weights_only=True)
+        model.load_state_dict(state_dict)
+        val_loss = self._run_validation(model, device)
+        del model, state_dict
+        if device.type == "npu":
+            import gc
+            gc.collect()
+            torch.npu.empty_cache()
+        elif device.type == "cuda":
+            torch.cuda.empty_cache()
         return val_loss
 
     def _lr_schedule(self, it: int, max_iters: int) -> float:

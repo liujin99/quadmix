@@ -294,7 +294,7 @@ def create_proxy_runner(config, args, output_dir, metadata_manager):
         val_path = ensure_val_data(val_path)
 
     # Parse checkpoint interval
-    checkpoint_interval = args.checkpoint_interval if args.checkpoint_interval else 1000
+    checkpoint_interval = args.checkpoint_interval if args.checkpoint_interval is not None else 1000
 
     runner = EssentialWebProxyRunner(
         config=config,
