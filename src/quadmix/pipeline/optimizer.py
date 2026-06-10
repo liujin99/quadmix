@@ -10,6 +10,7 @@ Based on Sections 3.2 and 3.3 of the paper.
 """
 
 from typing import List, Optional, Dict, Any, Tuple
+import warnings
 import numpy as np
 import numpy.typing as npt
 from quadmix.core.types import ParameterSet, QuaDMixConfig, ProxyResult
@@ -176,13 +177,17 @@ class RegressionModel:
             X_val = np.array([p.flatten() for p in eval_params_list])
             y_val = np.array(eval_losses)
             import lightgbm as lgb
-            self._model.fit(
-                X, y,
-                eval_set=[(X_val, y_val)],
-                callbacks=[lgb.early_stopping(stopping_rounds=early_stopping_rounds, verbose=False)],
-            )
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                self._model.fit(
+                    X, y,
+                    eval_set=[(X_val, y_val)],
+                    callbacks=[lgb.early_stopping(stopping_rounds=early_stopping_rounds, verbose=False)],
+                )
         else:
-            self._model.fit(X, y)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                self._model.fit(X, y)
 
         self._is_fitted = True
         return self
@@ -200,7 +205,9 @@ class RegressionModel:
         if not self._is_fitted:
             raise RuntimeError("Model not fitted yet. Call fit() first.")
         X = np.array([p.flatten() for p in params_list])
-        return self._model.predict(X)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            return self._model.predict(X)
 
     def feature_importance(self) -> Optional[Dict[str, float]]:
         """Get feature importance from the fitted model (LightGBM/RF only)."""
@@ -229,7 +236,9 @@ class RegressionModel:
         if not self._is_fitted:
             raise RuntimeError("Model not fitted yet.")
         X = np.array([p.flatten() for p in params_list])
-        return float(self._model.score(X, losses))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            return float(self._model.score(X, losses))
 
     def save(self, path: str):
         """Save the regression model to disk."""
