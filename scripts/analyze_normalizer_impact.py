@@ -5,7 +5,11 @@ Uses real quality scores from essential-web-v1 raw parquet.
 Reuses extract functions from preprocess_essential_web_v1_sharded.py.
 """
 
-import sys
+import sys, os
+try:
+    import quadmix
+except ImportError:
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 import numpy as np
 import pandas as pd
 

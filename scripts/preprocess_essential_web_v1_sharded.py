@@ -9,10 +9,14 @@ Usage:
       --output-dir temp/preprocessed
 """
 
-import argparse, json, os, time, glob
+import argparse, json, os, sys, time, glob
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 import pandas as pd
+try:
+    import quadmix
+except ImportError:
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
 from quadmix.constants import DOMAIN_MAP, FASTTEXT_FIELDS, QUALITY_COLUMNS, PROJECT_DIR
 
