@@ -26,6 +26,7 @@ if command -v conda &>/dev/null; then
 fi
 
 QUADMIX_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+export PYTHONPATH="${QUADMIX_DIR}:${PYTHONPATH:-}"
 export PATH="$HOME/.local/bin:$PATH"
 
 # ── 参数校验 ──────────────────────────────────────────────────
