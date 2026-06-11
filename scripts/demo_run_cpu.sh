@@ -33,7 +33,7 @@ export CUDA_VISIBLE_DEVICES=""
 export QUADMIX_TEMP_DIR="${QUADMIX_TEMP_DIR:-$HOME/.cache/QuaDMix/temp}"
 
 PREPROCESSED_DIR="$QUADMIX_TEMP_DIR/preprocessed"
-RAW_DATA_DIR="$QUADMIX_DIR/data/essential-web-v1"
+RAW_DATA_DIR="${RAW_DATA_DIR:-$HOME/.cache/QuaDMix/data}"
 VAL_FILE="$QUADMIX_DIR/data/core_bmk_10tasks_v3_tokenized.pt"
 
 # ── 驗證集下載（帶版本檢查）──────────────────────────────────
