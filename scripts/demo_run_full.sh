@@ -46,11 +46,11 @@ export QUADMIX_TEMP_DIR="${QUADMIX_TEMP_DIR:-$HOME/.cache/QuaDMix/temp}"
 
 PREPROCESSED_DIR="$QUADMIX_TEMP_DIR/preprocessed"
 RAW_DATA_DIR="$QUADMIX_DIR/data/essential-web-v1"
-VAL_FILE="$QUADMIX_DIR/data/core_bmk_10tasks_v2_tokenized.pt"
+VAL_FILE="$QUADMIX_DIR/data/core_bmk_10tasks_v3_tokenized.pt"
 
 # ── 驗證集下載（帶版本檢查）──────────────────────────────────
 source "$QUADMIX_DIR/scripts/ensure_val_data.sh"
-ensure_val_data "liujin99/quadmix-core-bmk-v2" "core_bmk_10tasks_v2_tokenized.pt" "$VAL_FILE"
+ensure_val_data "liujin99/quadmix-core-bmk-v3" "core_bmk_10tasks_v3_tokenized.pt" "$VAL_FILE"
 
 # ── 下载规模控制 ──────────────────────────────────
 # 每 shard ≈ 79M tokens (char//4) / 246 MB 原始 parquet
@@ -184,7 +184,7 @@ cat << PARAMS
   │ 全局 batch size            │          64  │
   │ 微批大小                   │          64  │ (ga=1)
   │ warmup                     │         4%   │
-  │ 验证集                     │  CORE BMK v2│
+  │ 验证集                     │  CORE BMK v3│
   │ 排名参考集大小             │      10,000  │
   │ 代理模型                   │  tinyllama_1M│
   └────────────────────────────┴──────────────┘
@@ -226,7 +226,7 @@ python3 "$QUADMIX_DIR/scripts/runners/run_essential_web_v1.py" \
     --global-batch-size 64 \
     --rank-ref-size 10000 \
     --checkpoint-interval 0 \
-    --val-set core_bmk_v2 \
+    --val-set core_bmk_v3 \
     --output "$OUTPUT_DIR" \
     $DEVICE_ARG \
     "$@" || exit $?
