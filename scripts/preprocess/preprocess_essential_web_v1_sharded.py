@@ -67,8 +67,12 @@ def extract_quality_signals(quality_signals):
 def process_shard(shard_path: str, shard_idx: int, output_dir: str) -> dict:
     """Process one raw shard, save preprocessed version. Returns stats dict."""
     t0 = time.time()
-    df = pd.read_parquet(shard_path,
-                         columns=["text", "eai_taxonomy", "quality_signals"])
+    try:
+        df = pd.read_parquet(shard_path,
+                             columns=["text", "eai_taxonomy", "quality_signals"])
+    except Exception as e:
+        print(f"  [{shard_idx:05d}] ERROR: Failed to read {shard_path}: {e}")
+        return None
     n = len(df)
 
     # Extract domain labels
@@ -219,6 +223,7 @@ def main():
 
     # Parallel processing
     workers = min(args.workers, len(to_process)) if to_process else 1
+    failed_shards = []
     if len(to_process) > 1:
         print(f"  Processing {len(to_process)} shards with {workers} workers (process pool)...")
         t_proc_start = time.time()
@@ -228,7 +233,11 @@ def main():
                        for sp, si, odir in to_process}
             for future in as_completed(futures):
                 stats = future.result()
-                shard_index.append(stats)
+                if stats is None:
+                    sp, si = futures[future]
+                    failed_shards.append((si, sp))
+                else:
+                    shard_index.append(stats)
                 completed += 1
                 # Print progress every 10 shards or at completion
                 if completed % 10 == 0 or completed == len(to_process):
@@ -241,13 +250,23 @@ def main():
     else:
         for sp, shard_idx, odir in to_process:
             stats = process_shard(sp, shard_idx, odir)
-            shard_index.append(stats)
+            if stats is None:
+                failed_shards.append((shard_idx, sp))
+            else:
+                shard_index.append(stats)
 
     # Sort by shard_idx for consistent output
     shard_index.sort(key=lambda s: s["shard_idx"])
 
     if skipped > 0:
         print(f"  Skipped {skipped} already-preprocessed shards")
+    
+    if failed_shards:
+        print(f"  Failed {len(failed_shards)} shards (corrupted or unreadable):")
+        for si, sp in failed_shards[:10]:
+            print(f"    [{si:05d}] {sp}")
+        if len(failed_shards) > 10:
+            print(f"    ... and {len(failed_shards) - 10} more")
 
     # Save shard index
     index_path = os.path.join(args.output_dir, "shard_index.json")
