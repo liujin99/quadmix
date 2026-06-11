@@ -333,27 +333,27 @@ def main():
     # ── Step 2: Check what's already downloaded (verify file size) ──
     print(f"[2/3] Checking existing files in {output_dir}...")
 
-    # Build local index: remote file → shard_XXXXX.parquet
-    # Each remote file gets a sequential shard index based on its position
-    remote_to_shard = {}
-    for idx, f in enumerate(files):
-        shard_name = f"shard_{idx:05d}.parquet"
-        remote_to_shard[f["path"]] = (shard_name, f["size"])
+    # Build local index: remote file → train-XXXXX-of-03291.parquet
+    # Use original HF filename as local filename
+    remote_to_local = {}
+    for f in files:
+        local_name = os.path.basename(f["path"])
+        remote_to_local[f["path"]] = (local_name, f["size"])
 
     complete = set()
     if os.path.isdir(output_dir):
-        for remote_path, (shard_name, expected_size) in remote_to_shard.items():
-            local_path = os.path.join(output_dir, shard_name)
+        for remote_path, (local_name, expected_size) in remote_to_local.items():
+            local_path = os.path.join(output_dir, local_name)
             if os.path.exists(local_path):
                 local_size = os.path.getsize(local_path)
-                if local_size >= expected_size * 0.99:  # Allow 1% tolerance
-                    complete.add(shard_name)
+                if local_size >= expected_size * 0.99:
+                    complete.add(local_name)
 
-    # Need to download: shard_XXXXX.parquet missing or incomplete
+    # Need to download: train-XXXXX-of-03291.parquet missing or incomplete
     need = []
     for f in files:
-        shard_name, expected_size = remote_to_shard[f["path"]]
-        if shard_name not in complete:
+        local_name, expected_size = remote_to_local[f["path"]]
+        if local_name not in complete:
             need.append(f)
     have = len(complete)
 
@@ -368,8 +368,8 @@ def main():
     # Check for partial files that will be resumed
     partial_count = 0
     for f in need:
-        shard_name, _ = remote_to_shard[f["path"]]
-        local_path = os.path.join(output_dir, shard_name)
+        local_name, _ = remote_to_local[f["path"]]
+        local_path = os.path.join(output_dir, local_name)
         if os.path.exists(local_path):
             partial_count += 1
 
@@ -394,14 +394,14 @@ def main():
         futures = {}
         for i, f in enumerate(need):
             url = HF_RESOLVE.format(repo=REPO_ID, path=f["path"])
-            shard_name, _ = remote_to_shard[f["path"]]
-            dest = os.path.join(output_dir, shard_name)
+            local_name, _ = remote_to_local[f["path"]]
+            dest = os.path.join(output_dir, local_name)
             size_mb = f["size"] / (1024 * 1024)
-            expected_size = f["size"]  # Pass for resume support
+            expected_size = f["size"]
             future = executor.submit(download_func, url, dest, i, len(need), size_mb,
                                      expected_size=expected_size,
                                      show_progress=not args.quiet)
-            futures[future] = shard_name
+            futures[future] = local_name
 
         for future in as_completed(futures):
             success, fname = future.result()

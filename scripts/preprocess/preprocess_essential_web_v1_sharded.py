@@ -113,13 +113,11 @@ def process_shard(shard_path: str, shard_idx: int, output_dir: str) -> dict:
 
 
 def parse_shard_idx_from_path(shard_path: str) -> int:
-    """Extract shard index from filename like 'shard_00000.parquet'."""
+    """Extract shard index from filename like 'train-00000-of-03291.parquet'."""
     basename = os.path.basename(shard_path)
-    # Handle both 'shard_00000.parquet' and 'shard_00000' patterns
     name = basename.replace(".parquet", "")
-    if name.startswith("shard_"):
-        return int(name.replace("shard_", ""))
-    # Fallback: use enumeration index
+    if name.startswith("train-") and "-of-" in name:
+        return int(name.split("-")[1])
     return -1
 
 

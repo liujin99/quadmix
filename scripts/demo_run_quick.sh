@@ -73,7 +73,8 @@ MISSING_SHARDS=()
 mkdir -p "$RAW_DATA_DIR"
 
 for i in $(seq 0 $((NUM_SHARDS - 1))); do
-    SHARD_FILE="$RAW_DATA_DIR/shard_$(printf '%05d' $i).parquet"
+    IDX=$(printf '%05d' $i)
+    SHARD_FILE="$RAW_DATA_DIR/train-${IDX}-of-03291.parquet"
     if [ ! -f "$SHARD_FILE" ]; then
         MISSING_SHARDS+=($i)
         NEED_DOWNLOAD=1
