@@ -136,7 +136,7 @@ def _tokenize_shard_parallel(
                   f"{speed:.1f} shards/s, ETA {eta:.0f}s")
 
     with PerfTimer.section("parallel_tokenize", "parallel_tokenize"):
-        from tokenize_worker import _process_shard_full as _worker_process_shard
+        from quadmix.pipeline.tokenize_worker import _process_shard_full as _worker_process_shard
         ctx = mp.get_context("spawn")
         with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as executor:
             futs = []

@@ -87,7 +87,7 @@ bash scripts/demo_run_quick.sh
 bash scripts/demo_run_full.sh
 
 # Custom run
-python scripts/run_essential_web_v1.py \
+python scripts/runners/run_essential_web_v1.py \
     --preprocessed-dir temp/preprocessed \
     --num-experiments 200 \
     --num-search 100000 \

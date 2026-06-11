@@ -9,13 +9,13 @@ import sys, os
 try:
     import quadmix
 except ImportError:
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'src'))
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'src'))
 import numpy as np
 import pandas as pd
 
 from quadmix.utils.normalization import zscore_normalize, rank_normalize
 from quadmix.constants import FASTTEXT_FIELDS, DOMAIN_MAP, QUALITY_COLUMNS
-from scripts.preprocess_essential_web_v1_sharded import (
+from scripts.preprocess.preprocess_essential_web_v1_sharded import (
     extract_domain_level_1, extract_quality_signals,
 )
 

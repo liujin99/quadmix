@@ -8,13 +8,13 @@ then re-runs LightGBM fitting, optimal search, final sampling, and
 report generation.
 
 Usage:
-  python scripts/reval_with_new_valset.py \
+  python scripts/runners/reval_with_new_valset.py \
       --result-dir result/quadmix_20260609_120000 \
       --val-set core \
       --preprocessed-dir /path/to/preprocessed \
       --output result/reval_core_20260610_150000
 
-  python scripts/reval_with_new_valset.py \
+  python scripts/runners/reval_with_new_valset.py \
       --result-dir result/quadmix_20260609_120000 \
       --val-path /path/to/custom_val.pt \
       --preprocessed-dir /path/to/preprocessed
@@ -29,7 +29,7 @@ import urllib.request
 try:
     import quadmix
 except ImportError:
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'src'))
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'src'))
 
 import numpy as np
 
@@ -207,7 +207,7 @@ def main():
     _t = time.time()
     print(f"\n[Stage 2] Re-evaluating {len(experiments)} models on {val_set_name}...")
 
-    from essential_proxy_runner import EssentialWebProxyRunner
+    from quadmix.pipeline.essential_proxy_runner import EssentialWebProxyRunner
 
     config = QuaDMixConfig(
         num_domains=10, num_quality_criteria=5,

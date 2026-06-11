@@ -102,7 +102,7 @@ echo "  QuaDMix Resample"
 echo "═══════════════════════════════════════════"
 echo ""
 
-python3 "$QUADMIX_DIR/scripts/resample_with_optimal_params.py" \
+python3 "$QUADMIX_DIR/scripts/runners/resample_with_optimal_params.py" \
     "${PYTHON_ARGS[@]}" || exit $?
 
 echo ""

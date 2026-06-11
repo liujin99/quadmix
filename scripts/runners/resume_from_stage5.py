@@ -9,7 +9,7 @@ Loads proxy experiment results from disk (meta.json) and runs:
   Stage 8: Save outputs + report
 
 Usage:
-  python scripts/resume_from_stage5.py \
+  python scripts/runners/resume_from_stage5.py \
       --proxy-dir /path/to/output/proxy_experiments \
       --preprocessed-dir /path/to/preprocessed \
       --output /path/to/output
@@ -23,7 +23,7 @@ import time
 try:
     import quadmix
 except ImportError:
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'src'))
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'src'))
 
 import numpy as np
 

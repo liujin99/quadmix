@@ -2,7 +2,7 @@
 
 ## 一、数据预处理
 
-**文件**: `scripts/preprocess_essential_web_v1_sharded.py`
+**文件**: `scripts/preprocess/preprocess_essential_web_v1_sharded.py`
 
 **输入**: 原始 essential-web-v1 parquet shard（`train-NNNNN-of-03291.parquet`）
 
@@ -44,7 +44,7 @@ ShardMetadataManager:
 入口：
 
 ```bash
-python scripts/run_essential_web_v1.py --preprocessed-dir temp/preprocessed --quick
+python scripts/runners/run_essential_web_v1.py --preprocessed-dir temp/preprocessed --quick
 # => pipeline.run(..., metadata_manager=manager)
 ```
 

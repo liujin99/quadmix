@@ -6,7 +6,7 @@ Given an optimal_parameters.json from a prior QuaDMix run and a new (larger) dat
 with the same distribution, applies Eq.1 + Eq.2 + Eq.3 to produce a new sampled dataset.
 
 Usage:
-  python scripts/resample_with_optimal_params.py \
+  python scripts/runners/resample_with_optimal_params.py \
       --data-dir /path/to/essential-web-v1 \
       --params-file result/quadmix_20260609_120000/optimal_parameters.json \
       --output result/resample_20260611_120000
@@ -22,7 +22,7 @@ import time
 try:
     import quadmix
 except ImportError:
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'src'))
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'src'))
 
 import numpy as np
 import pandas as pd

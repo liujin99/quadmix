@@ -6,13 +6,13 @@
 ## 已完成
 
 ### 2026-06-03: NPU 显存碎片化修复
-- **文件**: `scripts/essential_proxy_runner.py`
+- **文件**: `src/quadmix/pipeline/essential_proxy_runner.py`
 - **问题**: Worker 0 在 backward 时 OOM，其他 worker 正常。原因是每迭代调用 `empty_cache()` 释放完整块，导致 forward/backward 分配位置漂移，碎片累积
 - **修复**: 移除训练循环中的 per-iteration `empty_cache()`，保留低频调用（训练开始、checkpoint、实验结束）
 - **影响**: 允许 PyTorch 分配器自然复用缓存块，解决碎片化 OOM
 
 ### 2026-06-03: precompute_samples 并行化 + 内存优化
-- **文件**: `scripts/essential_proxy_runner.py:precompute_samples()`
+- **文件**: `src/quadmix/pipeline/essential_proxy_runner.py:precompute_samples()`
 - **问题**: 3000 实验串行处理，每次 Eq.1-3 分配 13GB（275M docs）
 - **修复**: 
   1. 新增 `_sample_one_experiment` 方法，按 domain 逐域处理，内存 O(N/M) 而非 O(N)
@@ -27,7 +27,7 @@
 - **影响**: 8 NPU 并行训练正常工作
 
 ### 2026-06-03: bf16 混合精度训练
-- **文件**: `scripts/essential_proxy_runner.py`, `scripts/demo_run_full.sh`
+- **文件**: `src/quadmix/pipeline/essential_proxy_runner.py`, `scripts/demo_run_full.sh`
 - **问题**: 全程 fp32，logits 13.1GB，backward 28GB，OOM
 - **修复**: 
   ```python
@@ -38,20 +38,20 @@
 - **影响**: logits 13.1→6.5GB，backward 28→14GB，训练速度 1.5-2x
 
 ### 2026-06-03: Flash Attention + Pack 优化
-- **文件**: `src/quadmix/core/proxy_model.py`, `scripts/essential_proxy_runner.py`
+- **文件**: `src/quadmix/core/proxy_model.py`, `src/quadmix/pipeline/essential_proxy_runner.py`
 - **修复**:
   1. Flash Attention: `F.scaled_dot_product_attention` 替代显式 2048×2048 注意力矩阵，节省 8GB
   2. Pack: `np.searchsorted` 替代 Python dict，`np.save` 替代 `torch.save`，`np.load(mmap_mode='r')` 近零拷贝
 - **影响**: 显存节省 8GB，Pack 时间 148s → 10-30s
 
 ### 2026-06-03: ProcessPoolExecutor tokenize (GIL bypass)
-- **文件**: `scripts/essential_proxy_runner.py:_tokenize_shard_parallel()`
+- **文件**: `src/quadmix/pipeline/essential_proxy_runner.py:_tokenize_shard_parallel()`
 - **问题**: 48 Python threads 共享 1 GIL + 4 全局 Rust threads，实际只有 4 线程做 CPU 工作（90% 空闲）
 - **修复**: ProcessPoolExecutor(48) 每个进程独立 GIL + 4 Rust threads = 192 线程真并行
 - **影响**: 7 min → ~40s（10x 加速）
 
 ### 2026-06-02: ProcessPoolExecutor fork→spawn 避免 COW page fault
-- **文件**: `scripts/essential_proxy_runner.py:_tokenize_shard_parallel()`
+- **文件**: `src/quadmix/pipeline/essential_proxy_runner.py:_tokenize_shard_parallel()`
 - **问题**: 主进程 RSS 18GB，fork 64 workers 导致 64×18GB=1.15TB COW 虚拟映射，海量 page fault 导致 tokenize 卡死
 - **修复**: 使用 `mp.get_context('spawn')` 替代默认 fork，子进程从零启动不继承主进程内存
 - **影响**: 启动慢 2-3 秒，但避免卡死问题
@@ -63,22 +63,22 @@
 - **影响**: global_batch 同步改为 40（无梯度累积），训练速度提升
 
 ### 2026-06-02: mmap file handle leak 修复
-- **文件**: `scripts/essential_proxy_runner.py:_cached_shard_rows()` 等 4 处
+- **文件**: `src/quadmix/pipeline/essential_proxy_runner.py:_cached_shard_rows()` 等 4 处
 - **问题**: `np.load(mmap_mode='r')` 未关闭文件句柄，101 shards 累积 101 个打开的 mmap fd 导致 IO hang
 - **修复**: 移除 `mmap_mode='r'`，直接加载到内存
 
 ### 2026-06-02: 综合性能计时系统
-- **文件**: `scripts/essential_proxy_runner.py`, `src/quadmix/pipeline/real_pipeline.py`
+- **文件**: `src/quadmix/pipeline/essential_proxy_runner.py`, `src/quadmix/pipeline/real_pipeline.py`
 - **内容**: PerfTimer 类 + stage 级计时，实时输出 + 结束汇总
 
 ### 2026-06-01: 质量分数方向反转修复 (A1)
-- **文件**: `scripts/preprocess_essential_web_v1_sharded.py:extract_quality_signals()`
+- **文件**: `scripts/preprocess/preprocess_essential_web_v1_sharded.py:extract_quality_signals()`
 - **问题**: FastText 分数 higher=better，但代码按 smaller=better 处理，选择最低质量文档
 - **修复**: 在 `extract_quality_signals()` 中取反 `qs = -qs`
 - **影响**: 正确选择高质量文档
 
 ### 2026-06-01: Token-weighted Eq.2 (A5) + LightGBM early stopping (B1)
-- **文件**: `scripts/essential_proxy_runner.py`, `src/quadmix/pipeline/optimizer.py`
+- **文件**: `src/quadmix/pipeline/essential_proxy_runner.py`, `src/quadmix/pipeline/optimizer.py`
 - **修复**:
   1. A5: Proxy Eq.2 使用 token 数加权计算百分位，匹配论文
   2. B1: LightGBM 添加 early stopping (patience=50)，防止过拟合
@@ -86,13 +86,13 @@
 ## P0 — 高影响（预计加速 30-50%）
 
 ### 1. HDF5/LMDB 替代 np.savez 做 token cache
-- **文件**: `scripts/essential_proxy_runner.py:_cache_add_rows()` (L320-434)
+- **文件**: `src/quadmix/pipeline/essential_proxy_runner.py:_cache_add_rows()` (L320-434)
 - **问题**: 每次增量添加几行，都全量读-合并-写整个 .npz（最终 ~200MB/shard）
 - **预计**: 磁盘 I/O 减少 70%+
 - **方案**: HDF5 appendable dataset 或 LMDB key-value store
 
 ### 2. Shared memory metadata — 消除 worker 重载 15GB
-- **文件**: `scripts/essential_proxy_runner.py:_worker_dynamic_loop()` (L1636-1693)
+- **文件**: `src/quadmix/pipeline/essential_proxy_runner.py:_worker_dynamic_loop()` (L1636-1693)
 - **问题**: 8 worker × 15GB = 120GB，启动 30-60s/worker
 - **预计**: Worker 启动 ~5s, RAM 120GB→15GB
 - **方案**: torch.multiprocessing shared_memory 或 Python 3.8+ shared_memory
@@ -205,7 +205,7 @@
 ### P0 — 严重问题
 
 #### ~~A1. 质量分数方向反转~~ ✅ 已修复
-- **文件**: `scripts/preprocess_essential_web_v1_sharded.py:extract_quality_signals()`
+- **文件**: `scripts/preprocess/preprocess_essential_web_v1_sharded.py:extract_quality_signals()`
 - **完成**: 2026-06-01 (commit e852787)
 - **问题**: FastText 分数 higher=better，但代码按 smaller=better 处理
 - **修复**: 在 `extract_quality_signals()` 中取反 `qs = -qs`
@@ -232,7 +232,7 @@
 ### P2 — 中等问题
 
 #### ~~A5. Proxy 实验中 Eq.2 缺少 token 加权~~ ✅ 已修复
-- **文件**: `scripts/essential_proxy_runner.py:_compute_ranks_for_params()`
+- **文件**: `src/quadmix/pipeline/essential_proxy_runner.py:_compute_ranks_for_params()`
 - **完成**: 2026-06-01 (commit 2269457)
 - **修复**: Proxy Eq.2 使用 token 数加权计算百分位，匹配论文
 
@@ -315,7 +315,7 @@
   4. 业界主流数据集（RefinedWeb、FineWeb、DCLM、essential-web）均不提供 token 数标签，论文大概率也是估算
 
 #### B7. 验证集 loss 计算方式未明确
-- **文件**: `scripts/essential_proxy_runner.py:_run_validation()` (L1114-1142)
+- **文件**: `src/quadmix/pipeline/essential_proxy_runner.py:_run_validation()` (L1114-1142)
 - **问题**: 使用文档级平均，论文未明确是文档级还是 token 级
 - **影响**: 短文档权重不同
 
@@ -565,7 +565,7 @@ micro_batch=32, block_size=2048, vocab=50432 时的显存分布（bf16 后）：
 ### 高影响
 
 #### E1. `shared_to_ndarray` 每个 worker 拷贝 11GB
-- **文件**: `scripts/essential_proxy_runner.py:shared_to_ndarray()` (L82-83)
+- **文件**: `src/quadmix/pipeline/essential_proxy_runner.py:shared_to_ndarray()` (L82-83)
 - **问题**: 
   ```python
   return arr.copy()  # 275M docs × 5 criteria × 8B = 11GB
@@ -578,20 +578,20 @@ micro_batch=32, block_size=2048, vocab=50432 时的显存分布（bf16 后）：
   - 或每个 worker 只拷贝需要的 shard 子集（而非全量）
 
 #### E2. `_tokenize_batch_union` 重复调用 `global_to_shard_rows`
-- **文件**: `scripts/essential_proxy_runner.py:_tokenize_batch_union()` (L487-492 和 L584-585)
+- **文件**: `src/quadmix/pipeline/essential_proxy_runner.py:_tokenize_batch_union()` (L487-492 和 L584-585)
 - **问题**: Step 1 和 Step 4 对同一批实验各调一次 `global_to_shard_rows`（内部做 `searchsorted` + `argsort` + `unique`），完全冗余
 - **影响**: 每批实验额外 1-2 秒（275M docs 的 searchsorted 开销）
 - **方案**: 缓存 Step 1 的 `shard_to_exp_rows` 结果，Step 4 直接复用
 
 #### ~~E3. `rank_normalize` 双重 argsort~~ ✅ 已确认 rank 最优（不改）
-- **文件**: `src/quadmix/utils/normalization.py`, `scripts/essential_proxy_runner.py`, `src/quadmix/core/quality_merger.py`
+- **文件**: `src/quadmix/utils/normalization.py`, `src/quadmix/pipeline/essential_proxy_runner.py`, `src/quadmix/core/quality_merger.py`
 - **完成**: 2026-06-04（确认 rank 最优，回退到 rank）
 - **原问题**: rank_normalize 用双重 argsort (O(N log N) × 2)，且丢失数值关系导致 α 权重失效
 - **尝试**: 改为 zscore（Val R²=0.137）和 log1p_z（Val R²=0.006），均远差于 rank（Val R²=0.538-0.880）
 - **结论**: rank 的"扭曲分布"在 Eq.1→Eq.2→Eq.3 链路中无害（sigmoid 平滑性 + 多准则加权和），且提供最大参数敏感度。保持 rank。
 
 #### E4. Validation `val_bs` 可以更激进（部分完成）
-- **文件**: `scripts/essential_proxy_runner.py:_run_validation()` (L1325)
+- **文件**: `src/quadmix/pipeline/essential_proxy_runner.py:_run_validation()` (L1325)
 - **当前**: `val_bs=64`（从 16 提升到 64，commit 019c903）
 - **问题**: validation 是 `no_grad`，不需要 backward 显存，可以更激进
 - **方案**: 
@@ -601,7 +601,7 @@ micro_batch=32, block_size=2048, vocab=50432 时的显存分布（bf16 后）：
 - **状态**: 部分完成（16→64），可继续提升到 256
 
 #### E5. `ProcessPoolExecutor` 每次 tokenize 重建
-- **文件**: `scripts/essential_proxy_runner.py:_tokenize_shard_parallel()` (L1793, L1842)
+- **文件**: `src/quadmix/pipeline/essential_proxy_runner.py:_tokenize_shard_parallel()` (L1793, L1842)
 - **问题**: Stage 1 IO 和 Stage 2 tokenize 各创建一个 `ProcessPoolExecutor`，每次创建/销毁 48-64 个进程
 - **影响**: 每次 tokenize 批次额外 2-5 秒进程创建开销
 - **方案**: 复用持久化进程池（类级别或全局）
@@ -609,7 +609,7 @@ micro_batch=32, block_size=2048, vocab=50432 时的显存分布（bf16 后）：
 ### 中影响
 
 #### E6. `_memory_cache_query` 双重遍历
-- **文件**: `scripts/essential_proxy_runner.py:_memory_cache_query()` (L347-348)
+- **文件**: `src/quadmix/pipeline/essential_proxy_runner.py:_memory_cache_query()` (L347-348)
 - **问题**: 
   ```python
   hit_rows_set = [r for r in requested_rows if int(r) in cached_rows]
@@ -628,7 +628,7 @@ micro_batch=32, block_size=2048, vocab=50432 时的显存分布（bf16 后）：
   ```
 
 #### E7. 每个实验重建模型
-- **文件**: `scripts/essential_proxy_runner.py:run_experiment()` (L952)
+- **文件**: `src/quadmix/pipeline/essential_proxy_runner.py:run_experiment()` (L952)
 - **问题**: 
   ```python
   model = ProxyModel(config=self.model_config).to(device)
@@ -638,7 +638,7 @@ micro_batch=32, block_size=2048, vocab=50432 时的显存分布（bf16 后）：
 - **方案**: 复用模型对象 + `_init_weights()` 重置（需验证是否安全）
 
 #### E8. Validation 数据每次重新传 device
-- **文件**: `scripts/essential_proxy_runner.py:_run_validation()` (L1159-1160)
+- **文件**: `src/quadmix/pipeline/essential_proxy_runner.py:_run_validation()` (L1159-1160)
 - **问题**: 
   ```python
   val_tokens = self._val_token_ids[:val_n, :bs].to(device)
@@ -657,7 +657,7 @@ micro_batch=32, block_size=2048, vocab=50432 时的显存分布（bf16 后）：
 - **方案**: 批量加载或缓存
 
 #### E10. `precompute_samples` 每 5 个实验打印进度
-- **文件**: `scripts/essential_proxy_runner.py:precompute_samples()` (L1252)
+- **文件**: `src/quadmix/pipeline/essential_proxy_runner.py:precompute_samples()` (L1252)
 - **问题**: 3000 实验 = 600 次 print
 - **影响**: 日志冗余，不影响性能
 - **方案**: 改为每 50 或 100 个打印一次
@@ -684,7 +684,7 @@ micro_batch=32, block_size=2048, vocab=50432 时的显存分布（bf16 后）：
 ### 高影响
 
 #### F1. `loss.item()` 每次迭代触发 host-device sync
-- **文件**: `scripts/essential_proxy_runner.py:run_experiment()` (L1093)
+- **文件**: `src/quadmix/pipeline/essential_proxy_runner.py:run_experiment()` (L1093)
 - **问题**: 
   ```python
   total_loss += loss.item()  # 每次 iter 都 NPU→CPU 同步
@@ -707,7 +707,7 @@ micro_batch=32, block_size=2048, vocab=50432 时的显存分布（bf16 后）：
 - **效果**: 10-20x 加速，内存从 13GB → 1.3GB/experiment
 
 #### F3. `flat_train` 和 `batch_buf` 用 int64（应为 int32）
-- **文件**: `scripts/essential_proxy_runner.py:run_experiment()` (L985, L1013)
+- **文件**: `src/quadmix/pipeline/essential_proxy_runner.py:run_experiment()` (L985, L1013)
 - **问题**: 
   ```python
   flat_train = torch.cat(real_tokens_list).to(device)  # int64
@@ -720,7 +720,7 @@ micro_batch=32, block_size=2048, vocab=50432 时的显存分布（bf16 后）：
 ### 中影响
 
 #### F4. `optimizer.zero_grad()` 应用 `set_to_none=True`
-- **文件**: `scripts/essential_proxy_runner.py:run_experiment()` (L1082)
+- **文件**: `src/quadmix/pipeline/essential_proxy_runner.py:run_experiment()` (L1082)
 - **问题**: 
   ```python
   optimizer.zero_grad()  # 将梯度设为 0（分配内存）
@@ -729,7 +729,7 @@ micro_batch=32, block_size=2048, vocab=50432 时的显存分布（bf16 后）：
 - **方案**: `optimizer.zero_grad(set_to_none=True)` 将梯度设为 None，避免分配零张量
 
 #### F5. `rng.choice(n_domain, k, replace=False)` 对大域低效
-- **文件**: `scripts/essential_proxy_runner.py:_compute_ranks_for_params()` (L874)
+- **文件**: `src/quadmix/pipeline/essential_proxy_runner.py:_compute_ranks_for_params()` (L874)
 - **问题**: 
   ```python
   ref_idx = rng.choice(n_domain, k, replace=False)  # n_domain 可达 2700 万
@@ -739,7 +739,7 @@ micro_batch=32, block_size=2048, vocab=50432 时的显存分布（bf16 后）：
 - **方案**: Floyd 采样算法或 `np.sort(rng.integers(0, n_domain, k))`（有重复但概率极低）
 
 #### F6. Validation 数据每个 worker 独立加载
-- **文件**: `scripts/essential_proxy_runner.py:__init__()` (L182)
+- **文件**: `src/quadmix/pipeline/essential_proxy_runner.py:__init__()` (L182)
 - **问题**: 
   ```python
   val_data = torch.load(self.val_data_path, map_location="cpu", weights_only=False)
@@ -749,7 +749,7 @@ micro_batch=32, block_size=2048, vocab=50432 时的显存分布（bf16 后）：
 - **方案**: shared memory 共享验证集
 
 #### F7. `_compute_ranks_for_params` 每次分配两个 275M float64 数组
-- **文件**: `scripts/essential_proxy_runner.py:_compute_ranks_for_params()` (L850, L862)
+- **文件**: `src/quadmix/pipeline/essential_proxy_runner.py:_compute_ranks_for_params()` (L850, L862)
 - **问题**: 
   ```python
   merged_scores = np.zeros(self._num_docs, dtype=np.float64)  # 2.2GB
@@ -760,7 +760,7 @@ micro_batch=32, block_size=2048, vocab=50432 时的显存分布（bf16 后）：
 - **方案**: 预分配并复用（类级别 buffer）
 
 #### F8. `_memory_cache_get_rows` 也构建 Python set
-- **文件**: `scripts/essential_proxy_runner.py:_memory_cache_get_rows()` (L278)
+- **文件**: `src/quadmix/pipeline/essential_proxy_runner.py:_memory_cache_get_rows()` (L278)
 - **问题**: 
   ```python
   return set(int(r) for r in self._memory_cache[sid]["rows"])
@@ -772,7 +772,7 @@ micro_batch=32, block_size=2048, vocab=50432 时的显存分布（bf16 后）：
 ### 低影响
 
 #### F9. `_tokenize_batch_union` Step 2 中 `row_to_pos` dict 构建
-- **文件**: `scripts/essential_proxy_runner.py:_tokenize_batch_union()` (L534)
+- **文件**: `src/quadmix/pipeline/essential_proxy_runner.py:_tokenize_batch_union()` (L534)
 - **问题**: 
   ```python
   row_to_pos = {int(r): i for i, r in enumerate(disk_rows)}
@@ -782,13 +782,13 @@ micro_batch=32, block_size=2048, vocab=50432 时的显存分布（bf16 后）：
 - **方案**: 与 C3 相同，改用 `np.isin` 或 `np.searchsorted`
 
 #### F10. `_load_tokens_for_experiment` fallback 中 `row_to_pos` dict
-- **文件**: `scripts/essential_proxy_runner.py:_load_tokens_for_experiment()` (L666)
+- **文件**: `src/quadmix/pipeline/essential_proxy_runner.py:_load_tokens_for_experiment()` (L666)
 - **问题**: 同上模式
 - **影响**: 每 shard 每实验几十 ms
 - **方案**: 同上
 
 #### F11. `_cache_add_rows` 去重也用 Python dict
-- **文件**: `scripts/essential_proxy_runner.py:_cache_add_rows()` (L431)
+- **文件**: `src/quadmix/pipeline/essential_proxy_runner.py:_cache_add_rows()` (L431)
 - **问题**: 
   ```python
   row_to_idx = {int(r): i for i, r in enumerate(combined_rows)}
@@ -798,13 +798,13 @@ micro_batch=32, block_size=2048, vocab=50432 时的显存分布（bf16 后）：
 - **方案**: `np.unique(return_index=True)`
 
 #### F12. `precompute_samples` 末尾 `np.unique(np.concatenate(all_selected))`
-- **文件**: `scripts/essential_proxy_runner.py:precompute_samples()` (L1269)
+- **文件**: `src/quadmix/pipeline/essential_proxy_runner.py:precompute_samples()` (L1269)
 - **问题**: 3000 个实验的 selected 数组 concatenate 后可能数亿行，`np.unique` 需要排序
 - **影响**: 一次性数秒
 - **方案**: 增量 unique 或采样统计
 
 #### F13. `_run_validation` 中 `per_doc_losses` list + `torch.cat`
-- **文件**: `scripts/essential_proxy_runner.py:_run_validation()` (L1178-1179)
+- **文件**: `src/quadmix/pipeline/essential_proxy_runner.py:_run_validation()` (L1178-1179)
 - **问题**: 
   ```python
   per_doc_losses = []

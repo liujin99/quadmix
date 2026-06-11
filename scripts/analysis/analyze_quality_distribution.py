@@ -6,11 +6,11 @@ import os
 try:
     import quadmix
 except ImportError:
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'src'))
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'src'))
 
 import numpy as np
 import pandas as pd
-from scripts.preprocess_essential_web_v1_sharded import extract_quality_signals
+from scripts.preprocess.preprocess_essential_web_v1_sharded import extract_quality_signals
 from quadmix.constants import FASTTEXT_FIELDS
 
 DATA_DIR = "/home/liujin99/data/essential-web-v1"

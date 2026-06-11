@@ -1,6 +1,6 @@
 """Proxy experiment runner base class for QuaDMix.
 
-The actual proxy runner is implemented in scripts/essential_proxy_runner.py.
+The actual proxy runner is implemented in src/quadmix/pipeline/essential_proxy_runner.py.
 This module provides the abstract interface.
 """
 

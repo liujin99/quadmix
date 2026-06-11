@@ -3,7 +3,7 @@
 Download Essential-Web v1.0 parquet shards from Hugging Face.
 
 Usage:
-    python scripts/download_essential_web.py [--num-files N] 
+    python scripts/preprocess/download_essential_web.py [--num-files N] 
         [--output-dir DIR] [--crawl CRAWL_NAME]
 
 Downloads N shards (default 50) from the specified CommonCrawl dump
@@ -11,19 +11,19 @@ into the output directory. Supports parallel downloads and HF mirror.
 
 Examples:
     # Download 50 files (default) to data/essential-web/
-    python scripts/download_essential_web.py
+    python scripts/preprocess/download_essential_web.py
 
     # Download just 2 files (for testing)
-    python scripts/download_essential_web.py --num-files 2
+    python scripts/preprocess/download_essential_web.py --num-files 2
 
     # Custom output with 8 parallel workers
-    python scripts/download_essential_web.py \
+    python scripts/preprocess/download_essential_web.py \
         --output-dir ./data/essential-web \
         --num-files 50 \
         --workers 8
 
     # Use HF mirror (for users in China)
-    HF_ENDPOINT=https://hf-mirror.com python scripts/download_essential_web.py
+    HF_ENDPOINT=https://hf-mirror.com python scripts/preprocess/download_essential_web.py
 """
 
 import argparse

@@ -62,7 +62,7 @@ Since only assistant text is extracted (no system/user prompts), every non-paddi
 ### Usage
 
 ```bash
-python scripts/run_essential_web_v1.py --quick --val-set=openhermes
+python scripts/runners/run_essential_web_v1.py --quick --val-set=openhermes
 ```
 
 ---
@@ -213,7 +213,7 @@ The 21 deduplicated tasks span 5 categories:
 ### Usage
 
 ```bash
-python scripts/run_essential_web_v1.py --quick --val-set=core
+python scripts/runners/run_essential_web_v1.py --quick --val-set=core
 ```
 
 The validation set will be automatically downloaded from `liujin99/quadmix-core-22tasks` on first use. If the download fails, the script falls back to local generation from the CORE eval bundle (requires `eval_bundle/` directory).

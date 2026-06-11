@@ -8,13 +8,13 @@ LightGBM regression → optimal search → final sampling → save outputs.
 
 Usage:
   # Quick validation (200 experiments, fast)
-  python scripts/run_essential_web_v1.py --quick --preprocessed-dir .../preprocessed
+  python scripts/runners/run_essential_web_v1.py --quick --preprocessed-dir .../preprocessed
 
   # Full production (3000 experiments, needs GPU)
-  python scripts/run_essential_web_v1.py --full --preprocessed-dir .../preprocessed
+  python scripts/runners/run_essential_web_v1.py --full --preprocessed-dir .../preprocessed
 
   # Or use the auto-detected defaults:
-  python scripts/run_essential_web_v1.py --quick
+  python scripts/runners/run_essential_web_v1.py --quick
 
 The validation set (openhermes_10k_assistant_tokenized.pt) will be
 automatically downloaded from HuggingFace if not found locally.
@@ -27,7 +27,7 @@ import argparse, os, sys, time, urllib.request
 try:
     import quadmix
 except ImportError:
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'src'))
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'src'))
 from quadmix import QuaDMixConfig
 from quadmix.pipeline.real_pipeline import QuaDMixPipeline
 from quadmix.data.metadata_manager import ShardMetadataManager
@@ -158,7 +158,7 @@ def ensure_core_val_data(val_path: str, eval_bundle: str) -> str:
 
     # Fall back to local generation
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    prepare_script = os.path.join(script_dir, "validation_set", "prepare_core_val_set.py")
+    prepare_script = os.path.join(script_dir, "..", "validation_set", "prepare_core_val_set.py")
 
     if not os.path.exists(prepare_script):
         raise FileNotFoundError(
@@ -235,7 +235,7 @@ def ensure_core_bmk_v2_data(val_path: str, eval_bundle: str) -> str:
         print(f"[Setup] Trying local generation...")
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    prepare_script = os.path.join(script_dir, "validation_set", "prepare_core_bmk_v2.py")
+    prepare_script = os.path.join(script_dir, "..", "validation_set", "prepare_core_bmk_v2.py")
 
     if not os.path.exists(prepare_script):
         raise FileNotFoundError(
@@ -333,7 +333,7 @@ def build_parser():
 
 def create_proxy_runner(config, args, output_dir, metadata_manager):
     """Create an EssentialWebProxyRunner with sharded metadata manager."""
-    from essential_proxy_runner import EssentialWebProxyRunner
+    from quadmix.pipeline.essential_proxy_runner import EssentialWebProxyRunner
     proxy_dir = os.path.join(output_dir, "proxy_experiments")
 
     # Resolve validation path

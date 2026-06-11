@@ -74,7 +74,7 @@ quadmix/
 
 **Input**: essential-web-v1 (3291 raw parquet shards, ~83K docs each, ~246 MB/shard)
 
-**Script**: `scripts/preprocess_essential_web_v1_sharded.py`
+**Script**: `scripts/preprocess/preprocess_essential_web_v1_sharded.py`
 
 Per shard, extracts:
 - `domain` (int): Dewey decimal level_1 (0-9 categories)
@@ -101,7 +101,7 @@ Text loaded on-demand via `pd.read_parquet(filters=[("row_in_shard", "in", rows)
 
 ### Phase 2: Precompute Samples
 
-**File**: `scripts/essential_proxy_runner.py` → `precompute_samples()`
+**File**: `src/quadmix/pipeline/essential_proxy_runner.py` → `precompute_samples()`
 
 Pure numpy, CPU only. For each experiment's parameters:
 
@@ -500,7 +500,7 @@ bash scripts/demo_run_quick.sh
 bash scripts/demo_run_full.sh
 
 # Custom parameters
-python scripts/run_essential_web_v1.py \
+python scripts/runners/run_essential_web_v1.py \
     --preprocessed-dir temp/preprocessed \
     --num-experiments 500 \
     --num-search 10000 \
@@ -892,9 +892,9 @@ Main Process:                         Worker Process (×8):
 
 **Files changed**:
 - `src/quadmix/data/metadata_manager.py` — `from_shared()` classmethod (accepts pre-loaded arrays)
-- `scripts/essential_proxy_runner.py` — `SharedArrayInfo`, `ndarray_to_shared()`, `shared_to_ndarray()` helpers
-- `scripts/essential_proxy_runner.py:_run_batch_dynamic()` — creates shared memory blocks before spawn
-- `scripts/essential_proxy_runner.py:_worker_dynamic_loop()` — maps shared memory (~1s), falls back to disk (~60s)
+- `src/quadmix/pipeline/essential_proxy_runner.py` — `SharedArrayInfo`, `ndarray_to_shared()`, `shared_to_ndarray()` helpers
+- `src/quadmix/pipeline/essential_proxy_runner.py:_run_batch_dynamic()` — creates shared memory blocks before spawn
+- `src/quadmix/pipeline/essential_proxy_runner.py:_worker_dynamic_loop()` — maps shared memory (~1s), falls back to disk (~60s)
 
 **Impact**: RAM 120 GB → 26 GB, worker startup 30–60s → ~1s.
 
@@ -1049,7 +1049,7 @@ Also applied in worker loop between experiments.
 
 | File | +Lines | -Lines | Changes |
 |------|--------|--------|---------|
-| `scripts/essential_proxy_runner.py` | +190 | -300 | Shared memory, domain indices, Condition dispatcher, LRU, dead code removal, simplified cache write, validation batch |
+| `src/quadmix/pipeline/essential_proxy_runner.py` | +190 | -300 | Shared memory, domain indices, Condition dispatcher, LRU, dead code removal, simplified cache write, validation batch |
 | `src/quadmix/core/proxy_model.py` | +9 | -7 | RoPE pre-computation |
 | `src/quadmix/data/metadata_manager.py` | +26 | 0 | `from_shared()` factory method |
 | `todo.md` | +88 | 0 | Audit report and tracking |

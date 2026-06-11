@@ -61,7 +61,7 @@ if [ $NEED_DOWNLOAD -eq 1 ]; then
     EXISTING=$(ls "$RAW_DATA_DIR"/*.parquet 2>/dev/null | wc -l || echo 0)
     echo "  已有 shard: $EXISTING, 需要: $NUM_SHARDS"
     echo "  缺失 ${#MISSING_SHARDS[@]} 个 shard，补充下载..."
-    python3 "$QUADMIX_DIR/scripts/download_essential_web.py" \
+    python3 "$QUADMIX_DIR/scripts/preprocess/download_essential_web.py" \
         --num-files "$NUM_SHARDS" --output-dir "$RAW_DATA_DIR" \
         --workers "${DOWNLOAD_WORKERS:-16}"
     echo "  ✓ 下载完成"
@@ -127,7 +127,7 @@ if [ $RUN_PREPROCESS -eq 1 ]; then
     fi
     mkdir -p "$PREPROCESSED_DIR"
     echo "  运行多 shard 预处理脚本..."
-    python3 "$QUADMIX_DIR/scripts/preprocess_essential_web_v1_sharded.py" \
+    python3 "$QUADMIX_DIR/scripts/preprocess/preprocess_essential_web_v1_sharded.py" \
         --input-dir "$RAW_DATA_DIR" \
         --output-dir "$PREPROCESSED_DIR"
     echo "  ✓ 预处理完成 (multi-shard)"
@@ -167,7 +167,7 @@ cat << PARAMS
   ⚡ 预计耗时: ~1-2分钟
 PARAMS
 
-python3 "$QUADMIX_DIR/scripts/run_essential_web_v1.py" \
+python3 "$QUADMIX_DIR/scripts/runners/run_essential_web_v1.py" \
     --preprocessed-dir "$PREPROCESSED_DIR" \
     --num-experiments 20 \
     --num-search 200 \

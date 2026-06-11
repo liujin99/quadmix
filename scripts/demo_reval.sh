@@ -148,4 +148,4 @@ ARGS=(
 [[ -n "$VAL_PATH" ]] && ARGS+=(--val-path "$VAL_PATH")
 [[ -n "$OUTPUT" ]] && ARGS+=(--output "$OUTPUT")
 
-python3 "$QUADMIX_DIR/scripts/reval_with_new_valset.py" "${ARGS[@]}"
+python3 "$QUADMIX_DIR/scripts/runners/reval_with_new_valset.py" "${ARGS[@]}"

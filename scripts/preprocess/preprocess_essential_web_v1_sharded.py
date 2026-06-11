@@ -4,7 +4,7 @@ Preprocess essential-web-v1.0: extract domain labels and quality signals,
 outputting one parquet per shard (multi-shard mode).
 
 Usage:
-  python scripts/preprocess_essential_web_v1_sharded.py \
+  python scripts/preprocess/preprocess_essential_web_v1_sharded.py \
       --input-dir data/essential-web-v1 \
       --output-dir temp/preprocessed
 """
@@ -16,7 +16,7 @@ import pandas as pd
 try:
     import quadmix
 except ImportError:
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'src'))
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'src'))
 
 from quadmix.constants import DOMAIN_MAP, FASTTEXT_FIELDS, QUALITY_COLUMNS, PROJECT_DIR
 
