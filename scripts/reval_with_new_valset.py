@@ -29,48 +29,19 @@ import urllib.request
 
 import numpy as np
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
 from quadmix import QuaDMixConfig
-from quadmix.core.types import (
-    MergedQualityConfig,
-    ParameterSet,
-    ProxyResult,
-    SamplingConfig,
-)
+from quadmix.core.types import ParameterSet, ProxyResult
 from quadmix.data.metadata_manager import ShardMetadataManager
 from quadmix.pipeline.real_pipeline import QuaDMixPipeline
-
-QUADMIX_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-QUADMIX_TEMP_DIR = os.environ.get(
-    "QUADMIX_TEMP_DIR",
-    os.path.join(os.path.expanduser("~"), ".cache", "QuaDMix", "temp"),
-)
-DEFAULT_VAL_DIR = os.path.join(QUADMIX_DIR, "data")
-HF_VAL_FILENAME = "openhermes_10k_assistant_tokenized.pt"
-CORE_VAL_FILENAME = "core_22tasks_tokenized.pt"
-HF_ENDPOINT = os.environ.get("HF_ENDPOINT", "https://huggingface.co")
-HF_RESOLVE = f"{HF_ENDPOINT}/datasets/{{repo}}/resolve/main/{{file}}"
-HF_DATASET = "liujin99/quadmix-openhermes-10k"
-HF_CORE_DATASET = "liujin99/quadmix-core-22tasks"
-DEFAULT_EVAL_BUNDLE = os.environ.get(
-    "EVAL_BUNDLE_DIR",
-    "/home/ma-user/work/nanochat-master-multi/eval_bundle",
+from quadmix.constants import (
+    DOMAIN_NAMES, QUALITY_NAMES, PROJECT_DIR, DEFAULT_TEMP_DIR,
+    DEFAULT_VAL_DIR, HF_ENDPOINT, HF_RESOLVE,
+    HF_OPENHERMES_DATASET, HF_OPENHERMES_FILENAME,
+    HF_CORE_DATASET, HF_CORE_FILENAME, DEFAULT_EVAL_BUNDLE,
 )
 
-DOMAIN_NAMES = [
-    "Industrial arts, Technology, and Engineering",
-    "Social sciences",
-    "Science and Natural history",
-    "Religion",
-    "Philology; or, Language and languages",
-    "Literature",
-    "History and Geography",
-    "General works, books and libraries...",
-    "Philosophy and psychology",
-    "Arts",
-]
-QUALITY_NAMES = ["dclm", "fineweb_edu", "english", "math_general", "math_openweb"]
+QUADMIX_DIR = PROJECT_DIR
+QUADMIX_TEMP_DIR = DEFAULT_TEMP_DIR
 
 
 def _hf_remote_size(repo_id: str, filename: str) -> int:
@@ -119,42 +90,14 @@ def resolve_val_path(val_set: str, val_path: str) -> str:
             raise FileNotFoundError(f"Validation file not found: {val_path}")
         return val_path
     if val_set == "core":
-        local = os.path.join(DEFAULT_VAL_DIR, CORE_VAL_FILENAME)
-        return _check_and_download(local, HF_CORE_DATASET, CORE_VAL_FILENAME)
-    local = os.path.join(DEFAULT_VAL_DIR, HF_VAL_FILENAME)
-    return _check_and_download(local, HF_DATASET, HF_VAL_FILENAME)
+        local = os.path.join(DEFAULT_VAL_DIR, HF_CORE_FILENAME)
+        return _check_and_download(local, HF_CORE_DATASET, HF_CORE_FILENAME)
+    local = os.path.join(DEFAULT_VAL_DIR, HF_OPENHERMES_FILENAME)
+    return _check_and_download(local, HF_OPENHERMES_DATASET, HF_OPENHERMES_FILENAME)
 
 
 def reconstruct_params_from_meta(meta: dict) -> ParameterSet:
-    qw = meta["quality_weights"]
-    sp = meta["sampling_params"]
-    domain_names_in_meta = list(qw.keys())
-    quality_names_in_meta = list(list(qw.values())[0].keys())
-    M = len(domain_names_in_meta)
-    N = len(quality_names_in_meta)
-
-    domain_weights = np.zeros(M * N, dtype=np.float64)
-    for m, dname in enumerate(domain_names_in_meta):
-        for n, qname in enumerate(quality_names_in_meta):
-            domain_weights[m * N + n] = qw[dname][qname]
-
-    global_weights = np.ones(N, dtype=np.float64) / N
-    merge_config = MergedQualityConfig(
-        global_weights=global_weights,
-        domain_weights=domain_weights,
-    )
-
-    sampling_configs = []
-    for dname in domain_names_in_meta:
-        sc = SamplingConfig(
-            lambda_=sp[dname]["lambda"],
-            omega=sp[dname]["omega"],
-            eta=sp[dname]["eta"],
-            epsilon=sp[dname]["epsilon"],
-        )
-        sampling_configs.append(sc)
-
-    return ParameterSet(merge_config=merge_config, sampling_configs=sampling_configs)
+    return ParameterSet.from_dict(meta["quality_weights"], meta["sampling_params"])
 
 
 def build_parser():

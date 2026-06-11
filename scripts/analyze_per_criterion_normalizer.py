@@ -19,15 +19,14 @@ We test 7 normalization strategies:
 
 import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import numpy as np
 import pandas as pd
 from scipy import stats as scipy_stats
 from scripts.preprocess_essential_web_v1_sharded import (
-    extract_domain_level_1, FASTTEXT_FIELDS,
+    extract_domain_level_1,
 )
+from quadmix.constants import FASTTEXT_FIELDS
 
 DATA_DIR = "/home/liujin99/data/essential-web-v1"
 NUM_SHARDS = 2

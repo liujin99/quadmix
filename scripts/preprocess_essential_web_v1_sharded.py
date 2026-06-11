@@ -14,24 +14,10 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 import pandas as pd
 
+from quadmix.constants import DOMAIN_MAP, FASTTEXT_FIELDS, QUALITY_COLUMNS, PROJECT_DIR
+
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_QUADMIX_DIR = os.path.dirname(_SCRIPT_DIR)
-
-FASTTEXT_FIELDS = ["dclm", "fineweb_edu_approx", "english",
-                   "eai_general_math", "eai_open_web_math"]
-
-DOMAIN_MAP = {
-    "Industrial arts, Technology, and Engineering": 0,
-    "Social sciences": 1,
-    "Science and Natural history": 2,
-    "Religion": 3,
-    "Philology; or, Language and languages": 4,
-    "Literature": 5,
-    "History and Geography": 6,
-    "General works, books and libraries, information sciences": 7,
-    "Philosophy and psychology": 8,
-    "Arts": 9,
-}
+_QUADMIX_DIR = PROJECT_DIR
 
 
 def extract_domain_level_1(eai_taxonomy):
@@ -72,12 +58,6 @@ def extract_quality_signals(quality_signals):
         (fasttext.get(field, 0.0) or 0.0)
         for field in FASTTEXT_FIELDS
     ], dtype=np.float32)
-
-
-QUALITY_COLUMNS = [
-    "qs_dclm", "qs_fineweb_edu_approx", "qs_english",
-    "qs_eai_general_math", "qs_eai_open_web_math",
-]
 
 
 def process_shard(shard_path: str, shard_idx: int, output_dir: str) -> dict:

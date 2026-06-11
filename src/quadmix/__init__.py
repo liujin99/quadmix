@@ -19,6 +19,7 @@ from quadmix.pipeline.param_sampler import ParameterSampler
 from quadmix.pipeline.optimizer import QuaDMixOptimizer
 from quadmix.pipeline.proxy_runner import BaseProxyRunner
 from quadmix.pipeline.real_pipeline import QuaDMixPipeline
+from quadmix.constants import DOMAIN_NAMES, QUALITY_NAMES, QUALITY_COLUMNS
 
 __all__ = [
     "QualityScore", "DomainLabel",
@@ -26,4 +27,5 @@ __all__ = [
     "QuaDMixConfig", "ParameterSet", "ProxyResult",
     "ParameterSampler", "QuaDMixOptimizer",
     "BaseProxyRunner", "QuaDMixPipeline",
+    "DOMAIN_NAMES", "QUALITY_NAMES", "QUALITY_COLUMNS",
 ]

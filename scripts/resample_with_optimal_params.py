@@ -23,31 +23,12 @@ import time
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
-from quadmix.core.types import (
-    MergedQualityConfig,
-    ParameterSet,
-    SamplingConfig,
-)
+from quadmix.core.types import ParameterSet
 from quadmix.data.metadata_manager import ShardMetadataManager
+from quadmix.constants import DOMAIN_NAMES, QUALITY_NAMES, PROJECT_DIR
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_QUADMIX_DIR = os.path.dirname(_SCRIPT_DIR)
-
-DOMAIN_NAMES = [
-    "Industrial arts, Technology, and Engineering",
-    "Social sciences",
-    "Science and Natural history",
-    "Religion",
-    "Philology; or, Language and languages",
-    "Literature",
-    "History and Geography",
-    "General works, books and libraries...",
-    "Philosophy and psychology",
-    "Arts",
-]
-QUALITY_NAMES = ["dclm", "fineweb_edu", "english", "math_general", "math_openweb"]
+_QUADMIX_DIR = PROJECT_DIR
 
 DEFAULT_CACHE_DIR = os.path.join(
     os.path.expanduser("~"), ".cache", "QuaDMix", "resample",
@@ -57,35 +38,7 @@ DEFAULT_CACHE_DIR = os.path.join(
 def reconstruct_params_from_json(json_path: str) -> ParameterSet:
     with open(json_path) as f:
         data = json.load(f)
-
-    qw = data["quality_weights"]
-    sp = data["sampling_params"]
-    domain_names_in = list(qw.keys())
-    quality_names_in = list(list(qw.values())[0].keys())
-    M = len(domain_names_in)
-    N = len(quality_names_in)
-
-    domain_weights = np.zeros(M * N, dtype=np.float64)
-    for m, dname in enumerate(domain_names_in):
-        for n, qname in enumerate(quality_names_in):
-            domain_weights[m * N + n] = qw[dname][qname]
-
-    global_weights = np.ones(N, dtype=np.float64) / N
-    merge_config = MergedQualityConfig(
-        global_weights=global_weights,
-        domain_weights=domain_weights,
-    )
-
-    sampling_configs = []
-    for dname in domain_names_in:
-        sampling_configs.append(SamplingConfig(
-            lambda_=sp[dname]["lambda"],
-            omega=sp[dname]["omega"],
-            eta=sp[dname]["eta"],
-            epsilon=sp[dname]["epsilon"],
-        ))
-
-    return ParameterSet(merge_config=merge_config, sampling_configs=sampling_configs)
+    return ParameterSet.from_dict(data["quality_weights"], data["sampling_params"])
 
 
 def build_parser():

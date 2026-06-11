@@ -9,11 +9,10 @@ import sys
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, "src")
 from quadmix.utils.normalization import zscore_normalize, rank_normalize
-from preprocess_essential_web_v1_sharded import (
+from quadmix.constants import FASTTEXT_FIELDS, DOMAIN_MAP, QUALITY_COLUMNS
+from scripts.preprocess_essential_web_v1_sharded import (
     extract_domain_level_1, extract_quality_signals,
-    FASTTEXT_FIELDS, DOMAIN_MAP, QUALITY_COLUMNS,
 )
 
 N_DOCS = 20000

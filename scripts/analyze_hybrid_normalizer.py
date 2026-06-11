@@ -17,16 +17,14 @@ Metrics:
 
 import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import numpy as np
 import pandas as pd
 from scipy import stats as scipy_stats
 from scripts.preprocess_essential_web_v1_sharded import (
     extract_domain_level_1, extract_quality_signals,
-    FASTTEXT_FIELDS, DOMAIN_MAP,
 )
+from quadmix.constants import FASTTEXT_FIELDS, DOMAIN_MAP
 from quadmix.utils.normalization import zscore_normalize, rank_normalize
 
 DATA_PATH = "/home/liujin99/data/essential-web-v1/train-00000-of-03291.parquet"

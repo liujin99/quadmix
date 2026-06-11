@@ -23,31 +23,11 @@ import time
 
 import numpy as np
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
 from quadmix import QuaDMixConfig
-from quadmix.core.types import (
-    MergedQualityConfig,
-    ParameterSet,
-    ProxyResult,
-    SamplingConfig,
-)
+from quadmix.core.types import ParameterSet, ProxyResult
 from quadmix.data.metadata_manager import ShardMetadataManager
 from quadmix.pipeline.real_pipeline import QuaDMixPipeline
-
-DOMAIN_NAMES = [
-    "Industrial arts, Technology, and Engineering",
-    "Social sciences",
-    "Science and Natural history",
-    "Religion",
-    "Philology; or, Language and languages",
-    "Literature",
-    "History and Geography",
-    "General works, books and libraries...",
-    "Philosophy and psychology",
-    "Arts",
-]
-QUALITY_NAMES = ["dclm", "fineweb_edu", "english", "math_general", "math_openweb"]
+from quadmix.constants import DOMAIN_NAMES, QUALITY_NAMES
 
 
 def load_proxy_results(proxy_dir: str):
@@ -63,39 +43,7 @@ def load_proxy_results(proxy_dir: str):
         with open(meta_path) as f:
             meta = json.load(f)
 
-        sp = meta["sampling_params"]
-        qw = meta["quality_weights"]
-        domain_names_in_meta = list(qw.keys())
-        quality_names_in_meta = list(list(qw.values())[0].keys())
-
-        M = len(domain_names_in_meta)
-        N = len(quality_names_in_meta)
-
-        domain_weights = np.zeros(M * N, dtype=np.float64)
-        for m, dname in enumerate(domain_names_in_meta):
-            for n, qname in enumerate(quality_names_in_meta):
-                domain_weights[m * N + n] = qw[dname][qname]
-
-        global_weights = np.ones(N, dtype=np.float64) / N
-        merge_config = MergedQualityConfig(
-            global_weights=global_weights,
-            domain_weights=domain_weights,
-        )
-
-        sampling_configs = []
-        for dname in domain_names_in_meta:
-            sc = SamplingConfig(
-                lambda_=sp[dname]["lambda"],
-                omega=sp[dname]["omega"],
-                eta=sp[dname]["eta"],
-                epsilon=sp[dname]["epsilon"],
-            )
-            sampling_configs.append(sc)
-
-        params = ParameterSet(
-            merge_config=merge_config,
-            sampling_configs=sampling_configs,
-        )
+        params = ParameterSet.from_dict(meta["quality_weights"], meta["sampling_params"])
         results.append(ProxyResult(
             parameters=params,
             validation_loss=meta["val_loss"],

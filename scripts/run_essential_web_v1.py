@@ -24,37 +24,21 @@ to use the BMK v2 set (10 BMK-like tasks, full-sequence loss).
 """
 
 import argparse, os, sys, time, urllib.request
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from quadmix import QuaDMixConfig
 from quadmix.pipeline.real_pipeline import QuaDMixPipeline
 from quadmix.data.metadata_manager import ShardMetadataManager
-
-# ── Defaults ──────────────────────────────────────────────
-QUADMIX_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-# Temp/cache dir: override via QUADMIX_TEMP_DIR env var, defaults to ~/.cache/QuaDMix/temp/
-QUADMIX_TEMP_DIR = os.environ.get(
-    "QUADMIX_TEMP_DIR",
-    os.path.join(os.path.expanduser("~"), ".cache", "QuaDMix", "temp"),
+from quadmix.constants import (
+    PROJECT_DIR, DEFAULT_TEMP_DIR, DEFAULT_PREPROCESSED_DIR,
+    DEFAULT_VAL_DIR, HF_ENDPOINT, HF_RESOLVE,
+    HF_OPENHERMES_DATASET, HF_OPENHERMES_FILENAME,
+    HF_CORE_DATASET, HF_CORE_FILENAME,
+    HF_CORE_BMK_V2_DATASET, HF_CORE_BMK_V2_FILENAME,
+    DEFAULT_EVAL_BUNDLE,
 )
-DEFAULT_PREPROCESSED_DIR = os.path.join(QUADMIX_TEMP_DIR, "preprocessed")
-DEFAULT_VAL_DIR = os.path.join(QUADMIX_DIR, "data")
-DEFAULT_VAL_PATH = os.path.join(DEFAULT_VAL_DIR, "openhermes_10k_assistant_tokenized.pt")
 
-# HuggingFace dataset for validation set
-HF_DATASET = "liujin99/quadmix-openhermes-10k"
-HF_VAL_FILENAME = "openhermes_10k_assistant_tokenized.pt"
-HF_ENDPOINT = os.environ.get("HF_ENDPOINT", "https://huggingface.co")
-HF_RESOLVE = f"{HF_ENDPOINT}/datasets/{{repo}}/resolve/main/{{file}}"
-
-# CORE benchmark validation set
-CORE_VAL_FILENAME = "core_22tasks_tokenized.pt"
-HF_CORE_DATASET = "liujin99/quadmix-core-22tasks"
-CORE_BMK_V2_VAL_FILENAME = "core_bmk_10tasks_v2_tokenized.pt"
-HF_CORE_BMK_V2_DATASET = "liujin99/quadmix-core-bmk-v2"
-DEFAULT_EVAL_BUNDLE = os.environ.get(
-    "EVAL_BUNDLE_DIR",
-    "/home/ma-user/work/nanochat-master-multi/eval_bundle",
-)
+QUADMIX_DIR = PROJECT_DIR
+QUADMIX_TEMP_DIR = DEFAULT_TEMP_DIR
+DEFAULT_VAL_PATH = os.path.join(DEFAULT_VAL_DIR, HF_OPENHERMES_FILENAME)
 
 
 def _hf_remote_size(repo_id: str, filename: str) -> int:
@@ -94,11 +78,11 @@ def ensure_val_data(val_path: str) -> str:
     os.makedirs(os.path.dirname(val_path), exist_ok=True)
 
     local_size = os.path.getsize(val_path) if os.path.exists(val_path) else 0
-    remote_size = _hf_remote_size(HF_DATASET, HF_VAL_FILENAME)
+    remote_size = _hf_remote_size(HF_OPENHERMES_DATASET, HF_OPENHERMES_FILENAME)
 
     if remote_size == 0:
         if local_size > 0:
-            print(f"\n[Setup] Warning: Cannot connect to HuggingFace to check {HF_VAL_FILENAME}")
+            print(f"\n[Setup] Warning: Cannot connect to HuggingFace to check {HF_OPENHERMES_FILENAME}")
             print(f"[Setup] Using local file ({local_size / 1024**2:.0f} MB)")
             print(f"[Setup] To force re-download, delete: {val_path}")
             return val_path
@@ -106,16 +90,16 @@ def ensure_val_data(val_path: str) -> str:
             raise RuntimeError(
                 f"Cannot connect to HuggingFace and no local file.\n"
                 f"  Please download manually from:\n"
-                f"    https://huggingface.co/datasets/{HF_DATASET}\n"
+                f"    https://huggingface.co/datasets/{HF_OPENHERMES_DATASET}\n"
                 f"  And place at: {val_path}"
             )
 
     if local_size == remote_size:
-        print(f"[Setup] Validation set up-to-date: {HF_VAL_FILENAME} ({local_size / 1024**2:.0f} MB)")
+        print(f"[Setup] Validation set up-to-date: {HF_OPENHERMES_FILENAME} ({local_size / 1024**2:.0f} MB)")
         return val_path
 
     if local_size > 0:
-        print(f"\n[Setup] {HF_VAL_FILENAME} version mismatch")
+        print(f"\n[Setup] {HF_OPENHERMES_FILENAME} version mismatch")
         print(f"[Setup]   Local:  {local_size / 1024**2:.0f} MB")
         print(f"[Setup]   Remote: {remote_size / 1024**2:.0f} MB")
         print(f"[Setup]   Re-downloading...")
@@ -123,11 +107,11 @@ def ensure_val_data(val_path: str) -> str:
     else:
         print(f"\n[Setup] Validation set not found at:\n  {val_path}")
 
-    if not _download_hf_file(HF_DATASET, HF_VAL_FILENAME, val_path):
+    if not _download_hf_file(HF_OPENHERMES_DATASET, HF_OPENHERMES_FILENAME, val_path):
         raise RuntimeError(
             f"Failed to download validation set.\n"
             f"  You can manually download from:\n"
-            f"    https://huggingface.co/datasets/{HF_DATASET}\n"
+            f"    https://huggingface.co/datasets/{HF_OPENHERMES_DATASET}\n"
             f"  Or place the file at: {val_path}"
         )
     return val_path
@@ -141,19 +125,19 @@ def ensure_core_val_data(val_path: str, eval_bundle: str) -> str:
     os.makedirs(os.path.dirname(val_path), exist_ok=True)
 
     local_size = os.path.getsize(val_path) if os.path.exists(val_path) else 0
-    remote_size = _hf_remote_size(HF_CORE_DATASET, CORE_VAL_FILENAME)
+    remote_size = _hf_remote_size(HF_CORE_DATASET, HF_CORE_FILENAME)
 
     if remote_size == 0:
         if local_size > 0:
-            print(f"\n[Setup] Warning: Cannot connect to HuggingFace to check {CORE_VAL_FILENAME}")
+            print(f"\n[Setup] Warning: Cannot connect to HuggingFace to check {HF_CORE_FILENAME}")
             print(f"[Setup] Using local file ({local_size / 1024**2:.0f} MB)")
             print(f"[Setup] To force re-download, delete: {val_path}")
             return val_path
     elif local_size == remote_size:
-        print(f"[Setup] CORE validation set up-to-date: {CORE_VAL_FILENAME} ({local_size / 1024**2:.0f} MB)")
+        print(f"[Setup] CORE validation set up-to-date: {HF_CORE_FILENAME} ({local_size / 1024**2:.0f} MB)")
         return val_path
     elif local_size > 0:
-        print(f"\n[Setup] {CORE_VAL_FILENAME} version mismatch")
+        print(f"\n[Setup] {HF_CORE_FILENAME} version mismatch")
         print(f"[Setup]   Local:  {local_size / 1024**2:.0f} MB")
         print(f"[Setup]   Remote: {remote_size / 1024**2:.0f} MB")
         print(f"[Setup]   Re-downloading...")
@@ -162,7 +146,7 @@ def ensure_core_val_data(val_path: str, eval_bundle: str) -> str:
         print(f"\n[Setup] CORE validation set not found at:\n  {val_path}")
 
     if remote_size > 0:
-        if _download_hf_file(HF_CORE_DATASET, CORE_VAL_FILENAME, val_path):
+        if _download_hf_file(HF_CORE_DATASET, HF_CORE_FILENAME, val_path):
             return val_path
         print(f"[Setup] Falling back to local generation...")
     else:
@@ -219,19 +203,19 @@ def ensure_core_bmk_v2_data(val_path: str, eval_bundle: str) -> str:
     os.makedirs(os.path.dirname(val_path), exist_ok=True)
 
     local_size = os.path.getsize(val_path) if os.path.exists(val_path) else 0
-    remote_size = _hf_remote_size(HF_CORE_BMK_V2_DATASET, CORE_BMK_V2_VAL_FILENAME)
+    remote_size = _hf_remote_size(HF_CORE_BMK_V2_DATASET, HF_CORE_BMK_V2_FILENAME)
 
     if remote_size == 0:
         if local_size > 0:
-            print(f"\n[Setup] Warning: Cannot connect to HuggingFace to check {CORE_BMK_V2_VAL_FILENAME}")
+            print(f"\n[Setup] Warning: Cannot connect to HuggingFace to check {HF_CORE_BMK_V2_FILENAME}")
             print(f"[Setup] Using local file ({local_size / 1024**2:.0f} MB)")
             print(f"[Setup] To force re-download, delete: {val_path}")
             return val_path
     elif local_size == remote_size:
-        print(f"[Setup] CORE-BMK v2 validation set up-to-date: {CORE_BMK_V2_VAL_FILENAME} ({local_size / 1024**2:.0f} MB)")
+        print(f"[Setup] CORE-BMK v2 validation set up-to-date: {HF_CORE_BMK_V2_FILENAME} ({local_size / 1024**2:.0f} MB)")
         return val_path
     elif local_size > 0:
-        print(f"\n[Setup] {CORE_BMK_V2_VAL_FILENAME} version mismatch")
+        print(f"\n[Setup] {HF_CORE_BMK_V2_FILENAME} version mismatch")
         print(f"[Setup]   Local:  {local_size / 1024**2:.0f} MB")
         print(f"[Setup]   Remote: {remote_size / 1024**2:.0f} MB")
         print(f"[Setup]   Re-downloading...")
@@ -240,7 +224,7 @@ def ensure_core_bmk_v2_data(val_path: str, eval_bundle: str) -> str:
         print(f"[Setup] CORE-BMK v2 validation set not found at:\n  {val_path}")
 
     if remote_size > 0:
-        if _download_hf_file(HF_CORE_BMK_V2_DATASET, CORE_BMK_V2_VAL_FILENAME, val_path):
+        if _download_hf_file(HF_CORE_BMK_V2_DATASET, HF_CORE_BMK_V2_FILENAME, val_path):
             return val_path
         print(f"[Setup] Falling back to local generation...")
     else:
@@ -287,21 +271,7 @@ def ensure_core_bmk_v2_data(val_path: str, eval_bundle: str) -> str:
     return val_path
 
 
-DOMAIN_NAMES = [
-    "Industrial arts, Technology, and Engineering",  # 0
-    "Social sciences",                                 # 1
-    "Science and Natural history",                     # 2
-    "Religion",                                        # 3
-    "Philology; or, Language and languages",           # 4
-    "Literature",                                      # 5
-    "History and Geography",                           # 6
-    "General works, books and libraries...",           # 7
-    "Philosophy and psychology",                       # 8
-    "Arts",                                            # 9
-]
-QUALITY_NAMES = ["dclm", "fineweb_edu", "english", "math_general", "math_openweb"]
-QUALITY_COLUMNS = ["qs_dclm", "qs_fineweb_edu_approx", "qs_english",
-                   "qs_eai_general_math", "qs_eai_open_web_math"]
+from quadmix.constants import DOMAIN_NAMES, QUALITY_NAMES, QUALITY_COLUMNS
 
 
 def build_parser():
@@ -368,13 +338,13 @@ def create_proxy_runner(config, args, output_dir, metadata_manager):
         if not os.path.exists(val_path):
             raise FileNotFoundError(f"Validation file not found: {val_path}")
     elif args.val_set == "core":
-        val_path = os.path.join(DEFAULT_VAL_DIR, CORE_VAL_FILENAME)
+        val_path = os.path.join(DEFAULT_VAL_DIR, HF_CORE_FILENAME)
         val_path = ensure_core_val_data(val_path, args.eval_bundle)
     elif args.val_set == "core_bmk_v2":
-        val_path = os.path.join(DEFAULT_VAL_DIR, CORE_BMK_V2_VAL_FILENAME)
+        val_path = os.path.join(DEFAULT_VAL_DIR, HF_CORE_BMK_V2_FILENAME)
         val_path = ensure_core_bmk_v2_data(val_path, args.eval_bundle)
     else:
-        val_path = os.path.join(DEFAULT_VAL_DIR, HF_VAL_FILENAME)
+        val_path = os.path.join(DEFAULT_VAL_DIR, HF_OPENHERMES_FILENAME)
         val_path = ensure_val_data(val_path)
 
     # Parse checkpoint interval

@@ -148,6 +148,46 @@ class ParameterSet:
 
         return cls(merge_config=merge_config, sampling_configs=sampling_configs)
 
+    @classmethod
+    def from_dict(
+        cls,
+        quality_weights: Dict[str, Dict[str, float]],
+        sampling_params: Dict[str, Dict[str, float]],
+    ) -> "ParameterSet":
+        """Reconstruct ParameterSet from JSON-style dicts.
+
+        Args:
+            quality_weights: {domain_name: {criterion_name: weight}}
+            sampling_params: {domain_name: {"lambda": ..., "omega": ..., "eta": ..., "epsilon": ...}}
+        """
+        domain_names = list(quality_weights.keys())
+        quality_names = list(list(quality_weights.values())[0].keys())
+        M = len(domain_names)
+        N = len(quality_names)
+
+        domain_weights = np.zeros(M * N, dtype=np.float64)
+        for m, dname in enumerate(domain_names):
+            for n, qname in enumerate(quality_names):
+                domain_weights[m * N + n] = quality_weights[dname][qname]
+
+        global_weights = np.ones(N, dtype=np.float64) / N
+        merge_config = MergedQualityConfig(
+            global_weights=global_weights,
+            domain_weights=domain_weights,
+        )
+
+        sampling_configs = []
+        for dname in domain_names:
+            sp = sampling_params[dname]
+            sampling_configs.append(SamplingConfig(
+                lambda_=sp["lambda"],
+                omega=sp["omega"],
+                eta=sp["eta"],
+                epsilon=sp["epsilon"],
+            ))
+
+        return cls(merge_config=merge_config, sampling_configs=sampling_configs)
+
     @property
     def flat_dim(self) -> int:
         """Total dimension of flattened parameter vector: (N + 4) x M."""

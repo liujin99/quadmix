@@ -17,10 +17,8 @@ import numpy as np
 import pandas as pd
 import numpy.typing as npt
 
-QUALITY_COLUMNS = [
-    "qs_dclm", "qs_fineweb_edu_approx", "qs_english",
-    "qs_eai_general_math", "qs_eai_open_web_math",
-]
+from quadmix.constants import QUALITY_COLUMNS
+
 CHAR_COUNT_COL = "doc_char_count"
 
 
