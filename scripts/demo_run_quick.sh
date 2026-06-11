@@ -33,7 +33,7 @@ fi
 
 
 QUADMIX_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-export PYTHONPATH="${QUADMIX_DIR}:${PYTHONPATH:-}"
+export PYTHONPATH="${QUADMIX_DIR}/src:${PYTHONPATH:-}"
 export PATH="$HOME/.local/bin:$PATH"
 
 # Temp/cache dir: override via QUADMIX_TEMP_DIR env var, defaults to ~/.cache/QuaDMix/temp/

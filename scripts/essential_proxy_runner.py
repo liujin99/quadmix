@@ -14,7 +14,7 @@ import sys, os
 try:
     import quadmix
 except ImportError:
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'src'))
 from quadmix.pipeline.essential_proxy_runner import EssentialWebProxyRunner
 from quadmix.utils.perf_timer import PerfTimer
 from quadmix.pipeline.loss_utils import chunked_loss_from_hidden, chunked_loss_per_token_from_hidden

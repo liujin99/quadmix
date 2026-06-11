@@ -16,7 +16,7 @@ import pandas as pd
 try:
     import quadmix
 except ImportError:
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'src'))
 
 from quadmix.constants import DOMAIN_MAP, FASTTEXT_FIELDS, QUALITY_COLUMNS, PROJECT_DIR
 

@@ -25,7 +25,7 @@ fi
 
 
 QUADMIX_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-export PYTHONPATH="${QUADMIX_DIR}:${PYTHONPATH:-}"
+export PYTHONPATH="${QUADMIX_DIR}/src:${PYTHONPATH:-}"
 export PATH="$HOME/.local/bin:$PATH"
 export CUDA_VISIBLE_DEVICES=""
 
