@@ -106,11 +106,20 @@ elif [ "$CLEAN_PREPROCESSED" = "0" ]; then
     fi
 fi
 
-# 是否需要预处理：清理预处理目录 或 索引不存在
+# 是否需要预处理：清理预处理目录 或 索引不存在 或 shard 数量不一致
 if [ $NEED_CLEAN_PREPROCESSED -eq 1 ]; then
     RUN_PREPROCESS=1
 elif [ ! -f "$PREPROCESSED_DIR/shard_index.json" ]; then
     RUN_PREPROCESS=1
+elif [ -f "$PREPROCESSED_DIR/shard_index.json" ]; then
+    OLD_SHARDS=$(python3 -c "import json; print(json.load(open('$PREPROCESSED_DIR/shard_index.json'))['num_shards'])" 2>/dev/null || echo 0)
+    RAW_SHARDS=$(ls "$RAW_DATA_DIR"/*.parquet 2>/dev/null | wc -l || echo 0)
+    if [ "$OLD_SHARDS" -ne "$RAW_SHARDS" ]; then
+        RUN_PREPROCESS=1
+        echo ""
+        echo "  [信息] 预处理有 $OLD_SHARDS 个 shard，raw data 有 $RAW_SHARDS 个"
+        echo "         数量不一致，将重新预处理"
+    fi
 fi
 
 if [ $RUN_PREPROCESS -eq 1 ]; then
