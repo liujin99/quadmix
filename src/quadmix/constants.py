@@ -57,7 +57,7 @@ HF_CORE_FILENAME = "core_22tasks_tokenized.pt"
 HF_CORE_BMK_V2_DATASET = "liujin99/quadmix-core-bmk-v2"
 HF_CORE_BMK_V2_FILENAME = "core_bmk_10tasks_v2_tokenized.pt"
 
-PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 DEFAULT_TEMP_DIR = os.environ.get(
     "QUADMIX_TEMP_DIR",
