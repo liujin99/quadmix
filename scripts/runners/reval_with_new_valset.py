@@ -43,6 +43,8 @@ from quadmix.constants import (
     HF_OPENHERMES_DATASET, HF_OPENHERMES_FILENAME,
     HF_CORE_DATASET, HF_CORE_FILENAME,
     HF_CORE_BMK_V3_DATASET, HF_CORE_BMK_V3_FILENAME,
+    HF_CORE_BMK_V4_DATASET, HF_CORE_BMK_V4_FILENAME,
+    HF_CORE_BMK_V42_DATASET, HF_CORE_BMK_V42_FILENAME,
     DEFAULT_EVAL_BUNDLE,
 )
 
@@ -101,6 +103,12 @@ def resolve_val_path(val_set: str, val_path: str) -> str:
     if val_set == "core_bmk_v3":
         local = os.path.join(DEFAULT_VAL_DIR, HF_CORE_BMK_V3_FILENAME)
         return _check_and_download(local, HF_CORE_BMK_V3_DATASET, HF_CORE_BMK_V3_FILENAME)
+    if val_set == "core_bmk_v4":
+        local = os.path.join(DEFAULT_VAL_DIR, HF_CORE_BMK_V4_FILENAME)
+        return _check_and_download(local, HF_CORE_BMK_V4_DATASET, HF_CORE_BMK_V4_FILENAME)
+    if val_set == "core_bmk_v4.2":
+        local = os.path.join(DEFAULT_VAL_DIR, HF_CORE_BMK_V42_FILENAME)
+        return _check_and_download(local, HF_CORE_BMK_V42_DATASET, HF_CORE_BMK_V42_FILENAME)
     local = os.path.join(DEFAULT_VAL_DIR, HF_OPENHERMES_FILENAME)
     return _check_and_download(local, HF_OPENHERMES_DATASET, HF_OPENHERMES_FILENAME)
 
@@ -119,7 +127,7 @@ def build_parser():
     p.add_argument("--preprocessed-dir", required=True,
                    help="Path to preprocessed shards directory")
     p.add_argument("--val-set", type=str, default="core",
-                   choices=["openhermes", "core", "core_bmk_v3"],
+                   choices=["openhermes", "core", "core_bmk_v3", "core_bmk_v4", "core_bmk_v4.2"],
                    help="New validation set to evaluate on (default: core)")
     p.add_argument("--val-path", type=str, default=None,
                    help="Path to custom validation .pt file (overrides --val-set)")
@@ -240,7 +248,7 @@ def main():
         with open(meta_path) as f:
             meta = json.load(f)
 
-        new_val_loss = runner.revalidate_from_saved(
+        new_val_loss, new_per_task_losses = runner.revalidate_from_saved(
             model_path, device_type=args.device_type,
         )
 
@@ -253,11 +261,14 @@ def main():
         new_meta["original_val_loss"] = old_val_loss
         new_meta["reval_source"] = result_dir
         new_meta["reval_val_set"] = val_set_name
+        if new_per_task_losses is not None:
+            new_meta["per_task_losses"] = new_per_task_losses
 
         results.append(ProxyResult(
             parameters=params,
             validation_loss=new_val_loss,
             metadata=new_meta,
+            per_task_losses=new_per_task_losses,
         ))
         reval_meta.append({
             "exp_name": exp_name,

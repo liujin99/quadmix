@@ -40,6 +40,8 @@ from quadmix.constants import (
     HF_CORE_DATASET, HF_CORE_FILENAME,
     HF_CORE_BMK_V2_DATASET, HF_CORE_BMK_V2_FILENAME,
     HF_CORE_BMK_V3_DATASET, HF_CORE_BMK_V3_FILENAME,
+    HF_CORE_BMK_V4_DATASET, HF_CORE_BMK_V4_FILENAME,
+    HF_CORE_BMK_V42_DATASET, HF_CORE_BMK_V42_FILENAME,
     DEFAULT_EVAL_BUNDLE,
 )
 
@@ -355,6 +357,150 @@ def ensure_core_bmk_v3_data(val_path: str, eval_bundle: str) -> str:
     return val_path
 
 
+def ensure_core_bmk_v4_data(val_path: str, eval_bundle: str) -> str:
+    os.makedirs(os.path.dirname(val_path), exist_ok=True)
+
+    local_size = os.path.getsize(val_path) if os.path.exists(val_path) else 0
+    remote_size = _hf_remote_size(HF_CORE_BMK_V4_DATASET, HF_CORE_BMK_V4_FILENAME)
+
+    if remote_size == 0:
+        if local_size > 0:
+            print(f"\n[Setup] Warning: Cannot connect to HuggingFace to check {HF_CORE_BMK_V4_FILENAME}")
+            print(f"[Setup] Using local file ({local_size / 1024**2:.0f} MB)")
+            print(f"[Setup] To force re-download, delete: {val_path}")
+            return val_path
+    elif local_size == remote_size:
+        print(f"[Setup] CORE-BMK v4 validation set up-to-date: {HF_CORE_BMK_V4_FILENAME} ({local_size / 1024**2:.0f} MB)")
+        return val_path
+    elif local_size > 0:
+        print(f"\n[Setup] {HF_CORE_BMK_V4_FILENAME} version mismatch")
+        print(f"[Setup]   Local:  {local_size / 1024**2:.0f} MB")
+        print(f"[Setup]   Remote: {remote_size / 1024**2:.0f} MB")
+        print(f"[Setup]   Re-downloading...")
+        os.remove(val_path)
+    else:
+        print(f"[Setup] CORE-BMK v4 validation set not found at:\n  {val_path}")
+
+    if remote_size > 0:
+        if _download_hf_file(HF_CORE_BMK_V4_DATASET, HF_CORE_BMK_V4_FILENAME, val_path):
+            return val_path
+        print(f"[Setup] Falling back to local generation...")
+    else:
+        print(f"[Setup] Trying local generation...")
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    prepare_script = os.path.join(script_dir, "..", "validation_set", "prepare_core_bmk_v4.py")
+
+    if not os.path.exists(prepare_script):
+        raise FileNotFoundError(
+            f"CORE-BMK v4 validation set not found at:\n  {val_path}\n"
+            f"Preparation script also missing:\n  {prepare_script}\n"
+            f"You can manually download from:\n"
+            f"  https://huggingface.co/datasets/{HF_CORE_BMK_V4_DATASET}"
+        )
+
+    print(f"[Setup] Auto-generating from eval_bundle: {eval_bundle}")
+
+    import subprocess
+    result = subprocess.run(
+        [
+            sys.executable, prepare_script,
+            "--output-dir", os.path.dirname(val_path),
+            "--eval-bundle", eval_bundle,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Failed to generate CORE-BMK v4 validation set.\n"
+            f"  stdout: {result.stdout}\n"
+            f"  stderr: {result.stderr}\n"
+            f"You can manually download from:\n"
+            f"  https://huggingface.co/datasets/{HF_CORE_BMK_V4_DATASET}"
+        )
+    print(result.stdout)
+    if not os.path.exists(val_path):
+        raise RuntimeError(
+            f"CORE-BMK v4 validation set generation completed but file not found:\n  {val_path}"
+        )
+    size_mb = os.path.getsize(val_path) / 1024**2
+    print(f"[Setup] Generated: {val_path} ({size_mb:.0f} MB)")
+    return val_path
+
+
+def ensure_core_bmk_v42_data(val_path: str, eval_bundle: str) -> str:
+    os.makedirs(os.path.dirname(val_path), exist_ok=True)
+
+    local_size = os.path.getsize(val_path) if os.path.exists(val_path) else 0
+    remote_size = _hf_remote_size(HF_CORE_BMK_V42_DATASET, HF_CORE_BMK_V42_FILENAME)
+
+    if remote_size == 0:
+        if local_size > 0:
+            print(f"\n[Setup] Warning: Cannot connect to HuggingFace to check {HF_CORE_BMK_V42_FILENAME}")
+            print(f"[Setup] Using local file ({local_size / 1024**2:.0f} MB)")
+            print(f"[Setup] To force re-download, delete: {val_path}")
+            return val_path
+    elif local_size == remote_size:
+        print(f"[Setup] CORE-BMK v4.2 validation set up-to-date: {HF_CORE_BMK_V42_FILENAME} ({local_size / 1024**2:.0f} MB)")
+        return val_path
+    elif local_size > 0:
+        print(f"\n[Setup] {HF_CORE_BMK_V42_FILENAME} version mismatch")
+        print(f"[Setup]   Local:  {local_size / 1024**2:.0f} MB")
+        print(f"[Setup]   Remote: {remote_size / 1024**2:.0f} MB")
+        print(f"[Setup]   Re-downloading...")
+        os.remove(val_path)
+    else:
+        print(f"\n[Setup] CORE-BMK v4.2 validation set not found at:\n  {val_path}")
+
+    if remote_size > 0:
+        if _download_hf_file(HF_CORE_BMK_V42_DATASET, HF_CORE_BMK_V42_FILENAME, val_path):
+            return val_path
+        print(f"[Setup] Falling back to local generation...")
+    else:
+        print(f"[Setup] Trying local generation...")
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    prepare_script = os.path.join(script_dir, "..", "validation_set", "prepare_core_bmk_v4.2.py")
+
+    if not os.path.exists(prepare_script):
+        raise FileNotFoundError(
+            f"CORE-BMK v4.2 validation set not found at:\n  {val_path}\n"
+            f"Preparation script also missing:\n  {prepare_script}\n"
+            f"You can manually download from:\n"
+            f"  https://huggingface.co/datasets/{HF_CORE_BMK_V42_DATASET}"
+        )
+
+    print(f"[Setup] Auto-generating from eval_bundle: {eval_bundle}")
+
+    import subprocess
+    result = subprocess.run(
+        [
+            sys.executable, prepare_script,
+            "--output-dir", os.path.dirname(val_path),
+            "--eval-bundle", eval_bundle,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Failed to generate CORE-BMK v4.2 validation set.\n"
+            f"  stdout: {result.stdout}\n"
+            f"  stderr: {result.stderr}\n"
+            f"You can manually download from:\n"
+            f"  https://huggingface.co/datasets/{HF_CORE_BMK_V42_DATASET}"
+        )
+    print(result.stdout)
+    if not os.path.exists(val_path):
+        raise RuntimeError(
+            f"CORE-BMK v4.2 validation set generation completed but file not found:\n  {val_path}"
+        )
+    size_mb = os.path.getsize(val_path) / 1024**2
+    print(f"[Setup] Generated: {val_path} ({size_mb:.0f} MB)")
+    return val_path
+
+
 from quadmix.constants import DOMAIN_NAMES, QUALITY_NAMES, QUALITY_COLUMNS
 
 
@@ -399,11 +545,13 @@ def build_parser():
                         "(default: 1000, 0 = disable). "
                         "Results saved to each exp dir as checkpoint_trajectory.json.")
     p.add_argument("--val-set", type=str, default="openhermes",
-                   choices=["openhermes", "core", "core_bmk_v2", "core_bmk_v3"],
+                   choices=["openhermes", "core", "core_bmk_v2", "core_bmk_v3", "core_bmk_v4", "core_bmk_v4.2"],
                    help="Validation set: 'openhermes' (default, auto-download), "
                         "'core' (CORE benchmark 22-task, continuation-only loss), "
-                        "'core_bmk_v2' (10 BMK-like tasks, full-sequence loss), or "
-                        "'core_bmk_v3' (10 tasks selected by 1M proxy learnability)")
+                        "'core_bmk_v2' (10 BMK-like tasks, full-sequence loss), "
+                        "'core_bmk_v3' (10 tasks selected by 1M proxy learnability), "
+                        "'core_bmk_v4' (continuation=full-seq, QA=answer-only mask), or "
+                        "'core_bmk_v4.2' (21 tasks, per-task loss strategy)")
     p.add_argument("--val-path", type=str, default=None,
                    help="Path to validation .pt file (overrides --val-set)")
     p.add_argument("--eval-bundle", type=str, default=DEFAULT_EVAL_BUNDLE,
@@ -431,6 +579,12 @@ def create_proxy_runner(config, args, output_dir, metadata_manager):
     elif args.val_set == "core_bmk_v3":
         val_path = os.path.join(DEFAULT_VAL_DIR, HF_CORE_BMK_V3_FILENAME)
         val_path = ensure_core_bmk_v3_data(val_path, args.eval_bundle)
+    elif args.val_set == "core_bmk_v4":
+        val_path = os.path.join(DEFAULT_VAL_DIR, HF_CORE_BMK_V4_FILENAME)
+        val_path = ensure_core_bmk_v4_data(val_path, args.eval_bundle)
+    elif args.val_set == "core_bmk_v4.2":
+        val_path = os.path.join(DEFAULT_VAL_DIR, HF_CORE_BMK_V42_FILENAME)
+        val_path = ensure_core_bmk_v42_data(val_path, args.eval_bundle)
     else:
         val_path = os.path.join(DEFAULT_VAL_DIR, HF_OPENHERMES_FILENAME)
         val_path = ensure_val_data(val_path)

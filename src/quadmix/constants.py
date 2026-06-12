@@ -60,6 +60,12 @@ HF_CORE_BMK_V2_FILENAME = "core_bmk_10tasks_v2_tokenized.pt"
 HF_CORE_BMK_V3_DATASET = "liujin99/quadmix-core-bmk-v3"
 HF_CORE_BMK_V3_FILENAME = "core_bmk_10tasks_v3_tokenized.pt"
 
+HF_CORE_BMK_V4_DATASET = "liujin99/quadmix-core-bmk-v4"
+HF_CORE_BMK_V4_FILENAME = "core_bmk_10tasks_v4_tokenized.pt"
+
+HF_CORE_BMK_V42_DATASET = "liujin99/quadmix-core-bmk-v4.2"
+HF_CORE_BMK_V42_FILENAME = "core_bmk_21tasks_v4.2_tokenized.pt"
+
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 DEFAULT_TEMP_DIR = os.environ.get(

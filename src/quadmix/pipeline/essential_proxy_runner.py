@@ -146,6 +146,12 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         val_data = torch.load(self.val_data_path, map_location="cpu", weights_only=False)
         self._val_token_ids = val_data["token_ids"]
         self._val_loss_mask = val_data["loss_mask"]
+        self._val_task_labels = val_data.get("task_labels", None)
+        if self._val_task_labels is not None:
+            unique_tasks = sorted(set(self._val_task_labels))
+            print(f"[ProxyRunner] Val tasks: {len(unique_tasks)} tasks: {unique_tasks}")
+        else:
+            print(f"[ProxyRunner] Val: no task_labels (aggregate-only mode)")
         print(f"[ProxyRunner] Val tokens: {self._val_token_ids.shape}, "
               f"assistant tokens: {self._val_loss_mask.sum().item()}/"
               f"{self._val_loss_mask.numel()}")
@@ -1027,7 +1033,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                         torch.npu.empty_cache()
                     elif device.type == "cuda":
                         torch.cuda.empty_cache()
-                    ckpt_val = self._run_validation(model, device)
+                    ckpt_val, _ = self._run_validation(model, device)
                     self._ckpt_results[step_ct] = ckpt_val
                     elapsed_ckpt = time.time() - t_start
                     print(f"    [Exp {experiment_id:04d}] [CHECKPOINT step={step_ct}] val_loss={ckpt_val:.4f} ({elapsed_ckpt:.0f}s)")
@@ -1058,7 +1064,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 torch.cuda.empty_cache()
 
         with PerfTimer.section("validation", _timer_prefix):
-            val_loss = self._run_validation(model, device)
+            val_loss, per_task_losses = self._run_validation(model, device)
 
         with PerfTimer.section("save_metadata", _timer_prefix):
             avg_train = (loss_accum / step_ct).item() if step_ct > 0 else 0
@@ -1118,6 +1124,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                     "total_elapsed_s": time.perf_counter() - _train_t0,
                 },
             }
+            if per_task_losses is not None:
+                meta["per_task_losses"] = per_task_losses
             np.save(os.path.join(exp_dir, "selected_indices.npy"), selected_idx_out)
             with open(os.path.join(exp_dir, "meta.json"), "w") as f:
                 json.dump(meta, f, indent=2)
@@ -1145,10 +1153,14 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 gc.collect()
                 torch.npu.empty_cache()
 
-        return ProxyResult(parameters=params, validation_loss=val_loss, metadata=meta)
+        return ProxyResult(parameters=params, validation_loss=val_loss, metadata=meta, per_task_losses=per_task_losses)
 
-    def _run_validation(self, model, device) -> float:
-        """Run validation on full validation set, return val_loss."""
+    def _run_validation(self, model, device) -> tuple[float, dict[str, float] | None]:
+        """Run validation on full validation set.
+        
+        Returns:
+            Tuple of (aggregate_loss, per_task_losses or None)
+        """
         import torch.nn.functional as F
         model.eval()
         bs = self.block_size
@@ -1169,18 +1181,29 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 per_doc = (loss * mask_tgt.float()).sum(dim=1) / assistant_count
                 per_doc_losses.append(per_doc)
                 del hidden, loss, per_doc
-            val_loss = float(torch.cat(per_doc_losses).mean())
-        del val_tokens, val_mask, per_doc_losses
+            all_losses = torch.cat(per_doc_losses)
+            val_loss = float(all_losses.mean())
+            
+            per_task_losses = None
+            if self._val_task_labels is not None:
+                per_task_losses = {}
+                for task in sorted(set(self._val_task_labels)):
+                    task_indices = [i for i, t in enumerate(self._val_task_labels) if t == task]
+                    if task_indices:
+                        task_loss = float(all_losses[task_indices].mean())
+                        per_task_losses[task] = task_loss
+        
+        del val_tokens, val_mask, per_doc_losses, all_losses
         if device.type == "npu":
             torch.npu.empty_cache()
         elif device.type == "cuda":
             torch.cuda.empty_cache()
         model.train()
-        return val_loss
+        return val_loss, per_task_losses
 
     def revalidate_from_saved(
         self, model_path: str, device_type: str = "cpu",
-    ) -> float:
+    ) -> tuple[float, dict[str, float] | None]:
         from quadmix.core.proxy_model import ProxyModel
         from quadmix.npu.device import DeviceManager, DeviceType
         device_mgr = DeviceManager(device_type=DeviceType(device_type))
@@ -1190,7 +1213,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             model = model.to(torch.bfloat16)
         state_dict = torch.load(model_path, map_location=device, weights_only=True)
         model.load_state_dict(state_dict)
-        val_loss = self._run_validation(model, device)
+        val_loss, per_task_losses = self._run_validation(model, device)
         del model, state_dict
         if device.type == "npu":
             import gc
@@ -1198,7 +1221,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             torch.npu.empty_cache()
         elif device.type == "cuda":
             torch.cuda.empty_cache()
-        return val_loss
+        return val_loss, per_task_losses
 
     def _lr_schedule(self, it: int, max_iters: int) -> float:
         """Cosine LR with linear warmup."""

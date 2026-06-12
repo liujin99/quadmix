@@ -285,6 +285,9 @@ class QuaDMixOptimizer:
         self.regression_params = regression_params or {}
         self._regressor: Optional[RegressionModel] = None
         self._proxy_results: List[ProxyResult] = []
+        self._per_task_models: Optional[Dict[str, RegressionModel]] = None
+        self._per_task_weights: Optional[Dict[str, float]] = None
+        self._per_task_r2: Optional[Dict[str, float]] = None
 
     def add_proxy_results(self, results: List[ProxyResult]):
         """Add proxy experiment results."""
@@ -318,6 +321,8 @@ class QuaDMixOptimizer:
         if n_total < 10:
             train_params, train_losses = params_list, losses
             val_params, val_losses = [], np.array([], dtype=np.float64)
+            train_idx = np.arange(n_total)
+            val_idx = np.array([], dtype=np.int64)
             n_val = 0
             print(f"[QuaDMixOptimizer] Only {n_total} experiments, using all for training")
         else:
@@ -374,7 +379,91 @@ class QuaDMixOptimizer:
 
         self._compute_reliability(params_list, losses)
 
+        # Train per-task models if per-task losses are available
+        has_per_task = all(r.per_task_losses is not None for r in self._proxy_results)
+        if has_per_task:
+            self._train_per_task_models(
+                params_list, losses, train_idx, val_idx
+            )
+
         return self._regressor
+
+    def _train_per_task_models(
+        self,
+        params_list: List[ParameterSet],
+        losses: npt.NDArray[np.float64],
+        train_idx: npt.NDArray[np.int64],
+        val_idx: npt.NDArray[np.int64],
+    ):
+        """Train per-task LightGBM models and compute discrimination-adaptive weights."""
+        # Get task names from first result
+        tasks = sorted(self._proxy_results[0].per_task_losses.keys())
+        
+        # Prepare per-task loss arrays
+        all_task_losses = {}
+        for task in tasks:
+            task_losses = np.array([r.per_task_losses[task] for r in self._proxy_results], dtype=np.float64)
+            all_task_losses[task] = task_losses
+        
+        # Filter out zero-variance tasks
+        task_variances = {task: np.var(losses) for task, losses in all_task_losses.items()}
+        valid_tasks = {task: var for task, var in task_variances.items() if var > 1e-8}
+        
+        if len(valid_tasks) < len(task_variances):
+            excluded = set(task_variances.keys()) - set(valid_tasks.keys())
+            print(f"[QuaDMixOptimizer] WARNING: Excluding {len(excluded)} zero-variance tasks: {excluded}")
+        
+        if len(valid_tasks) == 0:
+            print("[QuaDMixOptimizer] ERROR: All tasks have zero variance, skipping per-task models")
+            return
+        
+        # Train per-task models
+        self._per_task_models = {}
+        self._per_task_r2 = {}
+        
+        print(f"[QuaDMixOptimizer] Training {len(valid_tasks)} per-task models...")
+        
+        for task in valid_tasks:
+            task_losses = all_task_losses[task]
+            task_train_losses = task_losses[train_idx]
+            task_val_losses = task_losses[val_idx] if len(val_idx) > 0 else None
+            
+            train_params = [params_list[i] for i in train_idx]
+            val_params = [params_list[i] for i in val_idx] if len(val_idx) > 0 else None
+            
+            model = RegressionModel(model_type="lightgbm", **self.regression_params)
+            model.fit(
+                train_params,
+                task_train_losses,
+                num_domains=self.config.num_domains,
+                num_criteria=self.config.num_quality_criteria,
+                eval_params_list=val_params,
+                eval_losses=task_val_losses,
+            )
+            
+            self._per_task_models[task] = model
+            
+            # Compute per-task R²
+            if len(val_idx) > 0:
+                task_r2 = float(model.score(val_params, task_val_losses))
+            else:
+                task_r2 = float(model.score(train_params, task_train_losses))
+            self._per_task_r2[task] = task_r2
+        
+        # Compute discrimination-adaptive weights (standard deviation normalization)
+        task_stds = {task: np.sqrt(var) for task, var in valid_tasks.items()}
+        total_std = sum(task_stds.values())
+        self._per_task_weights = {task: std / total_std for task, std in task_stds.items()}
+        
+        # Print summary
+        print(f"[QuaDMixOptimizer] Per-task models trained:")
+        print(f"  {'Task':<30} {'R²':>8} {'Weight':>8} {'Std':>8}")
+        print(f"  {'-'*54}")
+        for task in sorted(valid_tasks.keys(), key=lambda t: -self._per_task_weights[t]):
+            r2 = self._per_task_r2[task]
+            weight = self._per_task_weights[task]
+            std = task_stds[task]
+            print(f"  {task:<30} {r2:>8.4f} {weight:>8.4f} {std:>8.4f}")
 
     def _compute_reliability(
         self,
@@ -498,8 +587,18 @@ class QuaDMixOptimizer:
         sampler = ParameterSampler(self.config, seed=9999)
         candidates = sampler.sample_batch(n_search)
 
-        # Predict losses using ensemble if available
-        if hasattr(self, '_bootstrap_models') and len(self._bootstrap_models) > 0:
+        # Predict losses using per-task weighted prediction if available
+        if self._per_task_models and self._per_task_weights:
+            task_preds = {}
+            for task, model in self._per_task_models.items():
+                task_preds[task] = model.predict(candidates)
+            
+            predicted_losses = sum(
+                self._per_task_weights[task] * task_preds[task]
+                for task in task_preds
+            )
+            print(f"[QuaDMixOptimizer] Search: per-task weighted prediction ({len(self._per_task_models)} tasks)")
+        elif hasattr(self, '_bootstrap_models') and len(self._bootstrap_models) > 0:
             all_preds = np.array([m.predict(candidates) for m in self._bootstrap_models])
             predicted_losses = np.mean(all_preds, axis=0)
             print(f"[QuaDMixOptimizer] Search: ensemble prediction ({len(self._bootstrap_models)} models)")

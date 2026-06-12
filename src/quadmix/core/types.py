@@ -252,3 +252,4 @@ class ProxyResult:
     parameters: ParameterSet
     validation_loss: float
     metadata: Dict[str, Any] = field(default_factory=dict)
+    per_task_losses: Optional[Dict[str, float]] = None
