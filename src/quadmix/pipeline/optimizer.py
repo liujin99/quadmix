@@ -421,6 +421,7 @@ class QuaDMixOptimizer:
         
         self._per_task_models = {}
         self._per_task_r2 = {}
+        self._per_task_train_r2 = {}
         self._per_task_train_stats = {}
         
         train_losses = losses[train_idx]
@@ -453,10 +454,13 @@ class QuaDMixOptimizer:
             
             self._per_task_models[task] = model
             
+            task_train_r2 = float(model.score(train_params, task_train_losses))
+            self._per_task_train_r2[task] = task_train_r2
+            
             if len(val_idx) > 0:
                 task_r2 = float(model.score(val_params, task_val_losses))
             else:
-                task_r2 = float(model.score(train_params, task_train_losses))
+                task_r2 = task_train_r2
             self._per_task_r2[task] = task_r2
         
         task_stds = {task: np.sqrt(var) for task, var in valid_tasks.items()}
@@ -477,14 +481,16 @@ class QuaDMixOptimizer:
         active_tasks = [t for t in valid_tasks if self._per_task_weights[t] > 0]
         
         print(f"[QuaDMixOptimizer] Per-task models trained ({len(active_tasks)} active, {n_filtered} filtered):")
-        print(f"  {'Task':<30} {'R²':>8} {'Weight':>8} {'Std':>8}")
-        print(f"  {'-'*54}")
+        print(f"  {'Task':<30} {'Train R²':>10} {'Val R²':>10} {'Gap':>8} {'Weight':>8} {'Std':>8}")
+        print(f"  {'-'*76}")
         for task in sorted(valid_tasks.keys(), key=lambda t: -self._per_task_weights[t]):
-            r2 = self._per_task_r2[task]
+            train_r2 = self._per_task_train_r2[task]
+            val_r2 = self._per_task_r2[task]
+            gap = train_r2 - val_r2
             weight = self._per_task_weights[task]
             std = task_stds[task]
             marker = " [filtered]" if weight == 0 else ""
-            print(f"  {task:<30} {r2:>8.4f} {weight:>8.4f} {std:>8.4f}{marker}")
+            print(f"  {task:<30} {train_r2:>10.4f} {val_r2:>10.4f} {gap:>8.3f} {weight:>8.4f} {std:>8.4f}{marker}")
 
         if len(val_idx) > 0:
             agg_mean, agg_std = self._aggregate_train_stats
