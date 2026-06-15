@@ -1280,9 +1280,9 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         worker_models: list[list[str]] = [[] for _ in range(num_gpus)]
         worker_indices: list[list[int]] = [[] for _ in range(num_gpus)]
-        for i, mp in enumerate(model_paths):
+        for i, mpath in enumerate(model_paths):
             w = i % num_gpus
-            worker_models[w].append(mp)
+            worker_models[w].append(mpath)
             worker_indices[w].append(i)
 
         for w in range(num_gpus):

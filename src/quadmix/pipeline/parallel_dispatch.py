@@ -403,7 +403,7 @@ def _reval_worker(
 
             model.eval()
             with torch.no_grad():
-                val_bs = min(96, val_n)
+                val_bs = min(256, val_n)
                 per_doc_losses = []
                 for start in range(0, len(val_tokens), val_bs):
                     end = min(start + val_bs, len(val_tokens))
