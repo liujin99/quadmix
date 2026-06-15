@@ -293,8 +293,8 @@ def generate_report(
         ens_mae = metrics.get("ensemble_val_mae")
         if ens_r2 is not None:
             parts.append("## Overall Model Metrics (used for search)\n")
-            parts.append("**Val R²**: std-weighted average of per-task R² (high R² tasks contribute more)\n")
-            parts.append("**Val MAE**: mean absolute error in equal-weight loss space (aligns with downstream evaluation)\n")
+            parts.append("**Val R²**: z-score normalized, equal-weight across tasks (aligns with downstream evaluation)\n")
+            parts.append("**Val MAE**: mean absolute error in z-score space (all tasks equal-weight)\n")
             parts.append("| Metric | Value |")
             parts.append("|:-------|:------|")
             quality = "✓ Excellent" if ens_r2 > 0.6 else ("✓ Good" if ens_r2 > 0.3 else "⚠️ Weak")
