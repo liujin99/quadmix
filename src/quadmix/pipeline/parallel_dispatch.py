@@ -357,3 +357,105 @@ def _worker_dynamic_loop(
         except:
             pass
         sys.exit(1)
+
+
+def _reval_worker(
+        worker_id: int,
+        device_str: str,
+        val_data_path: str,
+        model_config_dict: dict,
+        model_paths: list,
+        exp_indices: list,
+        result_queue,
+):
+    """Worker for parallel revalidation across multiple GPUs.
+
+    Each worker loads validation data once, then iterates over assigned models.
+    device_str: e.g. 'cuda:0', 'cuda:1', 'npu:0', 'npu:1', 'cpu'.
+    """
+    import sys
+    try:
+        from quadmix.core.proxy_model import ProxyModel, ProxyConfig
+        from quadmix.pipeline.loss_utils import chunked_loss_per_token_from_hidden
+
+        device = torch.device(device_str)
+
+        val_data = torch.load(val_data_path, map_location="cpu", weights_only=False)
+        val_token_ids = val_data["token_ids"]
+        val_loss_mask = val_data["loss_mask"]
+        val_task_labels = val_data.get("task_labels", None)
+        del val_data
+
+        block_size = model_config_dict["block_size"]
+        val_n = len(val_token_ids)
+        val_tokens = val_token_ids[:val_n, :block_size].to(device)
+        val_mask = val_loss_mask[:val_n, :block_size].to(device)
+
+        print(f"[RevalWorker {worker_id}] {device_str}: {len(model_paths)} models, "
+              f"{val_n} val docs", flush=True)
+
+        for i, (model_path, exp_idx) in enumerate(zip(model_paths, exp_indices)):
+            model = ProxyModel(config=ProxyConfig(**model_config_dict)).to(device)
+            if device.type == "npu":
+                model = model.to(torch.bfloat16)
+            state_dict = torch.load(model_path, map_location=device, weights_only=True)
+            model.load_state_dict(state_dict)
+
+            model.eval()
+            with torch.no_grad():
+                val_bs = min(96, val_n)
+                per_doc_losses = []
+                for start in range(0, len(val_tokens), val_bs):
+                    end = min(start + val_bs, len(val_tokens))
+                    ids_in = val_tokens[start:end, :-1]
+                    ids_tgt = val_tokens[start:end, 1:]
+                    mask_tgt = val_mask[start:end, 1:]
+                    hidden = model(ids_in, return_hidden=True)
+                    loss = chunked_loss_per_token_from_hidden(
+                        model, hidden, ids_tgt, chunk_size=2048,
+                    )
+                    assistant_count = mask_tgt.float().sum(dim=1).clamp(min=1)
+                    per_doc = (loss * mask_tgt.float()).sum(dim=1) / assistant_count
+                    per_doc_losses.append(per_doc)
+                    del hidden, loss, per_doc
+
+                all_losses = torch.cat(per_doc_losses)
+                val_loss = float(all_losses.mean())
+
+                per_task_losses = None
+                if val_task_labels is not None:
+                    per_task_losses = {}
+                    for task in sorted(set(val_task_labels)):
+                        task_indices = [
+                            j for j, t in enumerate(val_task_labels) if t == task
+                        ]
+                        if task_indices:
+                            per_task_losses[task] = float(
+                                all_losses[task_indices].mean()
+                            )
+
+            del model, state_dict, per_doc_losses, all_losses
+            if device.type == "npu":
+                import gc
+                gc.collect()
+                torch.npu.empty_cache()
+            elif device.type == "cuda":
+                torch.cuda.empty_cache()
+
+            result_queue.put((exp_idx, val_loss, per_task_losses))
+
+            if (i + 1) % 10 == 0 or i == len(model_paths) - 1:
+                print(f"[RevalWorker {worker_id}] {device_str}: "
+                      f"{i+1}/{len(model_paths)} done", flush=True)
+
+        result_queue.put(None)
+
+    except Exception as e:
+        import traceback
+        print(f"[RevalWorker {worker_id}] ERROR: {e}\n{traceback.format_exc()}",
+              flush=True)
+        try:
+            result_queue.put(None)
+        except Exception:
+            pass
+        sys.exit(1)

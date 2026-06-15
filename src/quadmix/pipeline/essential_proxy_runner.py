@@ -1223,6 +1223,115 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             torch.cuda.empty_cache()
         return val_loss, per_task_losses
 
+    def revalidate_batch_parallel(
+        self,
+        model_paths: list[str],
+        device_type: str = "cuda",
+        num_gpus: int | None = None,
+    ) -> list[tuple[float, dict[str, float] | None]]:
+        """Revalidate multiple models in parallel across GPUs.
+
+        Args:
+            model_paths: list of saved model weight paths
+            device_type: 'cuda' or 'npu'
+            num_gpus: number of GPUs to use (default: all available)
+
+        Returns:
+            list of (val_loss, per_task_losses) in same order as model_paths
+        """
+        from quadmix.pipeline.parallel_dispatch import _reval_worker
+
+        n_models = len(model_paths)
+
+        if device_type == "cuda":
+            available = torch.cuda.device_count()
+        elif device_type == "npu":
+            available = torch.npu.device_count()
+        else:
+            available = 1
+
+        if num_gpus is None:
+            num_gpus = max(1, available)
+        num_gpus = min(num_gpus, available, n_models)
+
+        if num_gpus <= 1:
+            results = []
+            for i, mp in enumerate(model_paths):
+                r = self.revalidate_from_saved(mp, device_type=device_type)
+                results.append(r)
+                if (i + 1) % 50 == 0 or i == n_models - 1:
+                    print(f"  [{i+1}/{n_models}] sequential reval done")
+            return results
+
+        print(f"[RevalParallel] {n_models} models on {num_gpus} GPUs ({device_type})")
+
+        model_config_dict = {
+            "n_layer": self.model_config.n_layer,
+            "n_head": self.model_config.n_head,
+            "n_embd": self.model_config.n_embd,
+            "vocab_size": self.model_config.vocab_size,
+            "padding_multiple": self.model_config.padding_multiple,
+            "block_size": self.model_config.block_size,
+            "bias": self.model_config.bias,
+            "norm_eps": self.model_config.norm_eps,
+            "rope_base": self.model_config.rope_base,
+            "intermediate_size": self.model_config.intermediate_size,
+        }
+
+        worker_models: list[list[str]] = [[] for _ in range(num_gpus)]
+        worker_indices: list[list[int]] = [[] for _ in range(num_gpus)]
+        for i, mp in enumerate(model_paths):
+            w = i % num_gpus
+            worker_models[w].append(mp)
+            worker_indices[w].append(i)
+
+        for w in range(num_gpus):
+            print(f"  [RevalParallel] GPU {w}: {len(worker_models[w])} models")
+
+        ctx = mp.get_context("spawn")
+        result_queue = ctx.Queue()
+
+        processes = []
+        for w in range(num_gpus):
+            device_str = f"{device_type}:{w}"
+            p = ctx.Process(
+                target=_reval_worker,
+                args=(
+                    w, device_str, self.val_data_path,
+                    model_config_dict, worker_models[w],
+                    worker_indices[w], result_queue,
+                ),
+            )
+            p.start()
+            processes.append(p)
+
+        all_results: list[tuple[float, dict[str, float] | None] | None] = [None] * n_models
+        finished_workers = 0
+        collected = 0
+
+        while finished_workers < num_gpus:
+            item = result_queue.get()
+            if item is None:
+                finished_workers += 1
+            else:
+                exp_idx, val_loss, per_task_losses = item
+                all_results[exp_idx] = (val_loss, per_task_losses)
+                collected += 1
+                if collected % 50 == 0 or collected == n_models:
+                    print(f"  [RevalParallel] {collected}/{n_models} collected")
+
+        for p in processes:
+            p.join()
+
+        failed = [i for i, r in enumerate(all_results) if r is None]
+        if failed:
+            raise RuntimeError(
+                f"[RevalParallel] {len(failed)} models failed: {failed[:10]}..."
+            )
+
+        print(f"[RevalParallel] Done: {n_models} models on {num_gpus} GPUs")
+        return all_results
+
     def _lr_schedule(self, it: int, max_iters: int) -> float:
         """Cosine LR with linear warmup."""
         warm = self.warmup_steps * self.gradient_accumulation_steps

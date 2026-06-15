@@ -136,6 +136,8 @@ def build_parser():
     p.add_argument("--device-type", type=str, default="cpu",
                    choices=["cpu", "cuda", "npu"],
                    help="Device for re-evaluation (default: cpu)")
+    p.add_argument("--num-gpus", type=int, default=None,
+                   help="Number of GPUs to use for parallel reval (default: all available)")
     p.add_argument("--num-search", type=int, default=100000)
     p.add_argument("--top-k", type=int, default=10)
     p.add_argument("--target-tokens", type=float, default=0.0,
@@ -242,15 +244,20 @@ def main():
         checkpoint_interval=0,
     )
 
+    model_paths = [exp[3] for exp in experiments]
+    reval_results = runner.revalidate_batch_parallel(
+        model_paths,
+        device_type=args.device_type,
+        num_gpus=args.num_gpus,
+    )
+
     results = []
     reval_meta = []
     for i, (exp_name, exp_path, meta_path, model_path) in enumerate(experiments):
         with open(meta_path) as f:
             meta = json.load(f)
 
-        new_val_loss, new_per_task_losses = runner.revalidate_from_saved(
-            model_path, device_type=args.device_type,
-        )
+        new_val_loss, new_per_task_losses = reval_results[i]
 
         old_val_loss = meta["val_loss"]
         params = reconstruct_params_from_meta(meta)
@@ -276,12 +283,6 @@ def main():
             "new_val_loss": new_val_loss,
             "delta": new_val_loss - old_val_loss,
         })
-
-        if (i + 1) % 50 == 0 or i == len(experiments) - 1:
-            losses_so_far = [r.validation_loss for r in results]
-            print(f"  [{i+1}/{len(experiments)}] "
-                  f"mean={np.mean(losses_so_far):.4f}, "
-                  f"std={np.std(losses_so_far):.4f}")
 
     stage_times["stage2_reval"] = time.time() - _t
     print(f"[Stage 2] Re-evaluation: {stage_times['stage2_reval']:.1f}s")
