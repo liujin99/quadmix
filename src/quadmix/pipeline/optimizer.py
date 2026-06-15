@@ -483,13 +483,12 @@ class QuaDMixOptimizer:
         raw_weights = {}
         for task in valid_tasks:
             r2 = self._per_task_r2[task]
-            raw_weights[task] = max(r2, 0.0) * task_stds[task]
+            raw_weights[task] = max(r2, 0.0)
         
         total_raw = sum(raw_weights.values())
         if total_raw < 1e-12:
-            print("[QuaDMixOptimizer] WARNING: All tasks have R²<=0, falling back to std-only weights")
-            total_std = sum(task_stds.values())
-            self._per_task_weights = {task: std / total_std for task, std in task_stds.items()}
+            print("[QuaDMixOptimizer] WARNING: All tasks have R²<=0, falling back to equal weights")
+            self._per_task_weights = {task: 1.0 / len(valid_tasks) for task in valid_tasks}
         else:
             self._per_task_weights = {task: w / total_raw for task, w in raw_weights.items()}
         
