@@ -18,6 +18,38 @@ from quadmix.core.types import ParameterSet, QuaDMixConfig, ProxyResult
 from quadmix.pipeline.param_sampler import ParameterSampler
 
 
+def _train_single_task_cv_fold(
+    fold_idx: int,
+    folds: List[npt.NDArray[np.int64]],
+    n_folds: int,
+    task_losses: npt.NDArray[np.float64],
+    params_list: List[ParameterSet],
+    regression_params: dict,
+    num_domains: int,
+    num_quality_criteria: int,
+) -> float:
+    """Train a single CV fold and return R²."""
+    cv_val_idx = folds[fold_idx]
+    cv_train_idx = np.concatenate([folds[j] for j in range(n_folds) if j != fold_idx])
+    
+    cv_train_params = [params_list[i] for i in cv_train_idx]
+    cv_val_params = [params_list[i] for i in cv_val_idx]
+    cv_train_losses = task_losses[cv_train_idx]
+    cv_val_losses = task_losses[cv_val_idx]
+    
+    cv_model = RegressionModel(model_type="lightgbm", **regression_params)
+    cv_model.fit(
+        cv_train_params,
+        cv_train_losses,
+        num_domains=num_domains,
+        num_criteria=num_quality_criteria,
+        eval_params_list=cv_val_params,
+        eval_losses=cv_val_losses,
+    )
+    
+    return float(cv_model.score(cv_val_params, cv_val_losses))
+
+
 def _train_single_task(
     task: str,
     task_losses: npt.NDArray[np.float64],
@@ -31,6 +63,8 @@ def _train_single_task(
     num_quality_criteria: int,
 ) -> Dict[str, Any]:
     """Train a single task's model (CV or single split). Returns result dict."""
+    from joblib import Parallel, delayed
+    
     result = {"task": task}
     
     # Train stats
@@ -39,31 +73,21 @@ def _train_single_task(
         float(np.std(task_losses[train_idx])),
     )
     
-    # K-fold CV for R² estimation
+    # K-fold CV for R² estimation (parallel across folds)
     if folds is not None and n_folds > 1:
-        fold_r2s = []
-        for fold_idx in range(n_folds):
-            cv_val_idx = folds[fold_idx]
-            cv_train_idx = np.concatenate([folds[j] for j in range(n_folds) if j != fold_idx])
-            
-            cv_train_params = [params_list[i] for i in cv_train_idx]
-            cv_val_params = [params_list[i] for i in cv_val_idx]
-            cv_train_losses = task_losses[cv_train_idx]
-            cv_val_losses = task_losses[cv_val_idx]
-            
-            cv_model = RegressionModel(model_type="lightgbm", **regression_params)
-            cv_model.fit(
-                cv_train_params,
-                cv_train_losses,
+        fold_r2s = Parallel(n_jobs=n_folds, prefer="threads")(
+            delayed(_train_single_task_cv_fold)(
+                fold_idx=fold_idx,
+                folds=folds,
+                n_folds=n_folds,
+                task_losses=task_losses,
+                params_list=params_list,
+                regression_params=regression_params,
                 num_domains=num_domains,
-                num_criteria=num_quality_criteria,
-                eval_params_list=cv_val_params,
-                eval_losses=cv_val_losses,
+                num_quality_criteria=num_quality_criteria,
             )
-            
-            fold_r2 = float(cv_model.score(cv_val_params, cv_val_losses))
-            fold_r2s.append(fold_r2)
-        
+            for fold_idx in range(n_folds)
+        )
         result["r2"] = float(np.mean(fold_r2s))
     else:
         # Single split: use val_idx for R²
