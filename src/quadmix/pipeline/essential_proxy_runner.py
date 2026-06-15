@@ -1256,8 +1256,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         if num_gpus <= 1:
             results = []
-            for i, mp in enumerate(model_paths):
-                r = self.revalidate_from_saved(mp, device_type=device_type)
+            for i, mpath in enumerate(model_paths):
+                r = self.revalidate_from_saved(mpath, device_type=device_type)
                 results.append(r)
                 if (i + 1) % 50 == 0 or i == n_models - 1:
                     print(f"  [{i+1}/{n_models}] sequential reval done")
