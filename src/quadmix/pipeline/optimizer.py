@@ -509,24 +509,42 @@ class QuaDMixOptimizer:
             print(f"  {task:<30} {train_r2:>10.4f} {val_r2:>10.4f} {gap:>8.3f} {weight:>8.4f} {std:>8.4f}{marker}")
 
         if len(val_idx) > 0:
-            agg_mean, agg_std = self._aggregate_train_stats
-            val_losses_actual = losses[val_idx]
             val_params = [params_list[i] for i in val_idx]
-            z_score_sum = np.zeros(len(val_idx))
-            for task, model in self._per_task_models.items():
-                w = self._per_task_weights[task]
-                if w <= 0:
-                    continue
-                task_mean, task_std = self._per_task_train_stats[task]
+            
+            # Overall R²: std-weighted average of per-task R²
+            # Only active tasks (R² > 0) contribute
+            weighted_r2_sum = 0.0
+            std_sum = 0.0
+            for task in active_tasks:
+                r2 = self._per_task_r2[task]
+                std = task_stds[task]
+                weighted_r2_sum += std * r2
+                std_sum += std
+            overall_r2 = weighted_r2_sum / max(std_sum, 1e-12)
+            
+            # Overall MAE: equal-weight loss space
+            # Predict: average of per-task predictions
+            # Actual: average of per-task actual losses
+            n_val = len(val_idx)
+            ensemble_pred = np.zeros(n_val)
+            equal_weight_actual = np.zeros(n_val)
+            n_active = 0
+            for task in active_tasks:
+                model = self._per_task_models[task]
                 raw_pred = model.predict(val_params)
-                z_pred = (raw_pred - task_mean) / max(task_std, 1e-8)
-                z_score_sum += w * z_pred
-            ensemble_pred = z_score_sum * agg_std + agg_mean
-            ensemble_r2 = float(1 - np.sum((ensemble_pred - val_losses_actual) ** 2) / max(np.sum((val_losses_actual - np.mean(val_losses_actual)) ** 2), 1e-12))
-            ensemble_mae = float(np.mean(np.abs(ensemble_pred - val_losses_actual)))
-            self._ensemble_val_r2 = ensemble_r2
-            self._ensemble_val_mae = ensemble_mae
-            print(f"[QuaDMixOptimizer] Ensemble Val R² = {ensemble_r2:.4f}, MAE = {ensemble_mae:.4f} ({len(active_tasks)} active tasks)")
+                ensemble_pred += raw_pred
+                task_losses = all_task_losses[task]
+                equal_weight_actual += task_losses[val_idx]
+                n_active += 1
+            if n_active > 0:
+                ensemble_pred /= n_active
+                equal_weight_actual /= n_active
+            overall_mae = float(np.mean(np.abs(ensemble_pred - equal_weight_actual)))
+            
+            self._ensemble_val_r2 = overall_r2
+            self._ensemble_val_mae = overall_mae
+            print(f"[QuaDMixOptimizer] Overall Val R² = {overall_r2:.4f} (std-weighted, {len(active_tasks)} active tasks)")
+            print(f"[QuaDMixOptimizer] Overall Val MAE = {overall_mae:.4f} (equal-weight loss space)")
         else:
             self._ensemble_val_r2 = None
             self._ensemble_val_mae = None

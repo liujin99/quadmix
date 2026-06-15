@@ -373,7 +373,7 @@ class QuaDMixPipeline:
         ens_r2 = self._optimizer.ensemble_val_r2
         ens_mae = self._optimizer.ensemble_val_mae
         if ens_r2 is not None:
-            print(f"  Ensemble  Val R² = {ens_r2:.4f}, MAE = {ens_mae:.4f} (used for search)")
+            print(f"  Overall   Val R² = {ens_r2:.4f}, MAE = {ens_mae:.4f} (used for search)")
         print(f"  Output: {output_dir}/")
         print(f"    ├── optimal_parameters.json")
         print(f"    ├── pipeline_summary.json")

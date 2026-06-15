@@ -258,7 +258,7 @@ def main():
     ens_r2 = pipeline._optimizer.ensemble_val_r2
     ens_mae = pipeline._optimizer.ensemble_val_mae
     if ens_r2 is not None:
-        print(f"  Ensemble  Val R² = {ens_r2:.4f}, MAE = {ens_mae:.4f} (used for search)")
+        print(f"  Overall   Val R² = {ens_r2:.4f}, MAE = {ens_mae:.4f} (used for search)")
     print(f"  Output: {output_dir}/")
     print(f"    ├── optimal_parameters.json")
     print(f"    ├── pipeline_summary.json")
