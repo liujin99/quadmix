@@ -94,18 +94,34 @@ class RegressionModel:
                     "LightGBM is required. Install with: pip install lightgbm"
                 )
 
-            default_params = {
-                "n_estimators": 1000,
-                "learning_rate": 0.05,
-                "num_leaves": 31,
-                "min_child_samples": min(20, max(5, n_train // 10)),
-                "subsample": 0.8,
-                "colsample_bytree": 0.8,
-                "reg_alpha": 0.1,
-                "reg_lambda": 0.1,
-                "random_state": 42,
-                "verbose": -1,
-            }
+            if n_train > 0 and n_train < 500:
+                max_depth = min(5, max(3, int(np.log2(n_train))))
+                default_params = {
+                    "n_estimators": 500,
+                    "learning_rate": 0.02,
+                    "max_depth": max_depth,
+                    "num_leaves": min(15, 2 ** max_depth - 1),
+                    "min_child_samples": max(30, n_train // 6),
+                    "subsample": 0.8,
+                    "colsample_bytree": 0.6,
+                    "reg_alpha": 1.0,
+                    "reg_lambda": 1.0,
+                    "random_state": 42,
+                    "verbose": -1,
+                }
+            else:
+                default_params = {
+                    "n_estimators": 1000,
+                    "learning_rate": 0.05,
+                    "num_leaves": 31,
+                    "min_child_samples": min(20, max(5, n_train // 10)),
+                    "subsample": 0.8,
+                    "colsample_bytree": 0.8,
+                    "reg_alpha": 0.1,
+                    "reg_lambda": 0.1,
+                    "random_state": 42,
+                    "verbose": -1,
+                }
             default_params.update(self.model_kwargs)
             self._model = lgb.LGBMRegressor(**default_params)
 
