@@ -52,6 +52,8 @@ class PipelineOutput:
     train_r2: float
     val_r2: float
     val_mae: float
+    ensemble_val_r2: Optional[float]
+    ensemble_val_mae: Optional[float]
     best_predicted_loss: float
     selected_indices: npt.NDArray[np.int64]
     sampling_values: npt.NDArray[np.float64]
@@ -367,9 +369,11 @@ class QuaDMixPipeline:
 
         print(f"\n{'=' * 70}")
         print(f"  Pipeline Complete! ({elapsed:.1f}s)")
-        print(f"  Train R² = {self._optimizer.train_r2:.4f}")
-        print(f"  Val   R² = {self._optimizer.val_r2:.4f}")
-        print(f"  Val  MAE = {self._optimizer.val_mae:.4f}")
+        print(f"  Aggregate Val R² = {self._optimizer.val_r2:.4f} (diagnostic)")
+        ens_r2 = self._optimizer.ensemble_val_r2
+        ens_mae = self._optimizer.ensemble_val_mae
+        if ens_r2 is not None:
+            print(f"  Ensemble  Val R² = {ens_r2:.4f}, MAE = {ens_mae:.4f} (used for search)")
         print(f"  Output: {output_dir}/")
         print(f"    ├── optimal_parameters.json")
         print(f"    ├── pipeline_summary.json")
@@ -383,6 +387,8 @@ class QuaDMixPipeline:
             train_r2=self._optimizer.train_r2,
             val_r2=self._optimizer.val_r2,
             val_mae=self._optimizer.val_mae,
+            ensemble_val_r2=self._optimizer.ensemble_val_r2,
+            ensemble_val_mae=self._optimizer.ensemble_val_mae,
             best_predicted_loss=float(predicted_losses.min()),
             selected_indices=selected_indices,
             sampling_values=sampling_values,
@@ -599,9 +605,11 @@ class QuaDMixPipeline:
                 "val_set": val_set,
             },
             "metrics": {
-                "train_r2": self._optimizer.train_r2,
-                "val_r2": self._optimizer.val_r2,
-                "val_mae": self._optimizer.val_mae,
+                "aggregate_train_r2": self._optimizer.train_r2,
+                "aggregate_val_r2": self._optimizer.val_r2,
+                "aggregate_val_mae": self._optimizer.val_mae,
+                "ensemble_val_r2": self._optimizer.ensemble_val_r2,
+                "ensemble_val_mae": self._optimizer.ensemble_val_mae,
                 "best_predicted_loss": float(predicted_losses.min()),
                 "top_k_avg_loss": top_k_avg_loss,
             },

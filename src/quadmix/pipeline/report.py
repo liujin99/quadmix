@@ -225,13 +225,19 @@ def generate_report(
                 parts.append(f"| {k} | {v} |")
         if metrics:
             for k, v in metrics.items():
-                parts.append(f"| {k} | {v:.4f}" if isinstance(v, float) else f"| {k} | {v} |")
+                if v is None:
+                    parts.append(f"| {k} | — |")
+                elif isinstance(v, float):
+                    parts.append(f"| {k} | {v:.4f} |")
+                else:
+                    parts.append(f"| {k} | {v} |")
         if elapsed is not None:
             parts.append(f"| Duration | {elapsed:.1f}s |")
         parts.append("")
 
     if reliability:
         parts.append("## Model Reliability\n")
+        parts.append("**Aggregate model** (single LightGBM on total loss, diagnostic only — not used for search):\n")
         bootstrap_mean = reliability.get("val_r2_bootstrap_mean")
         ci_lower = reliability.get("val_r2_ci_lower")
         ci_upper = reliability.get("val_r2_ci_upper")
@@ -248,9 +254,9 @@ def generate_report(
             quality = "✓ Excellent" if bootstrap_mean > 0.8 else ("✓ Good" if bootstrap_mean > 0.6 else "⚠️ Weak signal")
             parts.append(f"| **Val R² (bootstrap mean)** | **{bootstrap_mean:.4f}** | **{quality}** |")
 
-        val_r2 = metrics.get("val_r2") if metrics else None
-        if val_r2 is not None:
-            parts.append(f"| Val R² (single split) | {val_r2:.4f} | — |")
+        agg_val_r2 = metrics.get("aggregate_val_r2", metrics.get("val_r2")) if metrics else None
+        if agg_val_r2 is not None:
+            parts.append(f"| Val R² (single split) | {agg_val_r2:.4f} | — |")
 
         if ci_lower is not None and ci_upper is not None:
             ci_status = "✓ Stable" if ci_width is not None and ci_width < 0.3 else "⚠️ Wide CI"
@@ -280,6 +286,19 @@ def generate_report(
         if warnings:
             parts.append("**Recommendations:**\n")
             parts.extend(warnings)
+            parts.append("")
+
+    if metrics:
+        ens_r2 = metrics.get("ensemble_val_r2")
+        ens_mae = metrics.get("ensemble_val_mae")
+        if ens_r2 is not None:
+            parts.append("## Ensemble Model (used for search)\n")
+            parts.append("Per-task weighted prediction with z-score calibration and R²-adaptive weights.\n")
+            parts.append("| Metric | Value |")
+            parts.append("|:-------|:------|")
+            quality = "✓ Excellent" if ens_r2 > 0.6 else ("✓ Good" if ens_r2 > 0.3 else "⚠️ Weak")
+            parts.append(f"| **Val R²** | **{ens_r2:.4f}** ({quality}) |")
+            parts.append(f"| Val MAE | {ens_mae:.4f} |")
             parts.append("")
 
     if proxy_loss_stats:

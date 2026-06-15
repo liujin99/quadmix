@@ -386,9 +386,11 @@ def main():
             "val_set": val_set_name,
         },
         "metrics": {
-            "train_r2": pipeline._optimizer.train_r2,
-            "val_r2": pipeline._optimizer.val_r2,
-            "val_mae": pipeline._optimizer.val_mae,
+            "aggregate_train_r2": pipeline._optimizer.train_r2,
+            "aggregate_val_r2": pipeline._optimizer.val_r2,
+            "aggregate_val_mae": pipeline._optimizer.val_mae,
+            "ensemble_val_r2": pipeline._optimizer.ensemble_val_r2,
+            "ensemble_val_mae": pipeline._optimizer.ensemble_val_mae,
             "best_predicted_loss": float(predicted_losses.min()),
             "top_k_avg_loss": top_k_avg_loss,
         },
@@ -508,9 +510,11 @@ def main():
     total_elapsed = time.time() - t_start
     print(f"\n{'=' * 70}")
     print(f"  Re-evaluation Complete! ({total_elapsed:.1f}s)")
-    print(f"  Train R² = {pipeline._optimizer.train_r2:.4f}")
-    print(f"  Val   R² = {pipeline._optimizer.val_r2:.4f}")
-    print(f"  Val  MAE = {pipeline._optimizer.val_mae:.4f}")
+    print(f"  Aggregate Val R² = {pipeline._optimizer.val_r2:.4f} (diagnostic)")
+    ens_r2 = pipeline._optimizer.ensemble_val_r2
+    ens_mae = pipeline._optimizer.ensemble_val_mae
+    if ens_r2 is not None:
+        print(f"  Ensemble  Val R² = {ens_r2:.4f}, MAE = {ens_mae:.4f} (used for search)")
     print(f"  Loss correlation (old vs new): {corr:.4f}")
     print(f"  Output: {output_dir}/")
     print(f"    ├── optimal_parameters.json")

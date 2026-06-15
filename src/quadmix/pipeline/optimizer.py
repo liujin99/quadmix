@@ -290,6 +290,8 @@ class QuaDMixOptimizer:
         self._per_task_r2: Optional[Dict[str, float]] = None
         self._per_task_train_stats: Optional[Dict[str, Tuple[float, float]]] = None
         self._aggregate_train_stats: Optional[Tuple[float, float]] = None
+        self._ensemble_val_r2: Optional[float] = None
+        self._ensemble_val_mae: Optional[float] = None
 
     def add_proxy_results(self, results: List[ProxyResult]):
         """Add proxy experiment results."""
@@ -374,10 +376,11 @@ class QuaDMixOptimizer:
         self._val_mae = val_mae
         self._val_r2 = val_r2
 
-        print(f"[QuaDMixOptimizer] Train R² = {train_r2:.4f}")
+        print(f"[QuaDMixOptimizer] Aggregate model (diagnostic — not used for search):")
+        print(f"  Train R² = {train_r2:.4f}")
         if n_val > 0:
-            print(f"[QuaDMixOptimizer] Val   R² = {val_r2:.4f}, MAE = {val_mae:.4f}")
-        print(f"[QuaDMixOptimizer] Val   samples = {n_val}")
+            print(f"  Val   R² = {val_r2:.4f}, MAE = {val_mae:.4f}")
+        print(f"  Val   samples = {n_val}")
 
         self._compute_reliability(params_list, losses)
 
@@ -482,6 +485,29 @@ class QuaDMixOptimizer:
             std = task_stds[task]
             marker = " [filtered]" if weight == 0 else ""
             print(f"  {task:<30} {r2:>8.4f} {weight:>8.4f} {std:>8.4f}{marker}")
+
+        if len(val_idx) > 0:
+            agg_mean, agg_std = self._aggregate_train_stats
+            val_losses_actual = losses[val_idx]
+            val_params = [params_list[i] for i in val_idx]
+            z_score_sum = np.zeros(len(val_idx))
+            for task, model in self._per_task_models.items():
+                w = self._per_task_weights[task]
+                if w <= 0:
+                    continue
+                task_mean, task_std = self._per_task_train_stats[task]
+                raw_pred = model.predict(val_params)
+                z_pred = (raw_pred - task_mean) / max(task_std, 1e-8)
+                z_score_sum += w * z_pred
+            ensemble_pred = z_score_sum * agg_std + agg_mean
+            ensemble_r2 = float(1 - np.sum((ensemble_pred - val_losses_actual) ** 2) / max(np.sum((val_losses_actual - np.mean(val_losses_actual)) ** 2), 1e-12))
+            ensemble_mae = float(np.mean(np.abs(ensemble_pred - val_losses_actual)))
+            self._ensemble_val_r2 = ensemble_r2
+            self._ensemble_val_mae = ensemble_mae
+            print(f"[QuaDMixOptimizer] Ensemble Val R² = {ensemble_r2:.4f}, MAE = {ensemble_mae:.4f} ({len(active_tasks)} active tasks)")
+        else:
+            self._ensemble_val_r2 = None
+            self._ensemble_val_mae = None
 
     def _compute_reliability(
         self,
@@ -668,6 +694,14 @@ class QuaDMixOptimizer:
     @property
     def val_r2_bootstrap_mean(self) -> Optional[float]:
         return getattr(self, "_val_r2_bootstrap_mean", None)
+
+    @property
+    def ensemble_val_r2(self) -> Optional[float]:
+        return self._ensemble_val_r2
+
+    @property
+    def ensemble_val_mae(self) -> Optional[float]:
+        return self._ensemble_val_mae
 
     @property
     def sample_sufficient(self) -> Optional[bool]:
