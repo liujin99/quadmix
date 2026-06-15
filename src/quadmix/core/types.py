@@ -230,7 +230,7 @@ class QuaDMixConfig:
     proxy_training_tokens: int = 1_000_000_000  # 1B tokens
 
     # Regression config
-    regression_train_ratio: float = 0.933  # 2800/3000 ≈ 0.933
+    regression_train_ratio: float = 0.8  # 80/20 split for stable val R²
 
     # Target dataset size (0 = no scaling)
     target_tokens: int = 0  # Desired total tokens in sampled dataset
