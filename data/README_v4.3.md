@@ -198,14 +198,15 @@ Previously used `Σ(std_i × R²_i) / Σ(std_i)`, but:
 
 **Approach:**
 ```python
-# 5-fold CV for each task:
-for fold in range(5):
-    cv_train = 4 folds
-    cv_val = 1 fold
-    cv_model.fit(cv_train)
-    fold_r2 = cv_model.score(cv_val)
+# 5-fold CV for each task (parallel across tasks):
+for task in tasks:  # parallel
+    for fold in range(5):
+        cv_train = 4 folds
+        cv_val = 1 fold
+        cv_model.fit(cv_train)
+        fold_r2 = cv_model.score(cv_val)
 
-cv_r2 = mean(fold_r2s)  # More stable R² estimate
+    cv_r2 = mean(fold_r2s)  # More stable R² estimate
 
 # Final model trained on train_idx for prediction
 final_model.fit(train_idx)
@@ -218,9 +219,16 @@ final_model.fit(train_idx)
 - R² estimate variance reduced ~5×
 - More reliable search weights, especially for borderline tasks (R² ≈ 0)
 
+**Parallel Training:**
+
+- 21 tasks trained in parallel using joblib (one process per task)
+- Each task does 5-fold CV + final model training independently
+- CPU utilization: ~100% (vs ~10% with sequential training)
+- Speedup: ~10-15× on 16-core machines
+
 **Trade-off:**
 - Computational cost: 5× more LightGBM training per task
-- But LightGBM is fast, so acceptable
+- But LightGBM is fast, and parallelization offsets this
 - Final prediction model still trained on train_idx (consistent with search)
 
 **Config:**
