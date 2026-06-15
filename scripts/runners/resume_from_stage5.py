@@ -65,8 +65,8 @@ def build_parser():
                    help="Path to proxy_experiments/ directory")
     p.add_argument("--preprocessed-dir", required=True,
                    help="Path to preprocessed shards directory")
-    p.add_argument("--output", "-o", required=True,
-                   help="Output directory (same as original pipeline run)")
+    p.add_argument("--output", "-o", default=None,
+                   help="Output directory (default: result/reopt_<timestamp>)")
     p.add_argument("--num-search", type=int, default=5000)
     p.add_argument("--top-k", type=int, default=5)
     p.add_argument("--target-tokens", type=float, default=0.0,
@@ -76,6 +76,12 @@ def build_parser():
 
 def main():
     args = build_parser().parse_args()
+
+    if args.output is None:
+        args.output = os.path.join(
+            "result",
+            f"reopt_{time.strftime('%Y%m%d_%H%M%S')}",
+        )
 
     print(f"[Resume] Loading proxy results from: {args.proxy_dir}")
     results = load_proxy_results(args.proxy_dir)
