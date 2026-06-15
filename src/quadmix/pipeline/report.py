@@ -293,7 +293,7 @@ def generate_report(
         ens_mae = metrics.get("ensemble_val_mae")
         if ens_r2 is not None:
             parts.append("## Overall Model Metrics (used for search)\n")
-            parts.append("**Val R²**: z-score normalized, R²-weighted (high R² tasks contribute more)\n")
+            parts.append("**Val R²**: z-score normalized, R²-weighted (K-fold CV estimation, high R² tasks contribute more)\n")
             parts.append("**Val MAE**: mean absolute error in z-score space (R²-weighted ensemble)\n")
             parts.append("| Metric | Value |")
             parts.append("|:-------|:------|")

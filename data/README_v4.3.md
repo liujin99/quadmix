@@ -194,6 +194,40 @@ Previously used `Σ(std_i × R²_i) / Σ(std_i)`, but:
 - bigbench_cs_algorithms (std=0.63) would have 12× more weight than squad (std=0.05)
 - Contradicts search weight logic (pure R²)
 
+### K-Fold Cross-Validation for R² Estimation
+
+**Approach:**
+```python
+# 5-fold CV for each task:
+for fold in range(5):
+    cv_train = 4 folds
+    cv_val = 1 fold
+    cv_model.fit(cv_train)
+    fold_r2 = cv_model.score(cv_val)
+
+cv_r2 = mean(fold_r2s)  # More stable R² estimate
+
+# Final model trained on train_idx for prediction
+final_model.fit(train_idx)
+```
+
+**Why K-fold CV?**
+
+- Single 80/20 split: Val R² estimate has high variance (only ~40 samples)
+- 5-fold CV: R² estimated from 5 × 40 = 200 samples (each sample validated once)
+- R² estimate variance reduced ~5×
+- More reliable search weights, especially for borderline tasks (R² ≈ 0)
+
+**Trade-off:**
+- Computational cost: 5× more LightGBM training per task
+- But LightGBM is fast, so acceptable
+- Final prediction model still trained on train_idx (consistent with search)
+
+**Config:**
+```python
+QuaDMixConfig.regression_cv_folds = 5  # Set to 0 or 1 for single split
+```
+
 ### Unified Logic
 
 All three components use R² as trust indicator:

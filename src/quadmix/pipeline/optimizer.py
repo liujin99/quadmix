@@ -416,7 +416,7 @@ class QuaDMixOptimizer:
         train_idx: npt.NDArray[np.int64],
         val_idx: npt.NDArray[np.int64],
     ):
-        """Train per-task LightGBM models with R²-adaptive weights and z-score calibration."""
+        """Train per-task LightGBM models with K-fold CV for R² estimation."""
         tasks = sorted(self._proxy_results[0].per_task_losses.keys())
         
         all_task_losses = {}
@@ -443,41 +443,110 @@ class QuaDMixOptimizer:
         train_losses = losses[train_idx]
         self._aggregate_train_stats = (float(np.mean(train_losses)), float(np.std(train_losses)))
         
-        print(f"[QuaDMixOptimizer] Training {len(valid_tasks)} per-task models...")
+        n_folds = self.config.regression_cv_folds
+        n_total = len(params_list)
         
-        for task in valid_tasks:
-            task_losses = all_task_losses[task]
-            task_train_losses = task_losses[train_idx]
-            task_val_losses = task_losses[val_idx] if len(val_idx) > 0 else None
+        if n_folds > 1 and n_total >= n_folds:
+            print(f"[QuaDMixOptimizer] Training {len(valid_tasks)} per-task models with {n_folds}-fold CV...")
             
-            self._per_task_train_stats[task] = (
-                float(np.mean(task_train_losses)),
-                float(np.std(task_train_losses)),
-            )
+            # Create folds
+            rng = np.random.RandomState(42)
+            indices = np.arange(n_total)
+            rng.shuffle(indices)
+            fold_size = n_total // n_folds
+            folds = [indices[i * fold_size:(i + 1) * fold_size] for i in range(n_folds)]
             
-            train_params = [params_list[i] for i in train_idx]
-            val_params = [params_list[i] for i in val_idx] if len(val_idx) > 0 else None
+            for task in valid_tasks:
+                task_losses = all_task_losses[task]
+                
+                self._per_task_train_stats[task] = (
+                    float(np.mean(task_losses[train_idx])),
+                    float(np.std(task_losses[train_idx])),
+                )
+                
+                # K-fold CV for R² estimation
+                fold_r2s = []
+                for fold_idx in range(n_folds):
+                    cv_val_idx = folds[fold_idx]
+                    cv_train_idx = np.concatenate([folds[j] for j in range(n_folds) if j != fold_idx])
+                    
+                    cv_train_params = [params_list[i] for i in cv_train_idx]
+                    cv_val_params = [params_list[i] for i in cv_val_idx]
+                    cv_train_losses = task_losses[cv_train_idx]
+                    cv_val_losses = task_losses[cv_val_idx]
+                    
+                    cv_model = RegressionModel(model_type="lightgbm", **self.regression_params)
+                    cv_model.fit(
+                        cv_train_params,
+                        cv_train_losses,
+                        num_domains=self.config.num_domains,
+                        num_criteria=self.config.num_quality_criteria,
+                        eval_params_list=cv_val_params,
+                        eval_losses=cv_val_losses,
+                    )
+                    
+                    fold_r2 = float(cv_model.score(cv_val_params, cv_val_losses))
+                    fold_r2s.append(fold_r2)
+                
+                cv_r2 = float(np.mean(fold_r2s))
+                self._per_task_r2[task] = cv_r2
+                
+                # Train final model on train_idx for prediction
+                train_params = [params_list[i] for i in train_idx]
+                val_params = [params_list[i] for i in val_idx] if len(val_idx) > 0 else None
+                task_train_losses = task_losses[train_idx]
+                task_val_losses = task_losses[val_idx] if len(val_idx) > 0 else None
+                
+                model = RegressionModel(model_type="lightgbm", **self.regression_params)
+                model.fit(
+                    train_params,
+                    task_train_losses,
+                    num_domains=self.config.num_domains,
+                    num_criteria=self.config.num_quality_criteria,
+                    eval_params_list=val_params,
+                    eval_losses=task_val_losses,
+                )
+                
+                self._per_task_models[task] = model
+                task_train_r2 = float(model.score(train_params, task_train_losses))
+                self._per_task_train_r2[task] = task_train_r2
+        else:
+            # Single split (original behavior)
+            print(f"[QuaDMixOptimizer] Training {len(valid_tasks)} per-task models (single split)...")
             
-            model = RegressionModel(model_type="lightgbm", **self.regression_params)
-            model.fit(
-                train_params,
-                task_train_losses,
-                num_domains=self.config.num_domains,
-                num_criteria=self.config.num_quality_criteria,
-                eval_params_list=val_params,
-                eval_losses=task_val_losses,
-            )
-            
-            self._per_task_models[task] = model
-            
-            task_train_r2 = float(model.score(train_params, task_train_losses))
-            self._per_task_train_r2[task] = task_train_r2
-            
-            if len(val_idx) > 0:
-                task_r2 = float(model.score(val_params, task_val_losses))
-            else:
-                task_r2 = task_train_r2
-            self._per_task_r2[task] = task_r2
+            for task in valid_tasks:
+                task_losses = all_task_losses[task]
+                task_train_losses = task_losses[train_idx]
+                task_val_losses = task_losses[val_idx] if len(val_idx) > 0 else None
+                
+                self._per_task_train_stats[task] = (
+                    float(np.mean(task_train_losses)),
+                    float(np.std(task_train_losses)),
+                )
+                
+                train_params = [params_list[i] for i in train_idx]
+                val_params = [params_list[i] for i in val_idx] if len(val_idx) > 0 else None
+                
+                model = RegressionModel(model_type="lightgbm", **self.regression_params)
+                model.fit(
+                    train_params,
+                    task_train_losses,
+                    num_domains=self.config.num_domains,
+                    num_criteria=self.config.num_quality_criteria,
+                    eval_params_list=val_params,
+                    eval_losses=task_val_losses,
+                )
+                
+                self._per_task_models[task] = model
+                
+                task_train_r2 = float(model.score(train_params, task_train_losses))
+                self._per_task_train_r2[task] = task_train_r2
+                
+                if len(val_idx) > 0:
+                    task_r2 = float(model.score(val_params, task_val_losses))
+                else:
+                    task_r2 = task_train_r2
+                self._per_task_r2[task] = task_r2
         
         task_stds = {task: np.sqrt(var) for task, var in valid_tasks.items()}
         raw_weights = {}
@@ -495,17 +564,18 @@ class QuaDMixOptimizer:
         n_filtered = sum(1 for task in valid_tasks if self._per_task_r2[task] <= 0)
         active_tasks = [t for t in valid_tasks if self._per_task_weights[t] > 0]
         
+        r2_label = f"CV R² ({n_folds}-fold)" if n_folds > 1 and n_total >= n_folds else "Val R²"
         print(f"[QuaDMixOptimizer] Per-task models trained ({len(active_tasks)} active, {n_filtered} filtered):")
-        print(f"  {'Task':<30} {'Train R²':>10} {'Val R²':>10} {'Gap':>8} {'Weight':>8} {'Std':>8}")
-        print(f"  {'-'*76}")
+        print(f"  {'Task':<30} {'Train R²':>10} {r2_label:>14} {'Gap':>8} {'Weight':>8} {'Std':>8}")
+        print(f"  {'-'*80}")
         for task in sorted(valid_tasks.keys(), key=lambda t: -self._per_task_weights[t]):
             train_r2 = self._per_task_train_r2[task]
-            val_r2 = self._per_task_r2[task]
-            gap = train_r2 - val_r2
+            r2 = self._per_task_r2[task]
+            gap = train_r2 - r2
             weight = self._per_task_weights[task]
             std = task_stds[task]
             marker = " [filtered]" if weight == 0 else ""
-            print(f"  {task:<30} {train_r2:>10.4f} {val_r2:>10.4f} {gap:>8.3f} {weight:>8.4f} {std:>8.4f}{marker}")
+            print(f"  {task:<30} {train_r2:>10.4f} {r2:>14.4f} {gap:>8.3f} {weight:>8.4f} {std:>8.4f}{marker}")
 
         if len(val_idx) > 0:
             val_params = [params_list[i] for i in val_idx]
@@ -543,7 +613,8 @@ class QuaDMixOptimizer:
             
             self._ensemble_val_r2 = overall_r2
             self._ensemble_val_mae = overall_mae
-            print(f"[QuaDMixOptimizer] Overall Val R² = {overall_r2:.4f} (z-score normalized, R²-weighted, {len(active_tasks)} active tasks)")
+            r2_desc = f"CV {n_folds}-fold" if n_folds > 1 and n_total >= n_folds else "single split"
+            print(f"[QuaDMixOptimizer] Overall Val R² = {overall_r2:.4f} (z-score normalized, R²-weighted [{r2_desc}], {len(active_tasks)} active tasks)")
             print(f"[QuaDMixOptimizer] Overall Val MAE = {overall_mae:.4f} (z-score space)")
         else:
             self._ensemble_val_r2 = None
