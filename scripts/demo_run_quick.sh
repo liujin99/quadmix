@@ -240,7 +240,7 @@ python3 "$QUADMIX_DIR/scripts/runners/run_essential_web_v1.py" \
     --global-batch-size 64 \
     --rank-ref-size 10000 \
     --checkpoint-interval 0 \
-    --val-set core_bmk_v4.2 \
+    --val-set core_bmk_v4.3 \
     --output "$OUTPUT_DIR" \
     $DEVICE_ARG \
     "$@" || exit $?

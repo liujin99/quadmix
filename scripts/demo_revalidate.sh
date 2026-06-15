@@ -82,7 +82,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --result-dir PATH        Original pipeline result directory"
             echo ""
             echo "Options:"
-            echo "  --val-set {core,openhermes}  New validation set (default: core)"
+            echo "  --val-set {core,openhermes,core_bmk_v4.3}  New validation set (default: core)"
             echo "  --val-path PATH              Custom .pt file (overrides --val-set)"
             echo "  --output PATH                Output directory (default: auto)"
             echo "  --device-type {cpu,cuda,npu} Device (default: cpu)"
