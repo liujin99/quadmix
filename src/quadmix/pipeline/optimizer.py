@@ -510,12 +510,12 @@ class QuaDMixOptimizer:
         if len(val_idx) > 0:
             val_params = [params_list[i] for i in val_idx]
             
-            # Overall R² and MAE: z-score normalized, equal-weight
-            # All tasks contribute equally after normalization
+            # Overall R² and MAE: z-score normalized, R²-weighted
+            # High R² tasks (clear signal) contribute more
             n_val = len(val_idx)
             z_ensemble_pred = np.zeros(n_val)
             z_ensemble_actual = np.zeros(n_val)
-            n_active = 0
+            r2_sum = 0.0
             for task in active_tasks:
                 model = self._per_task_models[task]
                 raw_pred = model.predict(val_params)
@@ -524,16 +524,17 @@ class QuaDMixOptimizer:
                 
                 mean_val = float(np.mean(actual))
                 std_val = task_stds[task]
+                r2 = self._per_task_r2[task]
                 if std_val > 1e-12:
                     z_pred = (raw_pred - mean_val) / std_val
                     z_actual = (actual - mean_val) / std_val
-                    z_ensemble_pred += z_pred
-                    z_ensemble_actual += z_actual
-                    n_active += 1
+                    z_ensemble_pred += r2 * z_pred
+                    z_ensemble_actual += r2 * z_actual
+                    r2_sum += r2
             
-            if n_active > 0:
-                z_ensemble_pred /= n_active
-                z_ensemble_actual /= n_active
+            if r2_sum > 1e-12:
+                z_ensemble_pred /= r2_sum
+                z_ensemble_actual /= r2_sum
             
             ss_res = float(np.sum((z_ensemble_actual - z_ensemble_pred) ** 2))
             ss_tot = float(np.sum((z_ensemble_actual - np.mean(z_ensemble_actual)) ** 2))
@@ -542,7 +543,7 @@ class QuaDMixOptimizer:
             
             self._ensemble_val_r2 = overall_r2
             self._ensemble_val_mae = overall_mae
-            print(f"[QuaDMixOptimizer] Overall Val R² = {overall_r2:.4f} (z-score normalized, {len(active_tasks)} active tasks)")
+            print(f"[QuaDMixOptimizer] Overall Val R² = {overall_r2:.4f} (z-score normalized, R²-weighted, {len(active_tasks)} active tasks)")
             print(f"[QuaDMixOptimizer] Overall Val MAE = {overall_mae:.4f} (z-score space)")
         else:
             self._ensemble_val_r2 = None
