@@ -129,10 +129,97 @@ Only the answer token ("B") contributes to loss.
 ## Usage
 
 ```bash
-python scripts/runners/run_essential_web_v1.py --quick --val-set=core_bmk_v4.2
+python scripts/runners/run_essential_web_v1.py --quick --val-set=core_bmk_v4.3
 ```
 
-Note: The pipeline currently uses `core_bmk_v4.2` as the val-set identifier. Update the pipeline code to support `core_bmk_v4.3` if needed.
+The pipeline automatically downloads v4.3 from HuggingFace if not present locally.
+
+## Design Decisions
+
+### Search Weight: Pure R²
+
+**Formula:**
+```python
+weight_i = max(R²_i, 0) / Σ max(R²_j, 0)
+score = Σ weight_i × (pred_i - mean_i) / std_i
+```
+
+**Why not R² × std?**
+
+Previously used `R² × std` as search weight, but this caused problems:
+- `std` and z-score denominator cancel out: `(R² × std) × (pred - mean) / std = R² × (pred - mean)`
+- Returns to raw loss space where scales are incomparable
+- High-std tasks (e.g., bigbench_cs_algorithms, std=0.63) dominate low-std tasks (e.g., squad, std=0.05)
+
+**Why pure R²?**
+
+- Downstream evaluation is equal-weight (21 benchmarks average)
+- Search should only weight by "prediction accuracy" (R²), not "variance magnitude" (std)
+- Z-score normalization already handles scale differences
+- High R² tasks (clear signal) get more trust; low R² tasks (noisy) get less trust
+
+### Overall R² and MAE: Z-Score Normalized, R²-Weighted
+
+**Formula:**
+```python
+# For each active task i:
+z_pred_i = (pred_i - mean_i) / std_i
+z_actual_i = (actual_i - mean_i) / std_i
+
+# R²-weighted ensemble:
+z_ensemble = Σ(R²_i × z_i) / Σ(R²_i)
+
+# Overall metrics:
+overall_r2 = 1 - Σ(z_ensemble_actual - z_ensemble_pred)² / Σ(z_ensemble_actual - mean(z_ensemble_actual))²
+overall_mae = mean(|z_ensemble_pred - z_ensemble_actual|)
+```
+
+**Why z-score normalization?**
+
+- Different tasks have different loss scales (e.g., bigbench_cs_algorithms ~3.0, squad ~0.5)
+- Raw loss averaging gives high-loss tasks more influence
+- Z-score puts all tasks on comparable scale
+
+**Why R²-weighted (not equal-weight)?**
+
+- Equal-weight: noisy tasks (low R²) degrade overall metric quality
+- R²-weighted: high R² tasks (clear signal) contribute more, low R² tasks contribute less
+- Consistent with search weight logic (pure R²)
+- Prevents tasks like squad (R²=0.18) from dragging down overall R²
+
+**Why not std-weighted?**
+
+Previously used `Σ(std_i × R²_i) / Σ(std_i)`, but:
+- High std doesn't mean strong signal (could be noise)
+- bigbench_cs_algorithms (std=0.63) would have 12× more weight than squad (std=0.05)
+- Contradicts search weight logic (pure R²)
+
+### Unified Logic
+
+All three components use R² as trust indicator:
+
+| Component | Formula | Rationale |
+|-----------|---------|-----------|
+| Search weight | `weight_i = R²_i / Σ R²_j` | Trust accurate predictions |
+| Search score | `Σ weight_i × z_score_i` | Z-score for scale invariance |
+| Overall R²/MAE | R²-weighted z-score ensemble | Consistent with search logic |
+
+### Per-Task R² Distribution (v4.2 baseline)
+
+| Task | Val R² | Weight | Analysis |
+|------|--------|--------|----------|
+| bigbench_cs_algorithms | 0.4972 | 0.2153 | Symbolic task, surprisingly strong signal |
+| bigbench_language_identification | 0.6481 | 0.1002 | Multilingual, high R² |
+| bigbench_operators | 0.3628 | 0.0954 | Symbolic, moderate signal |
+| arc_easy | 0.5207 | 0.0615 | Science QA, good signal |
+| winogrande | 0.7501 | 0.0593 | Pronoun resolution, highest R² |
+| squad | 0.1779 | 0.0065 | Reading comprehension, weak signal |
+| boolq | 0.2205 | 0.0075 | Reading comprehension, weak signal |
+| commonsense_qa | -0.0221 | 0.0000 | Filtered (negative R²) |
+
+**Observation:** Symbolic tasks (bigbench_*) have stronger signal than expected; reading comprehension tasks (squad, boolq) have weaker signal than expected. This is because:
+- Symbolic tasks: answer-only loss focuses on high-variance tokens
+- Reading comprehension: full-seq loss diluted by context (Wikipedia text is "universal" across mixtures)
 
 ## Technical Details
 
