@@ -1,34 +1,34 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────────
-# Demo: QuaDMix Re-evaluation — 切换验证集快速重跑
+# Demo: QuaDMix Re-optimize — 基于已有代理模型重新优化
 # ──────────────────────────────────────────────────────────────
-# 加载已保存的代理模型权重，在新验证集上重新评估，
-# 然后重新拟合 LightGBM、搜索最优参数、抽样、生成报告。
+# 加载已保存的代理模型权重，重新评估、拟合 LightGBM、
+# 搜索最优参数、抽样、生成报告。
 #
 # 无需重新训练代理模型（节省大量时间）。
 #
 # Usage:
-#   bash scripts/demo_reval.sh --result-dir result/quadmix_20260609_120000
+#   bash scripts/demo_reoptimize.sh --result-dir result/quadmix_20260609_120000
 #
 # 切换验证集：
-#   bash scripts/demo_reval.sh --result-dir result/xxx --val-set openhermes
-#   bash scripts/demo_reval.sh --result-dir result/xxx --val-set core
-#   bash scripts/demo_reval.sh --result-dir result/xxx --val-path /path/to/custom.pt
+#   bash scripts/demo_reoptimize.sh --result-dir result/xxx --val-set openhermes
+#   bash scripts/demo_reoptimize.sh --result-dir result/xxx --val-set core
+#   bash scripts/demo_reoptimize.sh --result-dir result/xxx --val-path /path/to/custom.pt
 #
 # 指定设备：
-#   bash scripts/demo_reval.sh --result-dir result/xxx --device-type npu
+#   bash scripts/demo_reoptimize.sh --result-dir result/xxx --device-type npu
 #
 # 自定义输出目录：
-#   bash scripts/demo_reval.sh --result-dir result/xxx --output result/my_reval
+#   bash scripts/demo_reoptimize.sh --result-dir result/xxx --output result/my_reopt
 #
 # 调整搜索参数：
-#   bash scripts/demo_reval.sh --result-dir result/xxx --num-search 50000 --top-k 5
+#   bash scripts/demo_reoptimize.sh --result-dir result/xxx --num-search 50000 --top-k 5
 #
 # 指定目标数据量（单位 B tokens）：
-#   bash scripts/demo_reval.sh --result-dir result/xxx --target-tokens 10
+#   bash scripts/demo_reoptimize.sh --result-dir result/xxx --target-tokens 10
 #
 # HF 镜像加速（中国用户）：
-#   HF_ENDPOINT=https://hf-mirror.com bash scripts/demo_reval.sh --result-dir result/xxx
+#   HF_ENDPOINT=https://hf-mirror.com bash scripts/demo_reoptimize.sh --result-dir result/xxx
 # ──────────────────────────────────────────────────────────────
 
 set -euo pipefail
@@ -44,7 +44,7 @@ export QUADMIX_TEMP_DIR="${QUADMIX_TEMP_DIR:-$HOME/.cache/QuaDMix/temp}"
 
 PREPROCESSED_DIR="$QUADMIX_TEMP_DIR/preprocessed"
 
-RESULT_DIR=""
+RESULT_DIR="$QUADMIX_DIR/result/demo_full_20260612_214550"
 VAL_SET="core_bmk_v4.2"
 VAL_PATH=""
 OUTPUT=""

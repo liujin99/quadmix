@@ -187,6 +187,7 @@ def main():
             "num_selected_docs": len(selected_indices),
             "sampling_ratio": len(selected_indices) / n_docs,
         },
+        "per_task_analysis": pipeline._optimizer.per_task_analysis,
         "elapsed_seconds": elapsed,
         "stage_times": {k: round(v, 1) for k, v in stage_times.items()},
         "resumed_from": "stage5",
@@ -234,6 +235,7 @@ def main():
         elapsed=elapsed,
         use_sharded=True,
         reliability=summary.get("reliability"),
+        per_task_analysis=summary.get("per_task_analysis"),
     )
     save_report(report, output_dir)
     stage_times["stage9_report"] = time.time() - _t

@@ -625,6 +625,7 @@ class QuaDMixPipeline:
                 "num_selected_docs": len(selected_indices),
                 "sampling_ratio": len(selected_indices) / n_docs_save,
             },
+            "per_task_analysis": self._optimizer.per_task_analysis,
             "elapsed_seconds": elapsed,
             "stage_times": {k: round(v, 1) for k, v in stage_times.items()},
             "input_file": data_path,
@@ -688,6 +689,7 @@ class QuaDMixPipeline:
             use_sharded=(text_source == "sharded"),
             reliability=summary.get("reliability"),
             proxy_loss_stats=summary.get("proxy_loss_stats"),
+            per_task_analysis=summary.get("per_task_analysis"),
         )
         save_report(report, output_dir)
         stage_times["stage9_report"] = time.time() - _t

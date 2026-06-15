@@ -197,6 +197,7 @@ def generate_report(
     domain_labels, token_counts, num_domains=10, num_criteria=5,
     config=None, metrics=None, elapsed=None,
     use_sharded=False, reliability=None, proxy_loss_stats=None,
+    per_task_analysis=None,
 ):
     """Generate MD report with separate PNG figures."""
     # Compute distributions
@@ -290,6 +291,30 @@ def generate_report(
                 parts.append(f"| {name} | {stats['mean']:.4f} | {stats['std']:.4f} | {stats['min']:.4f} | {stats['max']:.4f} |")
             elif isinstance(stats, float):
                 parts.append(f"| {name} | {stats:.4f} | — | — | — |")
+        parts.append("")
+
+    if per_task_analysis:
+        parts.append("## Per-Task Analysis (R²-Adaptive Weighting)\n")
+        n_active = per_task_analysis.get("n_active", 0)
+        n_filtered = per_task_analysis.get("n_filtered", 0)
+        parts.append(f"**Active tasks:** {n_active} | **Filtered (R²≤0):** {n_filtered}\n")
+        parts.append("| Task | R² | Weight | Std | Status |")
+        parts.append("|:-----|---:|-------:|----:|:-------|")
+        for task in per_task_analysis.get("tasks", []):
+            name = task["name"]
+            r2 = task["r2"]
+            weight = task["weight"]
+            std = task.get("std")
+            std_str = f"{std:.4f}" if std is not None else "—"
+            if weight == 0:
+                status = "⚠️ Filtered"
+            elif r2 > 0.6:
+                status = "✓ Excellent"
+            elif r2 > 0.3:
+                status = "✓ Good"
+            else:
+                status = "⚠️ Weak"
+            parts.append(f"| {name} | {r2:.4f} | {weight:.4f} | {std_str} | {status} |")
         parts.append("")
 
     parts += [

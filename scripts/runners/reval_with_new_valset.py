@@ -422,6 +422,7 @@ def main():
             "num_selected_docs": len(selected_indices),
             "sampling_ratio": len(selected_indices) / n_docs,
         },
+        "per_task_analysis": pipeline._optimizer.per_task_analysis,
         "reval": {
             "source_result_dir": result_dir,
             "original_val_set": _detect_original_val_set(result_dir),
@@ -480,6 +481,7 @@ def main():
         elapsed=elapsed,
         use_sharded=True,
         reliability=summary.get("reliability"),
+        per_task_analysis=summary.get("per_task_analysis"),
     )
 
     reval_header = (

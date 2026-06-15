@@ -288,6 +288,8 @@ class QuaDMixOptimizer:
         self._per_task_models: Optional[Dict[str, RegressionModel]] = None
         self._per_task_weights: Optional[Dict[str, float]] = None
         self._per_task_r2: Optional[Dict[str, float]] = None
+        self._per_task_train_stats: Optional[Dict[str, Tuple[float, float]]] = None
+        self._aggregate_train_stats: Optional[Tuple[float, float]] = None
 
     def add_proxy_results(self, results: List[ProxyResult]):
         """Add proxy experiment results."""
@@ -395,18 +397,15 @@ class QuaDMixOptimizer:
         train_idx: npt.NDArray[np.int64],
         val_idx: npt.NDArray[np.int64],
     ):
-        """Train per-task LightGBM models and compute discrimination-adaptive weights."""
-        # Get task names from first result
+        """Train per-task LightGBM models with R²-adaptive weights and z-score calibration."""
         tasks = sorted(self._proxy_results[0].per_task_losses.keys())
         
-        # Prepare per-task loss arrays
         all_task_losses = {}
         for task in tasks:
             task_losses = np.array([r.per_task_losses[task] for r in self._proxy_results], dtype=np.float64)
             all_task_losses[task] = task_losses
         
-        # Filter out zero-variance tasks
-        task_variances = {task: np.var(losses) for task, losses in all_task_losses.items()}
+        task_variances = {task: np.var(tl) for task, tl in all_task_losses.items()}
         valid_tasks = {task: var for task, var in task_variances.items() if var > 1e-8}
         
         if len(valid_tasks) < len(task_variances):
@@ -417,9 +416,12 @@ class QuaDMixOptimizer:
             print("[QuaDMixOptimizer] ERROR: All tasks have zero variance, skipping per-task models")
             return
         
-        # Train per-task models
         self._per_task_models = {}
         self._per_task_r2 = {}
+        self._per_task_train_stats = {}
+        
+        train_losses = losses[train_idx]
+        self._aggregate_train_stats = (float(np.mean(train_losses)), float(np.std(train_losses)))
         
         print(f"[QuaDMixOptimizer] Training {len(valid_tasks)} per-task models...")
         
@@ -427,6 +429,11 @@ class QuaDMixOptimizer:
             task_losses = all_task_losses[task]
             task_train_losses = task_losses[train_idx]
             task_val_losses = task_losses[val_idx] if len(val_idx) > 0 else None
+            
+            self._per_task_train_stats[task] = (
+                float(np.mean(task_train_losses)),
+                float(np.std(task_train_losses)),
+            )
             
             train_params = [params_list[i] for i in train_idx]
             val_params = [params_list[i] for i in val_idx] if len(val_idx) > 0 else None
@@ -443,27 +450,38 @@ class QuaDMixOptimizer:
             
             self._per_task_models[task] = model
             
-            # Compute per-task R²
             if len(val_idx) > 0:
                 task_r2 = float(model.score(val_params, task_val_losses))
             else:
                 task_r2 = float(model.score(train_params, task_train_losses))
             self._per_task_r2[task] = task_r2
         
-        # Compute discrimination-adaptive weights (standard deviation normalization)
         task_stds = {task: np.sqrt(var) for task, var in valid_tasks.items()}
-        total_std = sum(task_stds.values())
-        self._per_task_weights = {task: std / total_std for task, std in task_stds.items()}
+        raw_weights = {}
+        for task in valid_tasks:
+            r2 = self._per_task_r2[task]
+            raw_weights[task] = max(r2, 0.0) * task_stds[task]
         
-        # Print summary
-        print(f"[QuaDMixOptimizer] Per-task models trained:")
+        total_raw = sum(raw_weights.values())
+        if total_raw < 1e-12:
+            print("[QuaDMixOptimizer] WARNING: All tasks have R²<=0, falling back to std-only weights")
+            total_std = sum(task_stds.values())
+            self._per_task_weights = {task: std / total_std for task, std in task_stds.items()}
+        else:
+            self._per_task_weights = {task: w / total_raw for task, w in raw_weights.items()}
+        
+        n_filtered = sum(1 for task in valid_tasks if self._per_task_r2[task] <= 0)
+        active_tasks = [t for t in valid_tasks if self._per_task_weights[t] > 0]
+        
+        print(f"[QuaDMixOptimizer] Per-task models trained ({len(active_tasks)} active, {n_filtered} filtered):")
         print(f"  {'Task':<30} {'R²':>8} {'Weight':>8} {'Std':>8}")
         print(f"  {'-'*54}")
         for task in sorted(valid_tasks.keys(), key=lambda t: -self._per_task_weights[t]):
             r2 = self._per_task_r2[task]
             weight = self._per_task_weights[task]
             std = task_stds[task]
-            print(f"  {task:<30} {r2:>8.4f} {weight:>8.4f} {std:>8.4f}")
+            marker = " [filtered]" if weight == 0 else ""
+            print(f"  {task:<30} {r2:>8.4f} {weight:>8.4f} {std:>8.4f}{marker}")
 
     def _compute_reliability(
         self,
@@ -588,16 +606,23 @@ class QuaDMixOptimizer:
         candidates = sampler.sample_batch(n_search)
 
         # Predict losses using per-task weighted prediction if available
-        if self._per_task_models and self._per_task_weights:
-            task_preds = {}
-            for task, model in self._per_task_models.items():
-                task_preds[task] = model.predict(candidates)
+        if self._per_task_models and self._per_task_weights and self._per_task_train_stats and self._aggregate_train_stats:
+            agg_mean, agg_std = self._aggregate_train_stats
+            z_score_sum = np.zeros(n_search)
+            active_count = 0
             
-            predicted_losses = sum(
-                self._per_task_weights[task] * task_preds[task]
-                for task in task_preds
-            )
-            print(f"[QuaDMixOptimizer] Search: per-task weighted prediction ({len(self._per_task_models)} tasks)")
+            for task, model in self._per_task_models.items():
+                w = self._per_task_weights[task]
+                if w <= 0:
+                    continue
+                task_mean, task_std = self._per_task_train_stats[task]
+                raw_pred = model.predict(candidates)
+                z_pred = (raw_pred - task_mean) / max(task_std, 1e-8)
+                z_score_sum += w * z_pred
+                active_count += 1
+            
+            predicted_losses = z_score_sum * agg_std + agg_mean
+            print(f"[QuaDMixOptimizer] Search: per-task z-score calibrated prediction ({active_count} active tasks)")
         elif hasattr(self, '_bootstrap_models') and len(self._bootstrap_models) > 0:
             all_preds = np.array([m.predict(candidates) for m in self._bootstrap_models])
             predicted_losses = np.mean(all_preds, axis=0)
@@ -655,3 +680,21 @@ class QuaDMixOptimizer:
     @property
     def n_features(self) -> Optional[int]:
         return getattr(self, "_n_features", None)
+
+    @property
+    def per_task_analysis(self) -> Optional[Dict[str, Any]]:
+        if not self._per_task_models or not self._per_task_weights or not self._per_task_r2:
+            return None
+        tasks = []
+        for task in sorted(self._per_task_weights.keys(), key=lambda t: -self._per_task_weights[t]):
+            tasks.append({
+                "name": task,
+                "r2": self._per_task_r2[task],
+                "weight": self._per_task_weights[task],
+                "std": self._per_task_train_stats[task][1] if self._per_task_train_stats else None,
+            })
+        return {
+            "tasks": tasks,
+            "n_active": sum(1 for t in tasks if t["weight"] > 0),
+            "n_filtered": sum(1 for t in tasks if t["weight"] == 0),
+        }
