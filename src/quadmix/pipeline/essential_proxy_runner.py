@@ -1207,7 +1207,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         from quadmix.core.proxy_model import ProxyModel
         from quadmix.npu.device import DeviceManager, DeviceType
         device_mgr = DeviceManager(device_type=DeviceType(device_type))
-        device = device_mgr.get_device(0)
+        device = device_mgr.get_device()
         model = ProxyModel(config=self.model_config).to(device)
         if device.type == "npu":
             model = model.to(torch.bfloat16)
