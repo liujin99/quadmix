@@ -292,7 +292,8 @@ def main():
     print(f"[Stage 2] Re-evaluation: {stage_times['stage2_reval']:.1f}s")
 
     losses = np.array([r.validation_loss for r in results])
-    print(f"  New loss stats: mean={losses.mean():.4f}, std={losses.std():.4f}, "
+    print(f"  New aggregate loss stats ({len(results)} experiments): "
+          f"mean={losses.mean():.4f}, std={losses.std():.4f}, "
           f"min={losses.min():.4f}, max={losses.max():.4f}")
 
     old_losses = np.array([m["old_val_loss"] for m in reval_meta])

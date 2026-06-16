@@ -514,7 +514,8 @@ class QuaDMixPipeline:
         stage_times["stage4_total"] = time.time() - _t_stage4
 
         losses = np.array([r.validation_loss for r in results])
-        print(f"  Loss stats: mean={losses.mean():.4f}, std={losses.std():.4f}, "
+        print(f"  Aggregate loss stats ({len(results)} experiments): "
+              f"mean={losses.mean():.4f}, std={losses.std():.4f}, "
               f"min={losses.min():.4f}, max={losses.max():.4f}")
         proxy_loss_stats = self._compute_proxy_loss_stats(results)
         return results, proxy_loss_stats
