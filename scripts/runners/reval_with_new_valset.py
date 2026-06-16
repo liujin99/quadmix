@@ -299,6 +299,23 @@ def main():
     corr = np.corrcoef(old_losses, losses)[0, 1] if len(losses) > 1 else 0
     print(f"  Correlation (old vs new): {corr:.4f}")
 
+    has_per_task = all(r.per_task_losses is not None for r in results)
+    if has_per_task:
+        tasks = sorted(results[0].per_task_losses.keys())
+        per_task_means = {}
+        per_task_stds = {}
+        for task in tasks:
+            task_losses = np.array([r.per_task_losses[task] for r in results])
+            per_task_means[task] = float(np.mean(task_losses))
+            per_task_stds[task] = float(np.std(task_losses))
+        print(f"\n  Per-task loss stats ({len(tasks)} tasks):")
+        print(f"    {'Task':<30} {'Mean':>8} {'Std':>8} {'Min':>8} {'Max':>8}")
+        print(f"    {'-'*70}")
+        for task in sorted(tasks, key=lambda t: -per_task_means[t]):
+            task_losses = np.array([r.per_task_losses[task] for r in results])
+            print(f"    {task:<30} {per_task_means[task]:>8.4f} {per_task_stds[task]:>8.4f} "
+                  f"{np.min(task_losses):>8.4f} {np.max(task_losses):>8.4f}")
+
     # Save re-evaluation results
     os.makedirs(os.path.join(output_dir, "proxy_experiments"), exist_ok=True)
     for r, rm in zip(results, reval_meta):

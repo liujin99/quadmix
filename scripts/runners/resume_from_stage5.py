@@ -91,6 +91,23 @@ def main():
     print(f"  Loss stats: mean={losses.mean():.4f}, std={losses.std():.4f}, "
           f"min={losses.min():.4f}, max={losses.max():.4f}")
 
+    has_per_task = all(r.per_task_losses is not None for r in results)
+    if has_per_task:
+        tasks = sorted(results[0].per_task_losses.keys())
+        per_task_means = {}
+        per_task_stds = {}
+        for task in tasks:
+            task_losses = np.array([r.per_task_losses[task] for r in results])
+            per_task_means[task] = float(np.mean(task_losses))
+            per_task_stds[task] = float(np.std(task_losses))
+        print(f"\n  Per-task loss stats ({len(tasks)} tasks):")
+        print(f"    {'Task':<30} {'Mean':>8} {'Std':>8} {'Min':>8} {'Max':>8}")
+        print(f"    {'-'*70}")
+        for task in sorted(tasks, key=lambda t: -per_task_means[t]):
+            task_losses = np.array([r.per_task_losses[task] for r in results])
+            print(f"    {task:<30} {per_task_means[task]:>8.4f} {per_task_stds[task]:>8.4f} "
+                  f"{np.min(task_losses):>8.4f} {np.max(task_losses):>8.4f}")
+
     n_exp = len(results)
     n_search = args.num_search
     top_k = args.top_k
