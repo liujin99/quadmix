@@ -88,7 +88,8 @@ def main():
     print(f"[Resume] Loaded {len(results)} experiment results")
 
     losses = np.array([r.validation_loss for r in results])
-    print(f"  Loss stats: mean={losses.mean():.4f}, std={losses.std():.4f}, "
+    print(f"  Aggregate loss stats ({len(results)} experiments): "
+          f"mean={losses.mean():.4f}, std={losses.std():.4f}, "
           f"min={losses.min():.4f}, max={losses.max():.4f}")
 
     has_per_task = all(r.per_task_losses is not None for r in results)
