@@ -52,7 +52,7 @@ export QUADMIX_TEMP_DIR="${QUADMIX_TEMP_DIR:-$HOME/.cache/QuaDMix/temp}"
 PREPROCESSED_DIR="$QUADMIX_TEMP_DIR/preprocessed"
 
 RESULT_DIR="$QUADMIX_DIR/result/demo_full_20260612_214550"
-VAL_SET="core_bmk_v4.2"
+VAL_SET="core_bmk_v4.3"
 VAL_PATH=""
 OUTPUT=""
 DEVICE_TYPE="npu"
