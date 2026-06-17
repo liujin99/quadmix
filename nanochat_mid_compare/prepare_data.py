@@ -223,7 +223,7 @@ def select_quality_topk(preprocessed_data_dir, quality_method, total_tokens,
 
 def main():
     parser = argparse.ArgumentParser(description="Prepare comparison datasets for nanochat mid-training")
-    parser.add_argument("--quadmix-dataset", type=str, required=True,
+    parser.add_argument("--quadmix-sampled-data", type=str, required=True,
                         help="Path to QuadMix sampled_dataset.parquet")
     parser.add_argument("--preprocessed-data-dir", type=str, required=True,
                         help="Path to preprocessed shards directory (preprocessed_*.parquet)")
@@ -294,7 +294,7 @@ def main():
             print(f"  Quality method: {m} ({QUALITY_SCORE_MAP[m]})")
 
     print(f"\n[1/6] Reading QuadMix selected dataset...")
-    quadmix_df = pd.read_parquet(args.quadmix_dataset)
+    quadmix_df = pd.read_parquet(args.quadmix_sampled_data)
     texts = quadmix_df["text"].tolist()
     valid_texts = [t for t in texts if t and len(t) >= 100]
     print(f"  Counting tokens for {len(valid_texts):,} docs...")
@@ -433,7 +433,7 @@ def main():
             "shard_size": args.shard_size,
             "val_ratio": args.val_ratio,
             "token_method": token_method,
-            "quadmix_source": args.quadmix_dataset,
+            "quadmix_source": args.quadmix_sampled_data,
             "preprocessed_source": args.preprocessed_data_dir,
             "baselines": baselines,
         }

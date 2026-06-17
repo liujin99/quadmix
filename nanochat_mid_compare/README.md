@@ -10,14 +10,14 @@
 
 ```bash
 # 两组对比 (QuadMix vs Random)
-QUADMIX_DATASET=/path/to/quadmix/result/sampled_dataset.parquet \
+QUADMIX_SAMPLED_DATA=/path/to/quadmix/result/sampled_dataset.parquet \
 PREPROCESSED_DATA_DIR=/path/to/preprocessed \
 NANOCHAT_MODEL_DIR=/path/to/.cache/nanochat \
 NANOCHAT_REPO=/path/to/nanochat-npu \
 bash nanochat_mid_compare/run_experiment.sh
 
 # 多组对比 (QuadMix vs Random vs Quality-DCLM vs Quality-FineWeb-Edu)
-QUADMIX_DATASET=/path/to/quadmix/result/sampled_dataset.parquet \
+QUADMIX_SAMPLED_DATA=/path/to/quadmix/result/sampled_dataset.parquet \
 PREPROCESSED_DATA_DIR=/path/to/preprocessed \
 QUALITY_METHODS=dclm,fineweb_edu \
 NANOCHAT_MODEL_DIR=/path/to/.cache/nanochat \
@@ -29,11 +29,11 @@ bash nanochat_mid_compare/run_experiment.sh
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `QUADMIX_DATASET` | QuadMix 输出的 `sampled_dataset.parquet` 路径 | (required) |
+| `QUADMIX_SAMPLED_DATA` | QuadMix 输出的 `sampled_dataset.parquet` 路径 | (required) |
 | `PREPROCESSED_DATA_DIR` | 预处理 shards 目录 (含质量分数，用于 Random 和 Quality baseline) | (required) |
 | `QUALITY_METHODS` | Quality baseline 的质量分数，逗号分隔 (dclm/fineweb_edu/english/math_general/math_openweb)，设为空则禁用 | `dclm,fineweb_edu` |
-| `NANOCHAT_MODEL_DIR` | nanochat 基础目录 (含 tokenizer/, base_checkpoints/) | `~/.cache/nanochat` |
-| `NANOCHAT_REPO` | nanochat-npu 仓库根目录 | `~/nanochat-npu` |
+| `NANOCHAT_MODEL_DIR` | nanochat 模型目录 (含 tokenizer/, base_checkpoints/) | `/home/ma-user/work/nanochat_model_dir` |
+| `NANOCHAT_REPO` | nanochat 代码仓库根目录 | `~/nanochat-npu` |
 | `BASE_MODEL_TAG` | 预训练 base model tag (所有实验共享) | `d24_0320` |
 | `MID_CHECKPOINTS_OUTPUT_DIR` | mid-training checkpoint 保存目录 (避免 EVS 空间不足) | `$HOME/.cache/nanochat_mid_compare/mid_checkpoints` |
 | `TARGET_PARAM_DATA_RATIO` | 目标 tokens/params 比例 (自动 cap 防止过度训练) | `0.5` |

@@ -10,11 +10,11 @@
 # Usage (after running QuaDMix pipeline, e.g. bash scripts/demo_run_full.sh):
 #   bash nanochat_mid_compare/run_experiment.sh
 #
-# QUADMIX_DATASET auto-detects the latest result/*/sampled_dataset.parquet.
+# QUADMIX_SAMPLED_DATA auto-detects the latest result/*/sampled_dataset.parquet.
 # PREPROCESSED_DATA_DIR defaults to $HOME/.cache/QuaDMix/temp/preprocessed.
 #
 # Override any config via environment variables:
-#   QUADMIX_DATASET=/path/to/sampled_dataset.parquet \
+#   QUADMIX_SAMPLED_DATA=/path/to/sampled_dataset.parquet \
 #   PREPROCESSED_DATA_DIR=/path/to/preprocessed \
 #   NANOCHAT_MODEL_DIR=/path/to/.cache/nanochat \
 #   bash nanochat_mid_compare/run_experiment.sh
@@ -27,14 +27,16 @@ set -euo pipefail
 #  CONFIGURATION — edit these or set via environment variables
 # ══════════════════════════════════════════════════════════════
 
-QUADMIX_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+QUADMIX_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 # QuadMix output: sampled_dataset.parquet from QuadMix pipeline
 # Auto-detects the latest result directory if not set
-if [ -z "${QUADMIX_DATASET:-}" ]; then
-    QUADMIX_DATASET="$(ls -t "$QUADMIX_DIR"/result/*/sampled_dataset.parquet 2>/dev/null | head -1)"
+if [ -z "${QUADMIX_SAMPLED_DATA:-}" ]; then
+    QUADMIX_SAMPLED_DATA="$(ls -t "$QUADMIX_DIR"/result/*/sampled_dataset.parquet 2>/dev/null | head -1)"
 fi
-QUADMIX_DATASET="${QUADMIX_DATASET:-}"
+QUADMIX_SAMPLED_DATA="${QUADMIX_SAMPLED_DATA:-}"
 
 # Preprocessed shards directory (preprocessed_*.parquet with quality scores)
 # Used for both random baseline and quality top-k baseline
@@ -44,8 +46,8 @@ PREPROCESSED_DATA_DIR="${PREPROCESSED_DATA_DIR:-$HOME/.cache/QuaDMix/temp/prepro
 # Options: dclm, fineweb_edu, english, math_general, math_openweb
 QUALITY_METHODS="${QUALITY_METHODS:-dclm,fineweb_edu}"
 
-# Nanochat base directory (contains tokenizer/, base_checkpoints/)
-NANOCHAT_MODEL_DIR="${NANOCHAT_MODEL_DIR:-/data/obs/dataset_bucket/c041b65b7e03a37314904ce5f3afa3b1/nanochat-model/V1}"
+# Nanochat model directory (contains tokenizer/, base_checkpoints/)
+NANOCHAT_MODEL_DIR="${NANOCHAT_MODEL_DIR:-/home/ma-user/work/nanochat_model_dir}"
 
 # Base model tag (pretrained model in $NANOCHAT_MODEL_DIR/base_checkpoints/<tag>/)
 BASE_MODEL_TAG="${BASE_MODEL_TAG:-d24_0320}"
@@ -58,8 +60,8 @@ NANOCHAT_REPO="${NANOCHAT_REPO:-/home/ma-user/work/nanochat_midtrain_326}"
 # to avoid filling up EVS storage with large checkpoint files
 MID_CHECKPOINTS_OUTPUT_DIR="${MID_CHECKPOINTS_OUTPUT_DIR:-$HOME/.cache/nanochat_mid_compare/mid_checkpoints}"
 
-# Experiment output directory (logs, data, etc.)
-EXPERIMENT_DIR="${EXPERIMENT_DIR:-$(cd "$(dirname "$0")" && pwd)/results/$(date +%Y%m%d_%H%M%S)}"
+# Experiment output directory (logs, data, reports)
+RESULT_DIR="${RESULT_DIR:-$SCRIPT_DIR/results/$TIMESTAMP}"
 
 # ── Mid-training hyperparameters ──
 # Training token budget: min(target_ratio * num_scaling_params, dataset_tokens)
@@ -91,15 +93,15 @@ RANDOM_MODEL_TAG="${RANDOM_MODEL_TAG:-}"
 #  VALIDATION
 # ══════════════════════════════════════════════════════════════
 
-if [ -z "$QUADMIX_DATASET" ]; then
-    echo "ERROR: QUADMIX_DATASET not set and no sampled_dataset.parquet found under $QUADMIX_DIR/result/"
+if [ -z "$QUADMIX_SAMPLED_DATA" ]; then
+    echo "ERROR: QUADMIX_SAMPLED_DATA not set and no sampled_dataset.parquet found under $QUADMIX_DIR/result/"
     echo "  Run the QuaDMix pipeline first (e.g. bash scripts/demo_run_full.sh),"
-    echo "  or set via: QUADMIX_DATASET=/path/to/sampled_dataset.parquet"
+    echo "  or set via: QUADMIX_SAMPLED_DATA=/path/to/sampled_dataset.parquet"
     exit 1
 fi
 
-if [ ! -f "$QUADMIX_DATASET" ]; then
-    echo "ERROR: QuadMix dataset not found: $QUADMIX_DATASET"
+if [ ! -f "$QUADMIX_SAMPLED_DATA" ]; then
+    echo "ERROR: QuadMix dataset not found: $QUADMIX_SAMPLED_DATA"
     exit 1
 fi
 
@@ -128,7 +130,6 @@ if [ ! -f "$TOKENIZER_DIR/tokenizer.pkl" ]; then
 fi
 
 # Auto-generate model tags
-TIMESTAMP=$(date +%m%d_%H%M)
 if [ -z "$QUADMIX_MODEL_TAG" ]; then
     QUADMIX_MODEL_TAG="${BASE_MODEL_TAG}_quadmix_${TIMESTAMP}"
 fi
@@ -149,7 +150,7 @@ fi
 
 export OMP_NUM_THREADS=1
 export WANDB_MODE=offline
-export NANOCHAT_MODEL_DIR
+export NANOCHAT_BASE_DIR="$NANOCHAT_MODEL_DIR"
 mkdir -p "$NANOCHAT_MODEL_DIR"
 
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
@@ -217,12 +218,12 @@ echo "════════════════════════�
 echo "  QuadMix vs Random — Nanochat Mid-Training Comparison"
 echo "════════════════════════════════════════════════════════════"
 echo ""
-echo "  QuadMix dataset:     $QUADMIX_DATASET"
+echo "  QuadMix dataset:     $QUADMIX_SAMPLED_DATA"
 echo "  Preprocessed dir:    $PREPROCESSED_DATA_DIR"
-echo "  Nanochat base dir:   $NANOCHAT_MODEL_DIR"
+echo "  Nanochat model dir:  $NANOCHAT_MODEL_DIR"
 echo "  Nanochat repo:       $NANOCHAT_REPO"
 echo "  Base model tag:      $BASE_MODEL_TAG (source for all runs)"
-echo "  Experiment output:   $EXPERIMENT_DIR"
+echo "  Experiment output:   $RESULT_DIR"
 if [ -n "$MID_CHECKPOINTS_OUTPUT_DIR" ]; then
     echo "  Mid checkpoint output: $MID_CHECKPOINTS_OUTPUT_DIR"
 fi
@@ -250,10 +251,9 @@ echo ""
 echo "════════════════════════════════════════════════════════════"
 echo ""
 
-mkdir -p "$EXPERIMENT_DIR"
+mkdir -p "$RESULT_DIR"
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-DATA_DIR="$EXPERIMENT_DIR/data"
+DATA_DIR="$RESULT_DIR/data"
 
 # ══════════════════════════════════════════════════════════════
 #  STEP 1: DATA PREPARATION
@@ -268,7 +268,7 @@ if [ -f "$DATA_DIR/dataset_stats.json" ]; then
     echo "  (Delete $DATA_DIR to regenerate)"
 else
     PREP_ARGS=(
-        --quadmix-dataset "$QUADMIX_DATASET"
+        --quadmix-sampled-data "$QUADMIX_SAMPLED_DATA"
         --preprocessed-data-dir "$PREPROCESSED_DATA_DIR"
         --output-dir "$DATA_DIR"
         --tokenizer-pkl "$TOKENIZER_DIR/tokenizer.pkl"
@@ -284,16 +284,20 @@ else
     python3 "$SCRIPT_DIR/prepare_data.py" "${PREP_ARGS[@]}"
 fi
 
-python3 -c "
-import json
-stats_path = '$DATA_DIR/dataset_stats.json'
+DATA_DIR="$DATA_DIR" BASE_MODEL_TAG="$BASE_MODEL_TAG" \
+TARGET_PARAM_DATA_RATIO="$TARGET_PARAM_DATA_RATIO" \
+NUM_SCALING_PARAMS="$NUM_SCALING_PARAMS" \
+DEVICE_BATCH_SIZE="$DEVICE_BATCH_SIZE" \
+NUM_NPU="$NUM_NPU" python3 -c "
+import os, json
+stats_path = os.path.join(os.environ['DATA_DIR'], 'dataset_stats.json')
 stats = json.load(open(stats_path))
 stats['config'].update({
-    'base_model_tag': '$BASE_MODEL_TAG',
-    'target_param_data_ratio': $TARGET_PARAM_DATA_RATIO,
-    'num_scaling_params': $NUM_SCALING_PARAMS,
-    'device_batch_size': $DEVICE_BATCH_SIZE,
-    'num_npu': $NUM_NPU,
+    'base_model_tag': os.environ['BASE_MODEL_TAG'],
+    'target_param_data_ratio': float(os.environ['TARGET_PARAM_DATA_RATIO']),
+    'num_scaling_params': int(os.environ['NUM_SCALING_PARAMS']),
+    'device_batch_size': int(os.environ['DEVICE_BATCH_SIZE']),
+    'num_npu': int(os.environ['NUM_NPU']),
 })
 with open(stats_path, 'w') as f:
     json.dump(stats, f, indent=2)
@@ -301,9 +305,9 @@ with open(stats_path, 'w') as f:
 
 echo ""
 echo "  Dataset stats:"
-python3 -c "
-import json
-stats = json.load(open('$DATA_DIR/dataset_stats.json'))
+DATA_DIR="$DATA_DIR" python3 -c "
+import os, json
+stats = json.load(open(os.path.join(os.environ['DATA_DIR'], 'dataset_stats.json')))
 q, r = stats['quadmix'], stats['random']
 method = stats['config'].get('token_method', 'unknown')
 print(f'    Token method: {method}')
@@ -386,7 +390,7 @@ run_mid_training() {
         ln -s "$BASE_CKPT_DIR" "$LINK_DIR"
     fi
 
-    cd "$NANOCHAT_REPO"
+    pushd "$NANOCHAT_REPO" > /dev/null
     python3 -m torch.distributed.run --standalone --nproc_per_node="$NUM_NPU" -m scripts.mid_train -- \
         --num-iterations="$NUM_ITERATIONS" \
         --target-param-data-ratio="$ACTUAL_RATIO" \
@@ -397,6 +401,7 @@ run_mid_training() {
         --eval-every="$EVAL_EVERY" \
         --data-dir="$DATA_PATH" \
         2>&1 | tee "$LOG_FILE"
+    popd > /dev/null
 
     if [ -L "$LINK_DIR" ]; then
         echo "    Cleaning up symlink: $LINK_DIR"
@@ -405,14 +410,19 @@ run_mid_training() {
 }
 
 STATS_FILE="$DATA_DIR/dataset_stats.json"
-QUADMIX_TOKENS=$(python3 -c "import json; print(json.load(open('$STATS_FILE'))['quadmix']['tokens'])")
-RANDOM_TOKENS=$(python3 -c "import json; print(json.load(open('$STATS_FILE'))['random']['tokens'])")
+read -r QUADMIX_TOKENS RANDOM_TOKENS < <(
+    STATS_FILE="$STATS_FILE" python3 -c "
+import os, json
+s = json.load(open(os.environ['STATS_FILE']))
+print(s['quadmix']['tokens'], s['random']['tokens'])
+"
+)
 
 echo ""
 echo "╔══ Step 3a: Mid-training on QuadMix data ══╗"
 echo ""
 
-QUADMIX_LOG="$EXPERIMENT_DIR/mid_train_quadmix.log"
+QUADMIX_LOG="$RESULT_DIR/mid_train_quadmix.log"
 run_mid_training "$QUADMIX_DATA" "$QUADMIX_MODEL_TAG" "quadmix_mid" "$QUADMIX_LOG" "$QUADMIX_TOKENS"
 
 echo ""
@@ -423,7 +433,7 @@ echo ""
 echo "╔══ Step 3b: Mid-training on Random data ══╗"
 echo ""
 
-RANDOM_LOG="$EXPERIMENT_DIR/mid_train_random.log"
+RANDOM_LOG="$RESULT_DIR/mid_train_random.log"
 run_mid_training "$RANDOM_DATA" "$RANDOM_MODEL_TAG" "random_mid" "$RANDOM_LOG" "$RANDOM_TOKENS"
 
 echo ""
@@ -438,8 +448,12 @@ if [ "$DO_QUALITY" -eq 1 ]; then
 
         QUALITY_DATA="$DATA_DIR/quality_data_${method}"
         QUALITY_MODEL_TAG="${BASE_MODEL_TAG}_quality_${method}_${TIMESTAMP}"
-        QUALITY_LOG="$EXPERIMENT_DIR/mid_train_quality_${method}.log"
-        QUALITY_TOKENS=$(python3 -c "import json; print(json.load(open('$STATS_FILE'))['quality_${method}']['tokens'])")
+        QUALITY_LOG="$RESULT_DIR/mid_train_quality_${method}.log"
+        QUALITY_TOKENS=$(STATS_FILE="$STATS_FILE" METHOD="$method" python3 -c "
+import os, json
+s = json.load(open(os.environ['STATS_FILE']))
+print(s[f'quality_{os.environ[\"METHOD\"]}']['tokens'])
+")
         run_mid_training "$QUALITY_DATA" "$QUALITY_MODEL_TAG" "quality_${method}_mid" "$QUALITY_LOG" "$QUALITY_TOKENS"
 
         echo ""
@@ -459,29 +473,30 @@ run_eval() {
 
     echo "  Evaluating: $MODEL_TAG ($MODEL_TYPE)"
 
-    cd "$NANOCHAT_REPO"
+    pushd "$NANOCHAT_REPO" > /dev/null
     python3 -m torch.distributed.run --standalone --nproc_per_node="$NUM_NPU" -m scripts.base_eval -- \
         --eval=core \
         --device-batch-size=32 \
         --model-tag="$MODEL_TAG" \
         --model-type="$MODEL_TYPE" \
         2>&1 | tee "$LOG_FILE"
+    popd > /dev/null
 }
 
 echo ""
 echo "╔══ Step 4: Evaluation ══╗"
 echo ""
 
-QUADMIX_EVAL_LOG="$EXPERIMENT_DIR/eval_quadmix.log"
+QUADMIX_EVAL_LOG="$RESULT_DIR/eval_quadmix.log"
 run_eval "$QUADMIX_MODEL_TAG" "mid" "$QUADMIX_EVAL_LOG"
 
-RANDOM_EVAL_LOG="$EXPERIMENT_DIR/eval_random.log"
+RANDOM_EVAL_LOG="$RESULT_DIR/eval_random.log"
 run_eval "$RANDOM_MODEL_TAG" "mid" "$RANDOM_EVAL_LOG"
 
 if [ "$DO_QUALITY" -eq 1 ]; then
     for method in "${QUALITY_METHOD_ARRAY[@]}"; do
         QUALITY_MODEL_TAG="${BASE_MODEL_TAG}_quality_${method}_${TIMESTAMP}"
-        QUALITY_EVAL_LOG="$EXPERIMENT_DIR/eval_quality_${method}.log"
+        QUALITY_EVAL_LOG="$RESULT_DIR/eval_quality_${method}.log"
         run_eval "$QUALITY_MODEL_TAG" "mid" "$QUALITY_EVAL_LOG"
     done
 fi
@@ -493,15 +508,13 @@ echo ""
 # ══════════════════════════════════════════════════════════════
 #  STEP 5: GENERATE REPORT
 # ══════════════════════════════════════════════════════════════
-#  STEP 5: GENERATE REPORT
-# ══════════════════════════════════════════════════════════════
 
 echo ""
 echo "╔══ Step 5: Generate experiment report ══╗"
 echo ""
 
 REPORT_ARGS=(
-    --experiment-dir "$EXPERIMENT_DIR"
+    --result-dir "$RESULT_DIR"
     --dataset-stats "$DATA_DIR/dataset_stats.json"
     --quadmix-train-log "$QUADMIX_LOG"
     --random-train-log "$RANDOM_LOG"
@@ -512,8 +525,8 @@ if [ "$DO_QUALITY" -eq 1 ]; then
     QUALITY_TRAIN_LOGS=()
     QUALITY_EVAL_LOGS=()
     for method in "${QUALITY_METHOD_ARRAY[@]}"; do
-        QUALITY_TRAIN_LOGS+=("$EXPERIMENT_DIR/mid_train_quality_${method}.log")
-        QUALITY_EVAL_LOGS+=("$EXPERIMENT_DIR/eval_quality_${method}.log")
+        QUALITY_TRAIN_LOGS+=("$RESULT_DIR/mid_train_quality_${method}.log")
+        QUALITY_EVAL_LOGS+=("$RESULT_DIR/eval_quality_${method}.log")
     done
     REPORT_ARGS+=(--quality-train-log "${QUALITY_TRAIN_LOGS[@]}")
     REPORT_ARGS+=(--quality-eval-log "${QUALITY_EVAL_LOGS[@]}")
@@ -528,14 +541,12 @@ echo ""
 #  SUMMARY
 # ══════════════════════════════════════════════════════════════
 
-MID_CKPT_ACTUAL="$MID_CHECKPOINTS_OUTPUT_DIR"
-
 echo ""
 echo "════════════════════════════════════════════════════════════"
 echo "  Experiment Complete!"
 echo "════════════════════════════════════════════════════════════"
 echo ""
-echo "  Output directory: $EXPERIMENT_DIR"
+echo "  Output directory: $RESULT_DIR"
 echo ""
 echo "  Files:"
 echo "    ├── data/                    # Training datasets"
@@ -543,7 +554,7 @@ echo "    │   ├── quadmix_data/        # QuadMix-selected shards"
 echo "    │   ├── random_data/         # Random baseline shards"
 if [ "$DO_QUALITY" -eq 1 ]; then
     for method in "${QUALITY_METHOD_ARRAY[@]}"; do
-echo "    │   ├── quality_data_${method}/  # Quality ($method) shards"
+        echo "    │   ├── quality_data_${method}/  # Quality ($method) shards"
     done
 fi
 echo "    │   └── dataset_stats.json   # Dataset statistics"
@@ -551,24 +562,24 @@ echo "    ├── mid_train_quadmix.log    # QuadMix mid-training log"
 echo "    ├── mid_train_random.log     # Random mid-training log"
 if [ "$DO_QUALITY" -eq 1 ]; then
     for method in "${QUALITY_METHOD_ARRAY[@]}"; do
-echo "    ├── mid_train_quality_${method}.log  # Quality ($method) training log"
+        echo "    ├── mid_train_quality_${method}.log  # Quality ($method) training log"
     done
 fi
 echo "    ├── eval_quadmix.log         # QuadMix evaluation log"
 echo "    ├── eval_random.log          # Random evaluation log"
 if [ "$DO_QUALITY" -eq 1 ]; then
     for method in "${QUALITY_METHOD_ARRAY[@]}"; do
-echo "    ├── eval_quality_${method}.log     # Quality ($method) evaluation log"
+        echo "    ├── eval_quality_${method}.log     # Quality ($method) evaluation log"
     done
 fi
 echo "    └── experiment_report.md     # Comparison report"
 echo ""
 echo "  Mid-training checkpoints:"
-echo "    $MID_CKPT_ACTUAL/$QUADMIX_MODEL_TAG/"
-echo "    $MID_CKPT_ACTUAL/$RANDOM_MODEL_TAG/"
+echo "    $MID_CHECKPOINTS_OUTPUT_DIR/$QUADMIX_MODEL_TAG/"
+echo "    $MID_CHECKPOINTS_OUTPUT_DIR/$RANDOM_MODEL_TAG/"
 if [ "$DO_QUALITY" -eq 1 ]; then
     for method in "${QUALITY_METHOD_ARRAY[@]}"; do
-echo "    $MID_CKPT_ACTUAL/${BASE_MODEL_TAG}_quality_${method}_${TIMESTAMP}/"
+        echo "    $MID_CHECKPOINTS_OUTPUT_DIR/${BASE_MODEL_TAG}_quality_${method}_${TIMESTAMP}/"
     done
 fi
 echo ""

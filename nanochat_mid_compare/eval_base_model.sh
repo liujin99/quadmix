@@ -22,8 +22,8 @@ set -euo pipefail
 #  CONFIGURATION
 # ══════════════════════════════════════════════════════════════
 
-# Nanochat base directory (contains tokenizer/, base_checkpoints/)
-NANOCHAT_MODEL_DIR="${NANOCHAT_MODEL_DIR:-$HOME/.cache/nanochat}"
+# Nanochat model directory (contains tokenizer/, base_checkpoints/)
+NANOCHAT_MODEL_DIR="${NANOCHAT_MODEL_DIR:-/home/ma-user/work/nanochat_model_dir}"
 
 # Base model tag (pretrained model in $NANOCHAT_MODEL_DIR/base_checkpoints/<tag>/)
 BASE_MODEL_TAG="${BASE_MODEL_TAG:-d24_0320}"
@@ -64,7 +64,7 @@ fi
 # ══════════════════════════════════════════════════════════════
 
 export OMP_NUM_THREADS=1
-export NANOCHAT_MODEL_DIR
+export NANOCHAT_BASE_DIR="$NANOCHAT_MODEL_DIR"
 mkdir -p "$NANOCHAT_MODEL_DIR"
 
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
@@ -132,7 +132,7 @@ echo "════════════════════════�
 echo "  Base Model CORE Metric Evaluation"
 echo "════════════════════════════════════════════════════════════"
 echo ""
-echo "  Nanochat base dir:   $NANOCHAT_MODEL_DIR"
+echo "  Nanochat model dir:  $NANOCHAT_MODEL_DIR"
 echo "  Nanochat repo:       $NANOCHAT_REPO"
 echo "  Base model tag:      $BASE_MODEL_TAG"
 echo "  Output directory:    $OUTPUT_DIR"

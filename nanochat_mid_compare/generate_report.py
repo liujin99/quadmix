@@ -145,7 +145,7 @@ def generate_report(args):
     lines.append("")
     lines.append(f"**Generated**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append(f"**Base Model**: `{config.get('base_model_tag', 'N/A')}`")
-    lines.append(f"**Experiment Dir**: `{args.experiment_dir}`")
+    lines.append(f"**Result Dir**: `{args.result_dir}`")
     if quality_methods:
         for m in quality_methods:
             qcol = stats.get(f"quality_{m}", {}).get("quality_column", "N/A")
@@ -273,7 +273,7 @@ def generate_report(args):
 
     report_text = "\n".join(lines)
 
-    report_path = os.path.join(args.experiment_dir, "experiment_report.md")
+    report_path = os.path.join(args.result_dir, "experiment_report.md")
     with open(report_path, "w") as f:
         f.write(report_text)
 
@@ -284,7 +284,7 @@ def generate_report(args):
 
 def main():
     parser = argparse.ArgumentParser(description="Generate mid-training experiment comparison report")
-    parser.add_argument("--experiment-dir", required=True)
+    parser.add_argument("--result-dir", required=True)
     parser.add_argument("--dataset-stats", required=True)
     parser.add_argument("--quadmix-train-log", required=True)
     parser.add_argument("--random-train-log", required=True)
