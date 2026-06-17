@@ -42,18 +42,40 @@ SAMPLING_KEYS = ["lambda", "omega", "eta", "epsilon"]
 TARGET_TASKS = ["arc_easy", "arc_challenge"]
 
 
+def find_exp_root(exp_dir: str) -> str:
+    exp_dirs = [d for d in os.listdir(exp_dir)
+                if d.startswith("exp_") and os.path.isdir(os.path.join(exp_dir, d))]
+    if exp_dirs:
+        return exp_dir
+    for sub in os.listdir(exp_dir):
+        sub_path = os.path.join(exp_dir, sub)
+        if os.path.isdir(sub_path):
+            sub_exps = [d for d in os.listdir(sub_path)
+                        if d.startswith("exp_") and os.path.isdir(os.path.join(sub_path, d))]
+            if sub_exps:
+                return sub_path
+    return exp_dir
+
+
 def load_experiments(exp_dir: str):
+    root = find_exp_root(exp_dir)
+    if root != exp_dir:
+        print(f"  Auto-detected experiment root: {root}")
     exp_dirs = sorted([
-        d for d in os.listdir(exp_dir)
-        if d.startswith("exp_") and os.path.isdir(os.path.join(exp_dir, d))
+        d for d in os.listdir(root)
+        if d.startswith("exp_") and os.path.isdir(os.path.join(root, d))
     ])
+    print(f"  Found {len(exp_dirs)} experiment directories")
 
     features = []
     all_losses = {}
+    skipped_no_meta = 0
+    skipped_no_tasks = 0
 
     for exp_name in exp_dirs:
-        meta_path = os.path.join(exp_dir, exp_name, "meta.json")
+        meta_path = os.path.join(root, exp_name, "meta.json")
         if not os.path.exists(meta_path):
+            skipped_no_meta += 1
             continue
 
         with open(meta_path) as f:
@@ -61,10 +83,17 @@ def load_experiments(exp_dir: str):
 
         per_task = meta.get("per_task_losses")
         if not per_task:
+            skipped_no_tasks += 1
             continue
 
         qw = meta.get("quality_weights", {})
         sp = meta.get("sampling_params", {})
+
+        if not qw and not sp:
+            if len(features) == 0:
+                print(f"  DEBUG: First meta.json keys: {list(meta.keys())}")
+                print(f"  DEBUG: quality_weights keys: {list(qw.keys()) if qw else 'MISSING'}")
+                print(f"  DEBUG: sampling_params keys: {list(sp.keys()) if sp else 'MISSING'}")
 
         feat = []
         for domain_name in DOMAIN_NAMES:
@@ -83,6 +112,25 @@ def load_experiments(exp_dir: str):
             if task not in all_losses:
                 all_losses[task] = []
             all_losses[task].append(loss)
+
+    if skipped_no_meta:
+        print(f"  Skipped {skipped_no_meta} experiments (no meta.json)")
+    if skipped_no_tasks:
+        print(f"  Skipped {skipped_no_tasks} experiments (no per_task_losses)")
+
+    if not features:
+        print("  ERROR: No experiments loaded!")
+        if exp_dirs:
+            sample_meta_path = os.path.join(root, exp_dirs[0], "meta.json")
+            if os.path.exists(sample_meta_path):
+                with open(sample_meta_path) as f:
+                    sample = json.load(f)
+                print(f"  DEBUG: Sample meta.json keys: {list(sample.keys())}")
+                print(f"  DEBUG: Has per_task_losses: {'per_task_losses' in sample}")
+                print(f"  DEBUG: Has quality_weights: {'quality_weights' in sample}")
+                if "quality_weights" in sample:
+                    print(f"  DEBUG: quality_weights domain keys: {list(sample['quality_weights'].keys())[:3]}...")
+        return np.array([]).reshape(0, 90), {}
 
     return np.array(features), all_losses
 
@@ -176,6 +224,9 @@ def main():
 
     print(f"Loading experiments from: {args.exp_dir}")
     X, all_losses = load_experiments(args.exp_dir)
+    if len(X) == 0:
+        print("ERROR: No experiments loaded. Exiting.")
+        sys.exit(1)
     print(f"Loaded {len(X)} experiments with {X.shape[1]} features")
 
     feature_names = build_feature_names()
