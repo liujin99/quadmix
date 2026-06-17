@@ -11,13 +11,12 @@
 #   bash nanochat_mid_compare/run_experiment.sh
 #
 # QUADMIX_DATASET auto-detects the latest result/*/sampled_dataset.parquet.
-# ESSENTIAL_WEB_DIR defaults to $HOME/.cache/QuaDMix/data.
-# PREPROCESSED_DIR defaults to $HOME/.cache/QuaDMix/temp/preprocessed.
+# PREPROCESSED_DATA_DIR defaults to $HOME/.cache/QuaDMix/temp/preprocessed.
 #
 # Override any config via environment variables:
 #   QUADMIX_DATASET=/path/to/sampled_dataset.parquet \
-#   ESSENTIAL_WEB_DIR=/path/to/essential-web-v1 \
-#   NANOCHAT_BASE_DIR=/path/to/.cache/nanochat \
+#   PREPROCESSED_DATA_DIR=/path/to/preprocessed \
+#   NANOCHAT_MODEL_DIR=/path/to/.cache/nanochat \
 #   bash nanochat_mid_compare/run_experiment.sh
 #
 # ──────────────────────────────────────────────────────────────
@@ -37,28 +36,25 @@ if [ -z "${QUADMIX_DATASET:-}" ]; then
 fi
 QUADMIX_DATASET="${QUADMIX_DATASET:-}"
 
-# Essential-web raw parquet shards directory (shard_XXXXX.parquet)
-ESSENTIAL_WEB_DIR="${ESSENTIAL_WEB_DIR:-$HOME/.cache/QuaDMix/data}"
-
-# Preprocessed shards directory (for Quality-Only Top-K baseline)
-# If not set, quality baseline is skipped
-PREPROCESSED_DIR="${PREPROCESSED_DIR:-$HOME/.cache/QuaDMix/temp/preprocessed}"
+# Preprocessed shards directory (preprocessed_*.parquet with quality scores)
+# Used for both random baseline and quality top-k baseline
+PREPROCESSED_DATA_DIR="${PREPROCESSED_DATA_DIR:-$HOME/.cache/QuaDMix/temp/preprocessed}"
 
 # Quality score methods for top-k selection (comma-separated)
 # Options: dclm, fineweb_edu, english, math_general, math_openweb
 QUALITY_METHODS="${QUALITY_METHODS:-dclm,fineweb_edu}"
 
 # Nanochat base directory (contains tokenizer/, base_checkpoints/)
-NANOCHAT_BASE_DIR="${NANOCHAT_BASE_DIR:-/data/obs/dataset_bucket/c041b65b7e03a37314904ce5f3afa3b1/nanochat-model/V1}"
+NANOCHAT_MODEL_DIR="${NANOCHAT_MODEL_DIR:-/data/obs/dataset_bucket/c041b65b7e03a37314904ce5f3afa3b1/nanochat-model/V1}"
 
-# Base model tag (pretrained model in $NANOCHAT_BASE_DIR/base_checkpoints/<tag>/)
+# Base model tag (pretrained model in $NANOCHAT_MODEL_DIR/base_checkpoints/<tag>/)
 BASE_MODEL_TAG="${BASE_MODEL_TAG:-d24_0320}"
 
 # Nanochat repo root
-NANOCHAT_ROOT="${NANOCHAT_ROOT:-/home/ma-user/work/nanochat_midtrain_326}"
+NANOCHAT_REPO="${NANOCHAT_REPO:-/home/ma-user/work/nanochat_midtrain_326}"
 
 # Mid-training checkpoint output directory (where trained models are saved)
-# If set, $NANOCHAT_BASE_DIR/mid_checkpoints will be symlinked here
+# If set, $NANOCHAT_MODEL_DIR/mid_checkpoints will be symlinked here
 # to avoid filling up EVS storage with large checkpoint files
 MID_CHECKPOINTS_OUTPUT_DIR="${MID_CHECKPOINTS_OUTPUT_DIR:-$HOME/.cache/nanochat_mid_compare/mid_checkpoints}"
 
@@ -107,24 +103,25 @@ if [ ! -f "$QUADMIX_DATASET" ]; then
     exit 1
 fi
 
-if [ ! -d "$ESSENTIAL_WEB_DIR" ]; then
-    echo "ERROR: Essential-web directory not found: $ESSENTIAL_WEB_DIR"
+if [ ! -d "$PREPROCESSED_DATA_DIR" ]; then
+    echo "ERROR: Preprocessed directory not found: $PREPROCESSED_DATA_DIR"
+    echo "  Set via: PREPROCESSED_DATA_DIR=/path/to/preprocessed"
     exit 1
 fi
 
-if [ ! -d "$NANOCHAT_ROOT" ]; then
-    echo "ERROR: Nanochat repo not found: $NANOCHAT_ROOT"
-    echo "  Set via: NANOCHAT_ROOT=/path/to/nanochat-npu"
+if [ ! -d "$NANOCHAT_REPO" ]; then
+    echo "ERROR: Nanochat repo not found: $NANOCHAT_REPO"
+    echo "  Set via: NANOCHAT_REPO=/path/to/nanochat-npu"
     exit 1
 fi
 
-BASE_CKPT_DIR="$NANOCHAT_BASE_DIR/base_checkpoints/$BASE_MODEL_TAG"
+BASE_CKPT_DIR="$NANOCHAT_MODEL_DIR/base_checkpoints/$BASE_MODEL_TAG"
 if [ ! -d "$BASE_CKPT_DIR" ]; then
     echo "ERROR: Base model checkpoint not found: $BASE_CKPT_DIR"
     exit 1
 fi
 
-TOKENIZER_DIR="$NANOCHAT_BASE_DIR/tokenizer"
+TOKENIZER_DIR="$NANOCHAT_MODEL_DIR/tokenizer"
 if [ ! -f "$TOKENIZER_DIR/tokenizer.pkl" ]; then
     echo "ERROR: Tokenizer not found: $TOKENIZER_DIR/tokenizer.pkl"
     exit 1
@@ -142,14 +139,8 @@ fi
 IFS=',' read -ra QUALITY_METHOD_ARRAY <<< "$QUALITY_METHODS"
 
 DO_QUALITY=0
-if [ -n "$PREPROCESSED_DIR" ]; then
-    if [ ! -d "$PREPROCESSED_DIR" ]; then
-        echo "WARNING: PREPROCESSED_DIR set but not found: $PREPROCESSED_DIR"
-        echo "  Quality baseline will be skipped."
-        PREPROCESSED_DIR=""
-    else
-        DO_QUALITY=1
-    fi
+if [ -n "$QUALITY_METHODS" ]; then
+    DO_QUALITY=1
 fi
 
 # ══════════════════════════════════════════════════════════════
@@ -158,8 +149,8 @@ fi
 
 export OMP_NUM_THREADS=1
 export WANDB_MODE=offline
-export NANOCHAT_BASE_DIR
-mkdir -p "$NANOCHAT_BASE_DIR"
+export NANOCHAT_MODEL_DIR
+mkdir -p "$NANOCHAT_MODEL_DIR"
 
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 
@@ -227,19 +218,18 @@ echo "  QuadMix vs Random — Nanochat Mid-Training Comparison"
 echo "════════════════════════════════════════════════════════════"
 echo ""
 echo "  QuadMix dataset:     $QUADMIX_DATASET"
-echo "  Essential-web dir:   $ESSENTIAL_WEB_DIR"
-echo "  Nanochat base dir:   $NANOCHAT_BASE_DIR"
-echo "  Nanochat repo:       $NANOCHAT_ROOT"
+echo "  Preprocessed dir:    $PREPROCESSED_DATA_DIR"
+echo "  Nanochat base dir:   $NANOCHAT_MODEL_DIR"
+echo "  Nanochat repo:       $NANOCHAT_REPO"
 echo "  Base model tag:      $BASE_MODEL_TAG (source for all runs)"
 echo "  Experiment output:   $EXPERIMENT_DIR"
 if [ -n "$MID_CHECKPOINTS_OUTPUT_DIR" ]; then
     echo "  Mid checkpoint output: $MID_CHECKPOINTS_OUTPUT_DIR"
 fi
 if [ "$DO_QUALITY" -eq 1 ]; then
-    echo "  Preprocessed dir:    $PREPROCESSED_DIR"
     echo "  Quality methods:     ${QUALITY_METHOD_ARRAY[*]}"
 else
-    echo "  Quality baseline:    DISABLED (set PREPROCESSED_DIR to enable)"
+    echo "  Quality baseline:    DISABLED (set QUALITY_METHODS to enable)"
 fi
 echo ""
 echo "  Mid-training config:"
@@ -279,7 +269,7 @@ if [ -f "$DATA_DIR/dataset_stats.json" ]; then
 else
     PREP_ARGS=(
         --quadmix-dataset "$QUADMIX_DATASET"
-        --essential-web-dir "$ESSENTIAL_WEB_DIR"
+        --preprocessed-data-dir "$PREPROCESSED_DATA_DIR"
         --output-dir "$DATA_DIR"
         --tokenizer-pkl "$TOKENIZER_DIR/tokenizer.pkl"
         --shard-size "$SHARD_SIZE"
@@ -289,7 +279,7 @@ else
         --num-npu "$NUM_NPU"
     )
     if [ "$DO_QUALITY" -eq 1 ]; then
-        PREP_ARGS+=(--preprocessed-dir "$PREPROCESSED_DIR" --quality-method "$QUALITY_METHODS")
+        PREP_ARGS+=(--quality-method "$QUALITY_METHODS")
     fi
     python3 "$SCRIPT_DIR/prepare_data.py" "${PREP_ARGS[@]}"
 fi
@@ -340,7 +330,7 @@ if [ -n "$MID_CHECKPOINTS_OUTPUT_DIR" ]; then
     echo ""
 
     mkdir -p "$MID_CHECKPOINTS_OUTPUT_DIR"
-    LINK_PATH="$NANOCHAT_BASE_DIR/mid_checkpoints"
+    LINK_PATH="$NANOCHAT_MODEL_DIR/mid_checkpoints"
 
     if [ -L "$LINK_PATH" ]; then
         echo "  Symlink already exists: $LINK_PATH -> $(readlink "$LINK_PATH")"
@@ -388,15 +378,15 @@ run_mid_training() {
     echo "    Steps:      $NUM_ITERATIONS"
     echo "    Log:        $LOG_FILE"
 
-    local BASE_CKPT_DIR="$NANOCHAT_BASE_DIR/base_checkpoints/$BASE_MODEL_TAG"
-    local LINK_DIR="$NANOCHAT_BASE_DIR/base_checkpoints/$MODEL_TAG"
+    local BASE_CKPT_DIR="$NANOCHAT_MODEL_DIR/base_checkpoints/$BASE_MODEL_TAG"
+    local LINK_DIR="$NANOCHAT_MODEL_DIR/base_checkpoints/$MODEL_TAG"
 
     if [ ! -e "$LINK_DIR" ]; then
         echo "    Creating symlink: $LINK_DIR -> $BASE_CKPT_DIR"
         ln -s "$BASE_CKPT_DIR" "$LINK_DIR"
     fi
 
-    cd "$NANOCHAT_ROOT"
+    cd "$NANOCHAT_REPO"
     python3 -m torch.distributed.run --standalone --nproc_per_node="$NUM_NPU" -m scripts.mid_train -- \
         --num-iterations="$NUM_ITERATIONS" \
         --target-param-data-ratio="$ACTUAL_RATIO" \
@@ -469,7 +459,7 @@ run_eval() {
 
     echo "  Evaluating: $MODEL_TAG ($MODEL_TYPE)"
 
-    cd "$NANOCHAT_ROOT"
+    cd "$NANOCHAT_REPO"
     python3 -m torch.distributed.run --standalone --nproc_per_node="$NUM_NPU" -m scripts.base_eval -- \
         --eval=core \
         --device-batch-size=32 \

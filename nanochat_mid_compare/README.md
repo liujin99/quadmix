@@ -11,18 +11,17 @@
 ```bash
 # 两组对比 (QuadMix vs Random)
 QUADMIX_DATASET=/path/to/quadmix/result/sampled_dataset.parquet \
-ESSENTIAL_WEB_DIR=/path/to/essential-web-v1 \
-NANOCHAT_BASE_DIR=/path/to/.cache/nanochat \
-NANOCHAT_ROOT=/path/to/nanochat-npu \
+PREPROCESSED_DATA_DIR=/path/to/preprocessed \
+NANOCHAT_MODEL_DIR=/path/to/.cache/nanochat \
+NANOCHAT_REPO=/path/to/nanochat-npu \
 bash nanochat_mid_compare/run_experiment.sh
 
 # 多组对比 (QuadMix vs Random vs Quality-DCLM vs Quality-FineWeb-Edu)
 QUADMIX_DATASET=/path/to/quadmix/result/sampled_dataset.parquet \
-ESSENTIAL_WEB_DIR=/path/to/essential-web-v1 \
-PREPROCESSED_DIR=/path/to/preprocessed \
+PREPROCESSED_DATA_DIR=/path/to/preprocessed \
 QUALITY_METHODS=dclm,fineweb_edu \
-NANOCHAT_BASE_DIR=/path/to/.cache/nanochat \
-NANOCHAT_ROOT=/path/to/nanochat-npu \
+NANOCHAT_MODEL_DIR=/path/to/.cache/nanochat \
+NANOCHAT_REPO=/path/to/nanochat-npu \
 bash nanochat_mid_compare/run_experiment.sh
 ```
 
@@ -31,11 +30,10 @@ bash nanochat_mid_compare/run_experiment.sh
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `QUADMIX_DATASET` | QuadMix 输出的 `sampled_dataset.parquet` 路径 | (required) |
-| `ESSENTIAL_WEB_DIR` | essential-web 原始 parquet shards 目录 | (required) |
-| `PREPROCESSED_DIR` | 预处理 shards 目录 (含质量分数，用于 Quality baseline) | (optional) |
-| `QUALITY_METHODS` | Quality baseline 的质量分数，逗号分隔 (dclm/fineweb_edu/english/math_general/math_openweb) | `dclm,fineweb_edu` |
-| `NANOCHAT_BASE_DIR` | nanochat 基础目录 (含 tokenizer/, base_checkpoints/) | `~/.cache/nanochat` |
-| `NANOCHAT_ROOT` | nanochat-npu 仓库根目录 | `~/nanochat-npu` |
+| `PREPROCESSED_DATA_DIR` | 预处理 shards 目录 (含质量分数，用于 Random 和 Quality baseline) | (required) |
+| `QUALITY_METHODS` | Quality baseline 的质量分数，逗号分隔 (dclm/fineweb_edu/english/math_general/math_openweb)，设为空则禁用 | `dclm,fineweb_edu` |
+| `NANOCHAT_MODEL_DIR` | nanochat 基础目录 (含 tokenizer/, base_checkpoints/) | `~/.cache/nanochat` |
+| `NANOCHAT_REPO` | nanochat-npu 仓库根目录 | `~/nanochat-npu` |
 | `BASE_MODEL_TAG` | 预训练 base model tag (所有实验共享) | `d24_0320` |
 | `MID_CHECKPOINTS_OUTPUT_DIR` | mid-training checkpoint 保存目录 (避免 EVS 空间不足) | `$HOME/.cache/nanochat_mid_compare/mid_checkpoints` |
 | `TARGET_PARAM_DATA_RATIO` | 目标 tokens/params 比例 (自动 cap 防止过度训练) | `0.5` |
@@ -84,7 +82,7 @@ num_iterations = actual_tokens / total_batch_size (524288)
 Quality Top-K 是论文 Table 1 中的重要对比基线，用于验证 QuadMix 的 quality+diversity 联合优化是否优于纯质量筛选。
 
 **实现方式**（支持多个质量分数同时对比）：
-1. 扫描 preprocessed shards，读取指定质量分数列
+1. 扫描 `PREPROCESSED_DATA_DIR` 中的 preprocessed shards，读取指定质量分数列
 2. 按质量分数降序排序所有文档
 3. 贪心选择 top-k 文档直到累计 token 数达到 QuadMix 的 token 总量
 4. 使用 nanochat tokenizer 精确计算 token 数并裁剪对齐
@@ -108,10 +106,10 @@ Quality Top-K 是论文 Table 1 中的重要对比基线，用于验证 QuadMix 
 1. prepare_data.py
    ├── 读取 QuadMix sampled_dataset.parquet
    ├── 使用 nanochat tokenizer 精确计算 token 数
-   ├── 从 essential-web 随机抽样等 token 数文档
-    ├── (可选) 从 preprocessed shards 按多个质量分数分别选 top-k 文档
-    ├── val_ratio=0 时全量训练 (写 dummy val shard 兼容 dataloader)
-    └── 输出 2+N 组 sharded parquet (text column only)
+   ├── 从 preprocessed shards 随机抽样等 token 数文档
+   ├── (可选) 从 preprocessed shards 按多个质量分数分别选 top-k 文档
+   ├── val_ratio=0 时全量训练 (写 dummy val shard 兼容 dataloader)
+   └── 输出 2+N 组 sharded parquet (text column only)
 
 2. 设置 checkpoint 输出目录 (可选 symlink 到大容量存储，通过 MID_CHECKPOINTS_OUTPUT_DIR)
 
@@ -163,4 +161,4 @@ bash nanochat_mid_compare/eval_base_model.sh
 - mid-training 从同一 base model checkpoint 出发（通过 symlink）
 - 不复制 base checkpoint，节省磁盘空间（symlink 方式）
 - `MID_CHECKPOINTS_OUTPUT_DIR` 可指向大容量存储，训练完成后 checkpoint 保存在此
-- Quality baseline 可选：设置 `PREPROCESSED_DIR` 即可启用，`QUALITY_METHODS` 支持逗号分隔多个方法（默认 `dclm,fineweb_edu`，对应论文 Table 1 的两个 quality-only baseline）
+- Quality baseline 可选：设置 `QUALITY_METHODS` 即可启用（默认 `dclm,fineweb_edu`），设为空则禁用。`QUALITY_METHODS` 支持逗号分隔多个方法（对应论文 Table 1 的 quality-only baseline）

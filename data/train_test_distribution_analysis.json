@@ -1,0 +1,140 @@
+[
+  {
+    "task": "agi_eval_lsat_ar",
+    "status": "no_hf_dataset",
+    "recommendation": "skip"
+  },
+  {
+    "task": "arc_challenge",
+    "status": "ok",
+    "train_samples": 1119,
+    "test_samples": 299,
+    "diff_score": 0.14598701404006081,
+    "recommendation": "merge_with_caution"
+  },
+  {
+    "task": "arc_easy",
+    "status": "ok",
+    "train_samples": 2251,
+    "test_samples": 570,
+    "diff_score": 0.12927186070022692,
+    "recommendation": "merge_with_caution"
+  },
+  {
+    "task": "bigbench_cs_algorithms",
+    "status": "no_hf_dataset",
+    "recommendation": "skip"
+  },
+  {
+    "task": "bigbench_dyck_languages",
+    "status": "no_hf_dataset",
+    "recommendation": "skip"
+  },
+  {
+    "task": "bigbench_language_identification",
+    "status": "no_hf_dataset",
+    "recommendation": "skip"
+  },
+  {
+    "task": "bigbench_operators",
+    "status": "no_hf_dataset",
+    "recommendation": "skip"
+  },
+  {
+    "task": "bigbench_qa_wikidata",
+    "status": "no_hf_dataset",
+    "recommendation": "skip"
+  },
+  {
+    "task": "bigbench_repeat_copy_logic",
+    "status": "no_hf_dataset",
+    "recommendation": "skip"
+  },
+  {
+    "task": "boolq",
+    "status": "ok",
+    "train_samples": 9427,
+    "test_samples": 3270,
+    "diff_score": 0.17692322302175909,
+    "recommendation": "merge_with_caution"
+  },
+  {
+    "task": "commonsense_qa",
+    "status": "ok",
+    "train_samples": 9741,
+    "test_samples": 1221,
+    "diff_score": 0.2687654128199756,
+    "recommendation": "merge_with_caution"
+  },
+  {
+    "task": "copa",
+    "status": "ok",
+    "train_samples": 400,
+    "test_samples": 100,
+    "diff_score": 0.10561307345293383,
+    "recommendation": "merge_with_caution"
+  },
+  {
+    "task": "coqa",
+    "status": "ok",
+    "train_samples": 7199,
+    "test_samples": 500,
+    "diff_score": 0.38226399904142255,
+    "recommendation": "keep_separate"
+  },
+  {
+    "task": "hellaswag_zeroshot",
+    "status": "ok",
+    "train_samples": 39905,
+    "test_samples": 10042,
+    "diff_score": 0.18377434277043797,
+    "recommendation": "merge_with_caution"
+  },
+  {
+    "task": "jeopardy",
+    "status": "no_hf_dataset",
+    "recommendation": "skip"
+  },
+  {
+    "task": "lambada_openai",
+    "status": "error",
+    "error": "Dataset 'lambada_openai' doesn't exist on the Hub or cannot be accessed.",
+    "recommendation": "skip"
+  },
+  {
+    "task": "openbook_qa",
+    "status": "ok",
+    "train_samples": 4957,
+    "test_samples": 500,
+    "diff_score": 0.26614976792785644,
+    "recommendation": "merge_with_caution"
+  },
+  {
+    "task": "piqa",
+    "status": "error",
+    "error": "Dataset scripts are no longer supported, but found piqa.py",
+    "recommendation": "skip"
+  },
+  {
+    "task": "squad",
+    "status": "ok",
+    "train_samples": 87599,
+    "test_samples": 10570,
+    "diff_score": 0.32288144061253005,
+    "recommendation": "keep_separate"
+  },
+  {
+    "task": "winograd",
+    "status": "error",
+    "error": "Dataset scripts are no longer supported, but found winograd_wsc.py",
+    "recommendation": "skip"
+  },
+  {
+    "task": "winogrande",
+    "status": "ok",
+    "train_samples": 40398,
+    "test_samples": 1267,
+    "diff_score": 1.157249716125539,
+    "recommendation": "keep_separate"
+  }
+]

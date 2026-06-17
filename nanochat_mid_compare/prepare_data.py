@@ -1,7 +1,7 @@
 """
 Prepare nanochat-compatible training datasets for comparison:
-  1. QuadMix-selected subset from essential-web
-  2. Random subset from essential-web (token-count aligned)
+  1. QuadMix-selected subset
+  2. Random subset from preprocessed shards (token-count aligned)
   3. Quality-Only Top-K subsets (token-count aligned, optional, multiple methods)
 
 All datasets are written as sharded parquet files with a single "text" column,
@@ -10,10 +10,9 @@ compatible with nanochat's dataloader (last shard = validation).
 Usage:
     python prepare_data.py \
         --quadmix-dataset /path/to/sampled_dataset.parquet \
-        --essential-web-dir /path/to/essential-web-v1 \
+        --preprocessed-data-dir /path/to/preprocessed \
         --output-dir /path/to/experiment/data \
         --tokenizer-pkl /path/to/nanochat/tokenizer/tokenizer.pkl \
-        [--preprocessed-dir /path/to/preprocessed] \
         [--quality-method dclm,fineweb_edu] \
         [--shard-size 10000] \
         [--val-ratio 0.05] \
@@ -90,34 +89,6 @@ def estimate_tokens(text):
     return len(text) // 4
 
 
-def _scan_shard_metadata(shard_path):
-    df = pq.read_table(shard_path, columns=["text"]).to_pandas()
-    texts = df["text"].tolist() if "text" in df.columns else []
-    valid_indices = [i for i, t in enumerate(texts) if t and len(t) >= 100]
-    char_counts = [len(texts[i]) for i in valid_indices]
-    return [(i, c) for i, c in zip(valid_indices, char_counts)]
-
-
-def _scan_shard_metadata_indexed(args):
-    idx, shard_path = args
-    return idx, _scan_shard_metadata(shard_path)
-
-
-def scan_shards_metadata(shard_paths, num_workers=None):
-    if num_workers is None:
-        num_workers = min(mp.cpu_count() // 4, 32) or 1
-    tasks = [(i, str(p)) for i, p in enumerate(shard_paths)]
-    with mp.Pool(num_workers) as pool:
-        results = [None] * len(shard_paths)
-        for idx, docs in tqdm(
-            pool.imap_unordered(_scan_shard_metadata_indexed, tasks, chunksize=1),
-            total=len(tasks),
-            desc=f"  Scanning metadata ({num_workers} processes)",
-        ):
-            results[idx] = docs
-    return results
-
-
 def _read_docs_from_shard(args):
     shard_path, doc_indices = args
     table = pq.read_table(shard_path, columns=["text"])
@@ -155,12 +126,12 @@ def _scan_preprocessed_shard_indexed(args):
     return idx, valid
 
 
-def scan_preprocessed_shards(preprocessed_dir, num_workers=None):
+def scan_preprocessed_shards(preprocessed_data_dir, num_workers=None):
     if num_workers is None:
         num_workers = min(mp.cpu_count() // 4, 32) or 1
-    shard_files = sorted(Path(preprocessed_dir).glob("preprocessed_*.parquet"))
+    shard_files = sorted(Path(preprocessed_data_dir).glob("preprocessed_*.parquet"))
     if not shard_files:
-        raise FileNotFoundError(f"No preprocessed_*.parquet files found in {preprocessed_dir}")
+        raise FileNotFoundError(f"No preprocessed_*.parquet files found in {preprocessed_data_dir}")
     tasks = [(i, str(p)) for i, p in enumerate(shard_files)]
     with mp.Pool(num_workers) as pool:
         results = [None] * len(shard_files)
@@ -191,12 +162,12 @@ def trim_docs_to_target(docs, target_tokens):
     return trimmed, trim_tokens
 
 
-def select_quality_topk(preprocessed_dir, quality_method, total_tokens,
+def select_quality_topk(preprocessed_data_dir, quality_method, total_tokens,
                         tokenizer_pkl=None, num_workers=None, enc=None):
     quality_col = QUALITY_SCORE_MAP[quality_method]
     print(f"  Scanning preprocessed shards...")
     prep_files, prep_metadata = scan_preprocessed_shards(
-        preprocessed_dir, num_workers=num_workers)
+        preprocessed_data_dir, num_workers=num_workers)
     print(f"  Found {len(prep_files)} preprocessed shards")
 
     print(f"  Reading quality scores ({quality_col})...")
@@ -254,15 +225,13 @@ def main():
     parser = argparse.ArgumentParser(description="Prepare comparison datasets for nanochat mid-training")
     parser.add_argument("--quadmix-dataset", type=str, required=True,
                         help="Path to QuadMix sampled_dataset.parquet")
-    parser.add_argument("--essential-web-dir", type=str, required=True,
-                        help="Path to essential-web-v1 raw parquet shards directory")
+    parser.add_argument("--preprocessed-data-dir", type=str, required=True,
+                        help="Path to preprocessed shards directory (preprocessed_*.parquet)")
     parser.add_argument("--output-dir", type=str, required=True,
                         help="Output directory for the datasets")
     parser.add_argument("--tokenizer-pkl", type=str, default=None,
                         help="Path to nanochat tokenizer.pkl for accurate token counting. "
                              "Falls back to char_count//4 if not provided.")
-    parser.add_argument("--preprocessed-dir", type=str, default=None,
-                        help="Path to preprocessed shards directory (for quality baseline)")
     parser.add_argument("--quality-method", type=str, default="dclm",
                         help="Comma-separated quality score methods for top-k selection. "
                              f"Options: {', '.join(QUALITY_SCORE_MAP.keys())} (default: dclm)")
@@ -292,10 +261,10 @@ def main():
         if m not in QUALITY_SCORE_MAP:
             print(f"ERROR: Unknown quality method '{m}'. Options: {', '.join(QUALITY_SCORE_MAP.keys())}")
             sys.exit(1)
-    do_quality = args.preprocessed_dir is not None and len(quality_methods) > 0
+    do_quality = len(quality_methods) > 0
 
-    if do_quality and not os.path.isdir(args.preprocessed_dir):
-        print(f"ERROR: Preprocessed directory not found: {args.preprocessed_dir}")
+    if not os.path.isdir(args.preprocessed_data_dir):
+        print(f"ERROR: Preprocessed directory not found: {args.preprocessed_data_dir}")
         sys.exit(1)
 
     output_dir = Path(args.output_dir)
@@ -342,15 +311,14 @@ def main():
     print(f"  QuadMix docs: {len(quadmix_docs):,}")
     print(f"  Tokens ({token_method}): {total_tokens:,}")
 
-    print(f"\n[2/6] Scanning essential-web shards metadata...")
-    shard_files = sorted(Path(args.essential_web_dir).glob("shard_*.parquet"))
-    shard_files = shard_files[:args.max_random_scan]
-    print(f"  Scanning {len(shard_files)} shards (metadata only)...")
-
-    shard_metadata = scan_shards_metadata(shard_files, num_workers=args.num_workers)
+    print(f"\n[2/6] Scanning preprocessed shards metadata...")
+    prep_files, prep_metadata = scan_preprocessed_shards(args.preprocessed_data_dir, num_workers=args.num_workers)
+    prep_files = prep_files[:args.max_random_scan]
+    prep_metadata = prep_metadata[:args.max_random_scan]
+    print(f"  Scanning {len(prep_files)} shards (metadata only)...")
 
     all_candidates = []
-    for shard_id, docs in enumerate(shard_metadata):
+    for shard_id, docs in enumerate(prep_metadata):
         for doc_id, char_count in docs:
             all_candidates.append((shard_id, doc_id, char_count // 4))
     print(f"  Total candidate docs: {len(all_candidates):,}")
@@ -368,7 +336,7 @@ def main():
     print(f"  Selected {len(selected):,} docs (estimated ~{accumulated_tokens:,} tokens, with 10% buffer)")
 
     print(f"\n[3.5/6] Reading selected documents...")
-    random_docs = read_docs_from_shards(shard_files, selected, num_workers=args.num_workers,
+    random_docs = read_docs_from_shards(prep_files, selected, num_workers=args.num_workers,
                                         desc=f"  Reading random docs ({args.num_workers or 'auto'} processes)")
 
     if enc and args.tokenizer_pkl:
@@ -393,11 +361,11 @@ def main():
         for mi, method in enumerate(quality_methods):
             print(f"\n[4.{mi+1}/6] Quality-Only Top-K selection ({method})...")
             q_docs, q_tokens = select_quality_topk(
-                args.preprocessed_dir, method, total_tokens,
+                args.preprocessed_data_dir, method, total_tokens,
                 tokenizer_pkl=args.tokenizer_pkl, num_workers=args.num_workers, enc=enc)
             quality_datasets[method] = (q_docs, q_tokens)
     else:
-        print(f"\n[4/6] Quality baseline skipped (no --preprocessed-dir)")
+        print(f"\n[4/6] Quality baseline skipped (no quality methods specified)")
 
     print(f"\n[5/6] Splitting train/val (val_ratio={args.val_ratio})...")
     n_val = int(len(quadmix_docs) * args.val_ratio) if args.val_ratio > 0 else 0
@@ -466,12 +434,11 @@ def main():
             "val_ratio": args.val_ratio,
             "token_method": token_method,
             "quadmix_source": args.quadmix_dataset,
-            "essential_web_source": args.essential_web_dir,
+            "preprocessed_source": args.preprocessed_data_dir,
             "baselines": baselines,
         }
     }
     if quality_trains:
-        stats["config"]["preprocessed_source"] = args.preprocessed_dir
         stats["config"]["quality_methods"] = quality_methods
         for m, qt in quality_trains.items():
             stats[f"quality_{m}"] = {
