@@ -7,10 +7,14 @@
 #   1. QuadMix-selected subset from essential-web
 #   2. Random subset from essential-web (token-count aligned)
 #
-# Usage:
+# Usage (after running QuaDMix pipeline, e.g. bash scripts/demo_run_full.sh):
 #   bash nanochat_mid_compare/run_experiment.sh
 #
-# Or override config via environment variables:
+# QUADMIX_DATASET auto-detects the latest result/*/sampled_dataset.parquet.
+# ESSENTIAL_WEB_DIR defaults to $HOME/.cache/QuaDMix/data.
+# PREPROCESSED_DIR defaults to $HOME/.cache/QuaDMix/temp/preprocessed.
+#
+# Override any config via environment variables:
 #   QUADMIX_DATASET=/path/to/sampled_dataset.parquet \
 #   ESSENTIAL_WEB_DIR=/path/to/essential-web-v1 \
 #   NANOCHAT_BASE_DIR=/path/to/.cache/nanochat \
@@ -24,28 +28,34 @@ set -euo pipefail
 #  CONFIGURATION — edit these or set via environment variables
 # ══════════════════════════════════════════════════════════════
 
+QUADMIX_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
 # QuadMix output: sampled_dataset.parquet from QuadMix pipeline
+# Auto-detects the latest result directory if not set
+if [ -z "${QUADMIX_DATASET:-}" ]; then
+    QUADMIX_DATASET="$(ls -t "$QUADMIX_DIR"/result/*/sampled_dataset.parquet 2>/dev/null | head -1)"
+fi
 QUADMIX_DATASET="${QUADMIX_DATASET:-}"
 
 # Essential-web raw parquet shards directory (shard_XXXXX.parquet)
-ESSENTIAL_WEB_DIR="${ESSENTIAL_WEB_DIR:-}"
+ESSENTIAL_WEB_DIR="${ESSENTIAL_WEB_DIR:-$HOME/.cache/QuaDMix/data}"
 
 # Preprocessed shards directory (for Quality-Only Top-K baseline)
 # If not set, quality baseline is skipped
-PREPROCESSED_DIR="${PREPROCESSED_DIR:-}"
+PREPROCESSED_DIR="${PREPROCESSED_DIR:-$HOME/.cache/QuaDMix/temp/preprocessed}"
 
 # Quality score methods for top-k selection (comma-separated)
 # Options: dclm, fineweb_edu, english, math_general, math_openweb
 QUALITY_METHODS="${QUALITY_METHODS:-dclm,fineweb_edu}"
 
 # Nanochat base directory (contains tokenizer/, base_checkpoints/)
-NANOCHAT_BASE_DIR="${NANOCHAT_BASE_DIR:-$HOME/.cache/nanochat}"
+NANOCHAT_BASE_DIR="${NANOCHAT_BASE_DIR:-/data/obs/dataset_bucket/c041b65b7e03a37314904ce5f3afa3b1/nanochat-model/V1}"
 
 # Base model tag (pretrained model in $NANOCHAT_BASE_DIR/base_checkpoints/<tag>/)
 BASE_MODEL_TAG="${BASE_MODEL_TAG:-d24_0320}"
 
 # Nanochat repo root
-NANOCHAT_ROOT="${NANOCHAT_ROOT:-$HOME/nanochat-npu}"
+NANOCHAT_ROOT="${NANOCHAT_ROOT:-/home/ma-user/work/nanochat_midtrain_326}"
 
 # Mid-training checkpoint output directory (where trained models are saved)
 # If set, $NANOCHAT_BASE_DIR/mid_checkpoints will be symlinked here
@@ -86,14 +96,9 @@ RANDOM_MODEL_TAG="${RANDOM_MODEL_TAG:-}"
 # ══════════════════════════════════════════════════════════════
 
 if [ -z "$QUADMIX_DATASET" ]; then
-    echo "ERROR: QUADMIX_DATASET not set."
-    echo "  Set via: QUADMIX_DATASET=/path/to/sampled_dataset.parquet"
-    exit 1
-fi
-
-if [ -z "$ESSENTIAL_WEB_DIR" ]; then
-    echo "ERROR: ESSENTIAL_WEB_DIR not set."
-    echo "  Set via: ESSENTIAL_WEB_DIR=/path/to/essential-web-v1"
+    echo "ERROR: QUADMIX_DATASET not set and no sampled_dataset.parquet found under $QUADMIX_DIR/result/"
+    echo "  Run the QuaDMix pipeline first (e.g. bash scripts/demo_run_full.sh),"
+    echo "  or set via: QUADMIX_DATASET=/path/to/sampled_dataset.parquet"
     exit 1
 fi
 

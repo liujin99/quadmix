@@ -66,7 +66,7 @@ def build_parser():
     p.add_argument("--preprocessed-dir", required=True,
                    help="Path to preprocessed shards directory")
     p.add_argument("--output", "-o", default=None,
-                   help="Output directory (default: result/reopt_<timestamp>)")
+                   help="Output directory (default: <project>/result/reoptimize_<timestamp>)")
     p.add_argument("--num-search", type=int, default=5000)
     p.add_argument("--top-k", type=int, default=5)
     p.add_argument("--target-tokens", type=float, default=0.0,
@@ -78,9 +78,11 @@ def main():
     args = build_parser().parse_args()
 
     if args.output is None:
+        _project_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         args.output = os.path.join(
+            _project_dir,
             "result",
-            f"reopt_{time.strftime('%Y%m%d_%H%M%S')}",
+            f"reoptimize_{time.strftime('%Y%m%d_%H%M%S')}",
         )
 
     print(f"[Resume] Loading proxy results from: {args.proxy_dir}")

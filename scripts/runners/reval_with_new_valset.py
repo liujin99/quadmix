@@ -136,7 +136,7 @@ def build_parser():
     p.add_argument("--val-path", type=str, default=None,
                    help="Path to custom validation .pt file (overrides --val-set)")
     p.add_argument("--output", "-o", type=str, default=None,
-                   help="Output directory (default: result/reval_<valset>_<timestamp>)")
+                   help="Output directory (default: <project>/result/revalidate_<valset>_<timestamp>)")
     p.add_argument("--device-type", type=str, default="cpu",
                    choices=["cpu", "cuda", "npu"],
                    help="Device for re-evaluation (default: cpu)")
@@ -170,7 +170,8 @@ def main():
     else:
         output_dir = os.path.join(
             QUADMIX_DIR,
-            f"result/reval_{val_set_name}_{time.strftime('%Y%m%d_%H%M%S')}",
+            "result",
+            f"revalidate_{val_set_name}_{time.strftime('%Y%m%d_%H%M%S')}",
         )
     os.makedirs(output_dir, exist_ok=True)
 

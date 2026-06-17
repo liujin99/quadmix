@@ -26,7 +26,7 @@
 #   bash scripts/demo_revalidate.sh --result-dir result/xxx --device-type npu
 #
 # 自定义输出目录：
-#   bash scripts/demo_revalidate.sh --result-dir result/xxx --output result/my_reopt
+#   bash scripts/demo_revalidate.sh --result-dir result/xxx --output result/my_revalidate
 #
 # 调整搜索参数：
 #   bash scripts/demo_revalidate.sh --result-dir result/xxx --num-search 50000 --top-k 5

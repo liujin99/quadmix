@@ -17,7 +17,7 @@
 #   bash scripts/demo_reoptimize.sh --result-dir result/quadmix_20260609_120000
 #
 # 自定义输出目录：
-#   bash scripts/demo_reoptimize.sh --result-dir result/xxx --output result/my_reopt
+#   bash scripts/demo_reoptimize.sh --result-dir result/xxx --output result/my_reoptimize
 #
 # 调整搜索参数：
 #   bash scripts/demo_reoptimize.sh --result-dir result/xxx --num-search 50000 --top-k 5
