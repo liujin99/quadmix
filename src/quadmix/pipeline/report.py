@@ -291,15 +291,43 @@ def generate_report(
     if metrics:
         ens_r2 = metrics.get("ensemble_val_r2")
         ens_mae = metrics.get("ensemble_val_mae")
+        eq_r2 = metrics.get("equal_weight_r2")
+        eq_mae = metrics.get("equal_weight_mae")
         if ens_r2 is not None:
-            parts.append("## Overall Model Metrics (used for search)\n")
-            parts.append("**Val R²**: z-score normalized, R²-weighted (K-fold CV estimation, high R² tasks contribute more)\n")
-            parts.append("**Val MAE**: mean absolute error in z-score space (R²-weighted ensemble)\n")
-            parts.append("| Metric | Value |")
-            parts.append("|:-------|:------|")
+            parts.append("## Model Evaluation Metrics\n")
+            parts.append("Two complementary metrics assess prediction quality:\n")
+            parts.append("")
+            parts.append("| Metric | Value | Formula | Purpose |")
+            parts.append("|:-------|:------|:--------|:--------|")
             quality = "✓ Excellent" if ens_r2 > 0.6 else ("✓ Good" if ens_r2 > 0.3 else "⚠️ Weak")
-            parts.append(f"| **Val R²** | **{ens_r2:.4f}** ({quality}) |")
-            parts.append(f"| Val MAE | {ens_mae:.4f} |")
+            parts.append(f"| **Overall Val R²** | **{ens_r2:.4f}** ({quality}) | R²(Σ wᵢ·z_predᵢ, Σ wᵢ·z_actualᵢ) | Search objective quality |")
+            parts.append(f"| Overall Val MAE | {ens_mae:.4f} | z-score space | — |")
+            if eq_r2 is not None:
+                eq_quality = "✓ Excellent" if eq_r2 > 0.6 else ("✓ Good" if eq_r2 > 0.3 else "⚠️ Weak")
+                parts.append(f"| **Equal-Wt Val R²** | **{eq_r2:.4f}** ({eq_quality}) | R²((1/K)Σ predᵢ, (1/K)Σ actualᵢ) | Downstream goal quality |")
+                parts.append(f"| Equal-Wt Val MAE | {eq_mae:.4f} | raw loss space | — |")
+            parts.append("")
+            parts.append("### Interpretation\n")
+            parts.append("")
+            parts.append("**Overall Val R²** (search objective):\n")
+            parts.append("- Uses R²-weighted z-score combination: high-R² tasks contribute more\n")
+            parts.append("- Reduces noise impact from low-signal tasks\n")
+            parts.append("- Directly measures how well the search strategy's predictions match reality\n")
+            parts.append("- High value → search will find good parameters\n")
+            parts.append("")
+            parts.append("**Equal-Wt Val R²** (downstream goal):\n")
+            parts.append("- Uses equal-weight average in raw loss space\n")
+            parts.append("- Matches downstream evaluation (21 benchmarks equally weighted)\n")
+            parts.append("- Diagnostic: shows prediction quality for the ultimate goal\n")
+            parts.append("")
+            if ens_r2 > 0.3 and eq_r2 is not None and eq_r2 > 0.3:
+                parts.append("✓ **Both metrics strong**: Search strategy effective and downstream predictions accurate\n")
+            elif ens_r2 > 0.3 and eq_r2 is not None and eq_r2 < 0.3:
+                parts.append("⚠️ **Overall strong but Equal-Wt weak**: R²-weighting helps search but may sacrifice low-R² tasks\n")
+            elif ens_r2 < 0.3 and eq_r2 is not None and eq_r2 > 0.3:
+                parts.append("⚠️ **Equal-Wt strong but Overall weak**: Consider using equal-weight search instead\n")
+            else:
+                parts.append("⚠️ **Both metrics weak**: Model predictions unreliable, search results may be poor\n")
             parts.append("")
 
     if proxy_loss_stats:

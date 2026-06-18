@@ -424,6 +424,8 @@ class QuaDMixOptimizer:
         self._aggregate_train_stats: Optional[Tuple[float, float]] = None
         self._ensemble_val_r2: Optional[float] = None
         self._ensemble_val_mae: Optional[float] = None
+        self._equal_weight_r2: Optional[float] = None
+        self._equal_weight_mae: Optional[float] = None
 
     def add_proxy_results(self, results: List[ProxyResult]):
         """Add proxy experiment results."""
@@ -634,12 +636,11 @@ class QuaDMixOptimizer:
         if len(val_idx) > 0:
             val_params = [params_list[i] for i in val_idx]
             
-            # Overall R² and MAE: z-score normalized, R²-weighted
-            # High R² tasks (clear signal) contribute more
+            # ── Overall R²: R²-weighted z-score (consistent with search strategy) ──
+            # Search minimizes Σ wᵢ·z_predᵢ, so evaluation uses R²(Σ wᵢ·z_predᵢ, Σ wᵢ·z_actualᵢ)
             n_val = len(val_idx)
-            z_ensemble_pred = np.zeros(n_val)
-            z_ensemble_actual = np.zeros(n_val)
-            r2_sum = 0.0
+            z_weighted_pred = np.zeros(n_val)
+            z_weighted_actual = np.zeros(n_val)
             for task in active_tasks:
                 model = self._per_task_models[task]
                 raw_pred = model.predict(val_params)
@@ -648,31 +649,57 @@ class QuaDMixOptimizer:
                 
                 mean_val = float(np.mean(actual))
                 std_val = task_stds[task]
-                r2 = self._per_task_r2[task]
+                w = self._per_task_weights[task]
                 if std_val > 1e-12:
                     z_pred = (raw_pred - mean_val) / std_val
                     z_actual = (actual - mean_val) / std_val
-                    z_ensemble_pred += r2 * z_pred
-                    z_ensemble_actual += r2 * z_actual
-                    r2_sum += r2
+                    z_weighted_pred += w * z_pred
+                    z_weighted_actual += w * z_actual
             
-            if r2_sum > 1e-12:
-                z_ensemble_pred /= r2_sum
-                z_ensemble_actual /= r2_sum
-            
-            ss_res = float(np.sum((z_ensemble_actual - z_ensemble_pred) ** 2))
-            ss_tot = float(np.sum((z_ensemble_actual - np.mean(z_ensemble_actual)) ** 2))
+            ss_res = float(np.sum((z_weighted_actual - z_weighted_pred) ** 2))
+            ss_tot = float(np.sum((z_weighted_actual - np.mean(z_weighted_actual)) ** 2))
             overall_r2 = 1.0 - ss_res / max(ss_tot, 1e-12)
-            overall_mae = float(np.mean(np.abs(z_ensemble_pred - z_ensemble_actual)))
+            overall_mae = float(np.mean(np.abs(z_weighted_pred - z_weighted_actual)))
+            
+            # ── Equal-weight R² (diagnostic): raw space, equal weights ──
+            # Downstream goal: min (1/K)Σ lossᵢ, so this measures prediction quality for that goal
+            eq_pred = np.zeros(n_val)
+            eq_actual = np.zeros(n_val)
+            n_tasks = len(active_tasks)
+            for task in active_tasks:
+                model = self._per_task_models[task]
+                raw_pred = model.predict(val_params)
+                actual = all_task_losses[task][val_idx]
+                eq_pred += raw_pred / n_tasks
+                eq_actual += actual / n_tasks
+            
+            eq_ss_res = float(np.sum((eq_actual - eq_pred) ** 2))
+            eq_ss_tot = float(np.sum((eq_actual - np.mean(eq_actual)) ** 2))
+            equal_weight_r2 = 1.0 - eq_ss_res / max(eq_ss_tot, 1e-12)
+            equal_weight_mae = float(np.mean(np.abs(eq_pred - eq_actual)))
             
             self._ensemble_val_r2 = overall_r2
             self._ensemble_val_mae = overall_mae
+            self._equal_weight_r2 = equal_weight_r2
+            self._equal_weight_mae = equal_weight_mae
             r2_desc = f"CV {n_folds}-fold" if n_folds > 1 and n_total >= n_folds else "single split"
-            print(f"[QuaDMixOptimizer] Overall Val R² = {overall_r2:.4f} (z-score normalized, R²-weighted [{r2_desc}], {len(active_tasks)} active tasks)")
-            print(f"[QuaDMixOptimizer] Overall Val MAE = {overall_mae:.4f} (z-score space)")
+            
+            print(f"[QuaDMixOptimizer] ── Evaluation Metrics ({len(active_tasks)} active tasks, {r2_desc}) ──")
+            print(f"[QuaDMixOptimizer] Overall Val R² = {overall_r2:.4f}, MAE = {overall_mae:.4f}")
+            print(f"[QuaDMixOptimizer]   → R²(Σ wᵢ·z_predᵢ, Σ wᵢ·z_actualᵢ): measures search objective quality")
+            print(f"[QuaDMixOptimizer]   → High R² tasks weighted more to reduce noise impact")
+            print(f"[QuaDMixOptimizer] Equal-Wt Val R² = {equal_weight_r2:.4f}, MAE = {equal_weight_mae:.4f}")
+            print(f"[QuaDMixOptimizer]   → R²((1/K)Σ pred_lossᵢ, (1/K)Σ actual_lossᵢ): measures downstream goal quality")
+            print(f"[QuaDMixOptimizer]   → Equal weights across tasks (21 benchmarks equally weighted)")
+            if overall_r2 > equal_weight_r2 + 0.1:
+                print(f"[QuaDMixOptimizer] ⚠️  Overall R² >> Equal-Wt R²: search strategy favors high-R² tasks, may sacrifice low-R² tasks")
+            elif equal_weight_r2 > overall_r2 + 0.1:
+                print(f"[QuaDMixOptimizer] ⚠️  Equal-Wt R² >> Overall R²: equal-weight prediction better than R²-weighted")
         else:
             self._ensemble_val_r2 = None
             self._ensemble_val_mae = None
+            self._equal_weight_r2 = None
+            self._equal_weight_mae = None
 
     def _compute_reliability(
         self,
@@ -869,6 +896,14 @@ class QuaDMixOptimizer:
         return self._ensemble_val_mae
 
     @property
+    def equal_weight_r2(self) -> Optional[float]:
+        return self._equal_weight_r2
+
+    @property
+    def equal_weight_mae(self) -> Optional[float]:
+        return self._equal_weight_mae
+
+    @property
     def sample_sufficient(self) -> Optional[bool]:
         return getattr(self, "_sample_sufficient", None)
 
@@ -881,19 +916,45 @@ class QuaDMixOptimizer:
         return getattr(self, "_n_features", None)
 
     @property
+    def bootstrap_details(self) -> Optional[Dict[str, Any]]:
+        if not hasattr(self, "_val_r2_bootstrap_mean") or self._val_r2_bootstrap_mean is None:
+            return None
+        return {
+            "mean": self._val_r2_bootstrap_mean,
+            "ci_lower": self._val_r2_ci_lower,
+            "ci_upper": self._val_r2_ci_upper,
+            "ci_std": self._val_r2_ci_std,
+            "n_ensemble_models": len(self._bootstrap_models) if self._bootstrap_models else 0,
+        }
+
+    @property
     def per_task_analysis(self) -> Optional[Dict[str, Any]]:
         if not self._per_task_models or not self._per_task_weights or not self._per_task_r2:
             return None
         tasks = []
         for task in sorted(self._per_task_weights.keys(), key=lambda t: -self._per_task_weights[t]):
+            train_r2 = self._per_task_train_r2.get(task, None) if self._per_task_train_r2 else None
+            r2 = self._per_task_r2[task]
+            gap = (train_r2 - r2) if train_r2 is not None else None
             tasks.append({
                 "name": task,
-                "r2": self._per_task_r2[task],
+                "train_r2": train_r2,
+                "r2": r2,
+                "gap": gap,
                 "weight": self._per_task_weights[task],
+                "train_mean": self._per_task_train_stats[task][0] if self._per_task_train_stats else None,
                 "std": self._per_task_train_stats[task][1] if self._per_task_train_stats else None,
             })
+        n_folds = self.config.regression_cv_folds
+        n_total = len(self._proxy_results) if self._proxy_results else 0
+        r2_method = f"CV {n_folds}-fold" if n_folds > 1 and n_total >= n_folds else "Val R²"
         return {
             "tasks": tasks,
             "n_active": sum(1 for t in tasks if t["weight"] > 0),
             "n_filtered": sum(1 for t in tasks if t["weight"] == 0),
+            "r2_method": r2_method,
+            "ensemble_val_r2": self._ensemble_val_r2,
+            "ensemble_val_mae": self._ensemble_val_mae,
+            "equal_weight_r2": self._equal_weight_r2,
+            "equal_weight_mae": self._equal_weight_mae,
         }

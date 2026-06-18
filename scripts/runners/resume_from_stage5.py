@@ -34,6 +34,71 @@ from quadmix.pipeline.real_pipeline import QuaDMixPipeline
 from quadmix.constants import DOMAIN_NAMES, QUALITY_NAMES
 
 
+def _build_domain_dist_change(domain_labels, selected_indices, num_domains):
+    orig_dist = np.bincount(domain_labels[domain_labels >= 0], minlength=num_domains)
+    sel_dist = np.bincount(
+        domain_labels[selected_indices][domain_labels[selected_indices] >= 0],
+        minlength=num_domains)
+    change = {}
+    for m in range(num_domains):
+        if orig_dist[m] > 0:
+            name = DOMAIN_NAMES[m] if m < len(DOMAIN_NAMES) else f"D{m}"
+            change[name] = {
+                "original": int(orig_dist[m]),
+                "selected": int(sel_dist[m]),
+                "ratio": round(float(sel_dist[m]) / orig_dist[m], 4),
+            }
+    return change
+
+
+def _compute_dataset_size_prediction(optimal_params, mm, config):
+    omega_values = [sc.omega for sc in optimal_params.sampling_configs]
+    avg_omega = float(np.mean(omega_values))
+    max_omega = float(np.max(omega_values))
+    min_omega = float(np.min(omega_values))
+    total_tokens_est = mm.get_total_tokens_estimate() if mm is not None else None
+    if total_tokens_est is None:
+        return None
+    estimated_tokens = int(total_tokens_est * avg_omega)
+    target_tokens = config.target_tokens
+    note = None
+    if target_tokens > 0:
+        target_b = target_tokens / 1e9
+        if estimated_tokens < target_tokens * 0.8:
+            note = f"estimated {estimated_tokens/1e9:.2f}B < target {target_b:.1f}B"
+        elif estimated_tokens > target_tokens * 1.2:
+            discard_pct = (estimated_tokens - target_tokens) / estimated_tokens * 100
+            note = f"estimated {estimated_tokens/1e9:.2f}B > target {target_b:.1f}B, discard ~{discard_pct:.1f}%"
+    return {
+        "total_tokens_est": total_tokens_est,
+        "total_tokens_est_B": round(total_tokens_est / 1e9, 1),
+        "omega_min": round(min_omega, 6),
+        "omega_max": round(max_omega, 6),
+        "omega_avg": round(avg_omega, 6),
+        "estimated_tokens": estimated_tokens,
+        "estimated_tokens_B": round(estimated_tokens / 1e9, 2),
+        "target_tokens": target_tokens if target_tokens > 0 else None,
+        "note": note,
+    }
+
+
+def _compute_proxy_loss_stats(results):
+    stats = {}
+    train_losses = np.array([r.metadata["train_loss"] for r in results if "train_loss" in r.metadata])
+    val_losses = np.array([r.validation_loss for r in results])
+    if len(train_losses) > 0:
+        stats["train_loss"] = {
+            "mean": float(train_losses.mean()), "std": float(train_losses.std()),
+            "min": float(train_losses.min()), "max": float(train_losses.max()),
+        }
+    if len(val_losses) > 0:
+        stats["val_loss"] = {
+            "mean": float(val_losses.mean()), "std": float(val_losses.std()),
+            "min": float(val_losses.min()), "max": float(val_losses.max()),
+        }
+    return stats
+
+
 def load_proxy_results(proxy_dir: str):
     results = []
     exp_dirs = sorted(
@@ -94,22 +159,26 @@ def main():
           f"mean={losses.mean():.4f}, std={losses.std():.4f}, "
           f"min={losses.min():.4f}, max={losses.max():.4f}")
 
+    per_task_loss_stats = None
     has_per_task = all(r.per_task_losses is not None for r in results)
     if has_per_task:
         tasks = sorted(results[0].per_task_losses.keys())
-        per_task_means = {}
-        per_task_stds = {}
+        per_task_loss_stats = {}
         for task in tasks:
             task_losses = np.array([r.per_task_losses[task] for r in results])
-            per_task_means[task] = float(np.mean(task_losses))
-            per_task_stds[task] = float(np.std(task_losses))
+            per_task_loss_stats[task] = {
+                "mean": float(np.mean(task_losses)),
+                "std": float(np.std(task_losses)),
+                "min": float(np.min(task_losses)),
+                "max": float(np.max(task_losses)),
+            }
         print(f"\n  Per-task loss stats ({len(tasks)} tasks):")
         print(f"    {'Task':<30} {'Mean':>8} {'Std':>8} {'Min':>8} {'Max':>8}")
         print(f"    {'-'*70}")
-        for task in sorted(tasks, key=lambda t: -per_task_means[t]):
-            task_losses = np.array([r.per_task_losses[task] for r in results])
-            print(f"    {task:<30} {per_task_means[task]:>8.4f} {per_task_stds[task]:>8.4f} "
-                  f"{np.min(task_losses):>8.4f} {np.max(task_losses):>8.4f}")
+        for task in sorted(tasks, key=lambda t: -per_task_loss_stats[t]["mean"]):
+            s = per_task_loss_stats[task]
+            print(f"    {task:<30} {s['mean']:>8.4f} {s['std']:>8.4f} "
+                  f"{s['min']:>8.4f} {s['max']:>8.4f}")
 
     n_exp = len(results)
     n_search = args.num_search
@@ -184,6 +253,18 @@ def main():
     print(f"  Original documents: {n_docs:,}")
     print(f"  Selected samples:   {len(selected_indices):,}")
     print(f"  Sampling ratio:     {len(selected_indices)/n_docs:.4f}x")
+
+    orig_dist = np.bincount(domain_labels[domain_labels >= 0],
+                             minlength=config.num_domains)
+    sel_dist = np.bincount(
+        domain_labels[selected_indices][domain_labels[selected_indices] >= 0],
+        minlength=config.num_domains)
+    print("\n  Domain distribution change:")
+    for m in range(config.num_domains):
+        if orig_dist[m] > 0:
+            ratio = sel_dist[m] / orig_dist[m]
+            name = DOMAIN_NAMES[m] if m < len(DOMAIN_NAMES) else f"D{m}"
+            print(f"    [{m}] {name:>10s}: {orig_dist[m]:>7,} -> {sel_dist[m]:>7,}  ({ratio:.2f}x)")
     stage_times["stage7_final_sampling"] = time.time() - _t
     print(f"[Stage 7] Final sampling: {stage_times['stage7_final_sampling']:.1f}s")
 
@@ -209,17 +290,32 @@ def main():
             "aggregate_val_mae": pipeline._optimizer.val_mae,
             "ensemble_val_r2": pipeline._optimizer.ensemble_val_r2,
             "ensemble_val_mae": pipeline._optimizer.ensemble_val_mae,
+            "equal_weight_r2": pipeline._optimizer.equal_weight_r2,
+            "equal_weight_mae": pipeline._optimizer.equal_weight_mae,
             "best_predicted_loss": float(predicted_losses.min()),
             "top_k_avg_loss": top_k_avg_loss,
+        },
+        "reliability": {
+            "bootstrap": pipeline._optimizer.bootstrap_details,
+            "sample_sufficient": pipeline._optimizer.sample_sufficient,
+            "overfit_gap": pipeline._optimizer.overfit_gap,
+            "n_features": pipeline._optimizer.n_features,
+            "n_train_samples": getattr(pipeline._optimizer, "_n_train", None),
         },
         "sampling": {
             "num_original_docs": n_docs,
             "num_selected_docs": len(selected_indices),
             "sampling_ratio": len(selected_indices) / n_docs,
+            "domain_distribution_change": _build_domain_dist_change(
+                domain_labels, selected_indices, config.num_domains),
         },
+        "proxy_loss_stats": _compute_proxy_loss_stats(results),
+        "per_task_loss_stats": per_task_loss_stats,
         "per_task_analysis": pipeline._optimizer.per_task_analysis,
+        "dataset_size_prediction": _compute_dataset_size_prediction(optimal_params, mm, config),
         "elapsed_seconds": elapsed,
         "stage_times": {k: round(v, 1) for k, v in stage_times.items()},
+        "input_file": args.preprocessed_dir,
         "resumed_from": "stage5",
     }
     summary_path = os.path.join(output_dir, "pipeline_summary.json")
@@ -277,8 +373,14 @@ def main():
     print(f"  Aggregate Val R² = {pipeline._optimizer.val_r2:.4f} (diagnostic)")
     ens_r2 = pipeline._optimizer.ensemble_val_r2
     ens_mae = pipeline._optimizer.ensemble_val_mae
+    eq_r2 = pipeline._optimizer.equal_weight_r2
+    eq_mae = pipeline._optimizer.equal_weight_mae
     if ens_r2 is not None:
-        print(f"  Overall   Val R² = {ens_r2:.4f}, MAE = {ens_mae:.4f} (used for search)")
+        print(f"  Overall   Val R² = {ens_r2:.4f}, MAE = {ens_mae:.4f}")
+        print(f"    → R²(Σ wᵢ·z_predᵢ, Σ wᵢ·z_actualᵢ): search objective quality")
+    if eq_r2 is not None:
+        print(f"  Equal-Wt  Val R² = {eq_r2:.4f}, MAE = {eq_mae:.4f}")
+        print(f"    → R²((1/K)Σ predᵢ, (1/K)Σ actualᵢ): downstream goal quality")
     print(f"  Output: {output_dir}/")
     print(f"    ├── optimal_parameters.json")
     print(f"    ├── pipeline_summary.json")

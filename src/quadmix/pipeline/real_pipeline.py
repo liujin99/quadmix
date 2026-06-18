@@ -54,6 +54,8 @@ class PipelineOutput:
     val_mae: float
     ensemble_val_r2: Optional[float]
     ensemble_val_mae: Optional[float]
+    equal_weight_r2: Optional[float]
+    equal_weight_mae: Optional[float]
     best_predicted_loss: float
     selected_indices: npt.NDArray[np.int64]
     sampling_values: npt.NDArray[np.float64]
@@ -89,6 +91,7 @@ class QuaDMixPipeline:
         self._domain_labels: Optional[np.ndarray] = None
         self._data: Optional[UnifiedData] = None
         self._texts: Optional[List[str]] = None
+        self._dataset_size_prediction: Optional[Dict[str, Any]] = None
 
     # ── Public config ──────────────────────────────────────────
 
@@ -353,12 +356,23 @@ class QuaDMixPipeline:
                 quality_scores, domain_labels, optimal_params, token_counts,
                 domain_names, stage_times)
 
+        domain_dist_change = {}
+        for m in range(self.config.num_domains):
+            if orig_dist[m] > 0:
+                name = (domain_names[m] if domain_names and m < len(domain_names)
+                        else f"D{m}")
+                domain_dist_change[name] = {
+                    "original": int(orig_dist[m]),
+                    "selected": int(sel_dist[m]),
+                    "ratio": round(float(sel_dist[m]) / orig_dist[m], 4),
+                }
+
         serialized, summary, n_docs_save = self._stage8_save(
             output_dir, output_format, data_path, optimal_params, domain_names,
             quality_names, selected_indices, sampling_values, final_ranks,
             domain_labels, token_counts, texts, text_source, n_exp, n_search,
             predicted_losses, top_k_avg_loss, proxy_loss_stats, proxy_runner,
-            val_set, stage_times, t_start)
+            val_set, stage_times, t_start, domain_dist_change)
 
         self._stage9_report(
             output_dir, data_path, optimal_params, selected_indices,
@@ -372,8 +386,14 @@ class QuaDMixPipeline:
         print(f"  Aggregate Val R² = {self._optimizer.val_r2:.4f} (diagnostic)")
         ens_r2 = self._optimizer.ensemble_val_r2
         ens_mae = self._optimizer.ensemble_val_mae
+        eq_r2 = self._optimizer.equal_weight_r2
+        eq_mae = self._optimizer.equal_weight_mae
         if ens_r2 is not None:
-            print(f"  Overall   Val R² = {ens_r2:.4f}, MAE = {ens_mae:.4f} (used for search)")
+            print(f"  Overall   Val R² = {ens_r2:.4f}, MAE = {ens_mae:.4f}")
+            print(f"    → R²(Σ wᵢ·z_predᵢ, Σ wᵢ·z_actualᵢ): search objective quality")
+        if eq_r2 is not None:
+            print(f"  Equal-Wt  Val R² = {eq_r2:.4f}, MAE = {eq_mae:.4f}")
+            print(f"    → R²((1/K)Σ predᵢ, (1/K)Σ actualᵢ): downstream goal quality")
         print(f"  Output: {output_dir}/")
         print(f"    ├── optimal_parameters.json")
         print(f"    ├── pipeline_summary.json")
@@ -389,6 +409,8 @@ class QuaDMixPipeline:
             val_mae=self._optimizer.val_mae,
             ensemble_val_r2=self._optimizer.ensemble_val_r2,
             ensemble_val_mae=self._optimizer.ensemble_val_mae,
+            equal_weight_r2=self._optimizer.equal_weight_r2,
+            equal_weight_mae=self._optimizer.equal_weight_mae,
             best_predicted_loss=float(predicted_losses.min()),
             selected_indices=selected_indices,
             sampling_values=sampling_values,
@@ -585,7 +607,8 @@ class QuaDMixPipeline:
                      domain_names, quality_names, selected_indices, sampling_values,
                      final_ranks, domain_labels, token_counts, texts, text_source,
                      n_exp, n_search, predicted_losses, top_k_avg_loss,
-                     proxy_loss_stats, proxy_runner, val_set, stage_times, t_start):
+                     proxy_loss_stats, proxy_runner, val_set, stage_times, t_start,
+                     domain_dist_change=None):
         _t = time.time()
         params_path = os.path.join(output_dir, "optimal_parameters.json")
         serialized = self._serialize_params(optimal_params, domain_names, quality_names)
@@ -611,19 +634,14 @@ class QuaDMixPipeline:
                 "aggregate_val_mae": self._optimizer.val_mae,
                 "ensemble_val_r2": self._optimizer.ensemble_val_r2,
                 "ensemble_val_mae": self._optimizer.ensemble_val_mae,
+                "equal_weight_r2": self._optimizer.equal_weight_r2,
+                "equal_weight_mae": self._optimizer.equal_weight_mae,
                 "best_predicted_loss": float(predicted_losses.min()),
                 "top_k_avg_loss": top_k_avg_loss,
             },
             "proxy_loss_stats": proxy_loss_stats,
             "reliability": {
-                "val_r2_bootstrap_mean": self._optimizer.val_r2_bootstrap_mean,
-                "val_r2_ci_lower": self._optimizer.val_r2_ci_lower,
-                "val_r2_ci_upper": self._optimizer.val_r2_ci_upper,
-                "val_r2_ci_width": (
-                    self._optimizer.val_r2_ci_upper - self._optimizer.val_r2_ci_lower
-                    if self._optimizer.val_r2_ci_lower is not None and self._optimizer.val_r2_ci_upper is not None
-                    else None
-                ),
+                "bootstrap": self._optimizer.bootstrap_details,
                 "sample_sufficient": self._optimizer.sample_sufficient,
                 "overfit_gap": self._optimizer.overfit_gap,
                 "n_features": self._optimizer.n_features,
@@ -633,7 +651,9 @@ class QuaDMixPipeline:
                 "num_original_docs": n_docs_save,
                 "num_selected_docs": len(selected_indices),
                 "sampling_ratio": len(selected_indices) / n_docs_save,
+                "domain_distribution_change": domain_dist_change,
             },
+            "dataset_size_prediction": getattr(self, "_dataset_size_prediction", None),
             "per_task_analysis": self._optimizer.per_task_analysis,
             "elapsed_seconds": elapsed,
             "stage_times": {k: round(v, 1) for k, v in stage_times.items()},
@@ -718,6 +738,19 @@ class QuaDMixPipeline:
                 "mean": float(val_losses.mean()), "std": float(val_losses.std()),
                 "min": float(val_losses.min()), "max": float(val_losses.max()),
             }
+        has_per_task = all(r.per_task_losses is not None for r in results)
+        if has_per_task:
+            tasks = sorted(results[0].per_task_losses.keys())
+            per_task_stats = {}
+            for task in tasks:
+                task_losses = np.array([r.per_task_losses[task] for r in results])
+                per_task_stats[task] = {
+                    "mean": float(np.mean(task_losses)),
+                    "std": float(np.std(task_losses)),
+                    "min": float(np.min(task_losses)),
+                    "max": float(np.max(task_losses)),
+                }
+            stats["per_task_loss"] = per_task_stats
         return stats
 
     def _predict_dataset_size(self, optimal_params, mm, token_counts):
@@ -733,6 +766,7 @@ class QuaDMixPipeline:
             total_tokens_est = int(np.sum(token_counts))
 
         if total_tokens_est is None:
+            self._dataset_size_prediction = None
             return
 
         estimated_tokens = int(total_tokens_est * avg_omega)
@@ -741,16 +775,31 @@ class QuaDMixPipeline:
         print(f"    ω 范围:          [{min_omega:.3f}, {max_omega:.3f}] (平均 {avg_omega:.3f})")
         print(f"    预计数据量:       ~{estimated_tokens/1e9:.2f}B tokens")
 
-        if self.config.target_tokens > 0:
-            target_b = self.config.target_tokens / 1e9
-            if estimated_tokens < self.config.target_tokens * 0.8:
-                print(f"    [提示] 预计 {estimated_tokens/1e9:.2f}B < target {target_b:.1f}B")
+        target_tokens = self.config.target_tokens
+        note = None
+        if target_tokens > 0:
+            target_b = target_tokens / 1e9
+            if estimated_tokens < target_tokens * 0.8:
+                note = f"预计 {estimated_tokens/1e9:.2f}B < target {target_b:.1f}B"
+                print(f"    [提示] {note}")
                 print(f"    论文: 'More tokens not always good' (30B > 90B > 180B)")
                 print(f"    θ* 产生更少数据但 loss 更优，代码将继续执行")
-            elif estimated_tokens > self.config.target_tokens * 1.2:
-                discard_pct = (estimated_tokens - self.config.target_tokens) / estimated_tokens * 100
-                print(f"    [提示] 预计 {estimated_tokens/1e9:.2f}B > target {target_b:.1f}B")
-                print(f"    将随机丢弃约 {discard_pct:.1f}%（保持相对分布）")
+            elif estimated_tokens > target_tokens * 1.2:
+                discard_pct = (estimated_tokens - target_tokens) / estimated_tokens * 100
+                note = f"预计 {estimated_tokens/1e9:.2f}B > target {target_b:.1f}B, 将随机丢弃约 {discard_pct:.1f}%"
+                print(f"    [提示] {note}")
+
+        self._dataset_size_prediction = {
+            "total_tokens_est": total_tokens_est,
+            "total_tokens_est_B": round(total_tokens_est / 1e9, 1),
+            "omega_min": round(min_omega, 6),
+            "omega_max": round(max_omega, 6),
+            "omega_avg": round(avg_omega, 6),
+            "estimated_tokens": estimated_tokens,
+            "estimated_tokens_B": round(estimated_tokens / 1e9, 2),
+            "target_tokens": target_tokens if target_tokens > 0 else None,
+            "note": note,
+        }
 
     def _apply_target_tokens(self, selected_indices, token_counts):
         if self.config.target_tokens <= 0 or token_counts is None:
