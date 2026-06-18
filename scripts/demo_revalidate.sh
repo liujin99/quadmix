@@ -51,6 +51,10 @@ export QUADMIX_TEMP_DIR="${QUADMIX_TEMP_DIR:-$HOME/.cache/QuaDMix/temp}"
 
 PREPROCESSED_DIR="$QUADMIX_TEMP_DIR/preprocessed"
 
+VAL_FILE="$QUADMIX_DIR/data/core_bmk_21tasks_v5_tokenized.pt"
+source "$QUADMIX_DIR/scripts/ensure_val_data.sh"
+ensure_val_data "liujin99/quadmix-core-bmk-v5" "core_bmk_21tasks_v5_tokenized.pt" "$VAL_FILE"
+
 RESULT_DIR="$QUADMIX_DIR/result/demo_full_20260612_214550"
 VAL_SET="core_bmk_v5"
 VAL_PATH=""
