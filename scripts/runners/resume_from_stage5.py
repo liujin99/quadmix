@@ -292,6 +292,9 @@ def main():
             "ensemble_val_mae": pipeline._optimizer.ensemble_val_mae,
             "equal_weight_r2": pipeline._optimizer.equal_weight_r2,
             "equal_weight_mae": pipeline._optimizer.equal_weight_mae,
+            "spearman_corr": pipeline._optimizer.spearman_corr,
+            "top_k_recall": pipeline._optimizer.top_k_recall,
+            "top_k_value": pipeline._optimizer.top_k_value,
             "best_predicted_loss": float(predicted_losses.min()),
             "top_k_avg_loss": top_k_avg_loss,
         },
@@ -381,6 +384,13 @@ def main():
     if eq_r2 is not None:
         print(f"  Equal-Wt  Val R² = {eq_r2:.4f}, MAE = {eq_mae:.4f}")
         print(f"    → R²((1/K)Σ predᵢ, (1/K)Σ actualᵢ): downstream goal quality")
+    sp = pipeline._optimizer.spearman_corr
+    tk = pipeline._optimizer.top_k_recall
+    tk_val = pipeline._optimizer.top_k_value
+    if sp is not None:
+        print(f"  Spearman Rank Corr = {sp:.4f} (ranking ability)")
+    if tk is not None:
+        print(f"  Top-{tk_val} Recall = {tk:.4f} ({int(tk*tk_val)}/{tk_val} hits)")
     print(f"  Output: {output_dir}/")
     print(f"    ├── optimal_parameters.json")
     print(f"    ├── pipeline_summary.json")

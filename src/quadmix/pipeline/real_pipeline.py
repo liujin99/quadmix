@@ -56,6 +56,9 @@ class PipelineOutput:
     ensemble_val_mae: Optional[float]
     equal_weight_r2: Optional[float]
     equal_weight_mae: Optional[float]
+    spearman_corr: Optional[float]
+    top_k_recall: Optional[float]
+    top_k_value: Optional[int]
     best_predicted_loss: float
     selected_indices: npt.NDArray[np.int64]
     sampling_values: npt.NDArray[np.float64]
@@ -394,6 +397,13 @@ class QuaDMixPipeline:
         if eq_r2 is not None:
             print(f"  Equal-Wt  Val R² = {eq_r2:.4f}, MAE = {eq_mae:.4f}")
             print(f"    → R²((1/K)Σ predᵢ, (1/K)Σ actualᵢ): downstream goal quality")
+        sp = self._optimizer.spearman_corr
+        tk = self._optimizer.top_k_recall
+        tk_val = self._optimizer.top_k_value
+        if sp is not None:
+            print(f"  Spearman Rank Corr = {sp:.4f} (ranking ability)")
+        if tk is not None:
+            print(f"  Top-{tk_val} Recall = {tk:.4f} ({int(tk*tk_val)}/{tk_val} hits)")
         print(f"  Output: {output_dir}/")
         print(f"    ├── optimal_parameters.json")
         print(f"    ├── pipeline_summary.json")
@@ -411,6 +421,9 @@ class QuaDMixPipeline:
             ensemble_val_mae=self._optimizer.ensemble_val_mae,
             equal_weight_r2=self._optimizer.equal_weight_r2,
             equal_weight_mae=self._optimizer.equal_weight_mae,
+            spearman_corr=self._optimizer.spearman_corr,
+            top_k_recall=self._optimizer.top_k_recall,
+            top_k_value=self._optimizer.top_k_value,
             best_predicted_loss=float(predicted_losses.min()),
             selected_indices=selected_indices,
             sampling_values=sampling_values,
@@ -636,6 +649,9 @@ class QuaDMixPipeline:
                 "ensemble_val_mae": self._optimizer.ensemble_val_mae,
                 "equal_weight_r2": self._optimizer.equal_weight_r2,
                 "equal_weight_mae": self._optimizer.equal_weight_mae,
+                "spearman_corr": self._optimizer.spearman_corr,
+                "top_k_recall": self._optimizer.top_k_recall,
+                "top_k_value": self._optimizer.top_k_value,
                 "best_predicted_loss": float(predicted_losses.min()),
                 "top_k_avg_loss": top_k_avg_loss,
             },

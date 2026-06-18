@@ -293,9 +293,12 @@ def generate_report(
         ens_mae = metrics.get("ensemble_val_mae")
         eq_r2 = metrics.get("equal_weight_r2")
         eq_mae = metrics.get("equal_weight_mae")
+        sp = metrics.get("spearman_corr")
+        tk = metrics.get("top_k_recall")
+        tk_val = metrics.get("top_k_value")
         if ens_r2 is not None:
             parts.append("## Model Evaluation Metrics\n")
-            parts.append("Two complementary metrics assess prediction quality:\n")
+            parts.append("Four complementary metrics assess prediction and search quality:\n")
             parts.append("")
             parts.append("| Metric | Value | Formula | Purpose |")
             parts.append("|:-------|:------|:--------|:--------|")
@@ -306,6 +309,12 @@ def generate_report(
                 eq_quality = "✓ Excellent" if eq_r2 > 0.6 else ("✓ Good" if eq_r2 > 0.3 else "⚠️ Weak")
                 parts.append(f"| **Equal-Wt Val R²** | **{eq_r2:.4f}** ({eq_quality}) | R²((1/K)Σ predᵢ, (1/K)Σ actualᵢ) | Downstream goal quality |")
                 parts.append(f"| Equal-Wt Val MAE | {eq_mae:.4f} | raw loss space | — |")
+            if sp is not None:
+                sp_quality = "✓ Excellent" if sp > 0.7 else ("✓ Good" if sp > 0.5 else ("⚠️ Moderate" if sp > 0.3 else "⚠️ Weak"))
+                parts.append(f"| **Spearman Rank Corr** | **{sp:.4f}** ({sp_quality}) | corr(rank(pred), rank(actual)) | Ranking ability |")
+            if tk is not None:
+                tk_quality = "✓ Excellent" if tk > 0.7 else ("✓ Good" if tk > 0.5 else ("⚠️ Moderate" if tk > 0.3 else "⚠️ Weak"))
+                parts.append(f"| **Top-{tk_val} Recall** | **{tk:.4f}** ({tk_quality}) | |pred_top_k ∩ actual_top_k| / k | Search hit rate |")
             parts.append("")
             parts.append("### Interpretation\n")
             parts.append("")
@@ -320,14 +329,39 @@ def generate_report(
             parts.append("- Matches downstream evaluation (21 benchmarks equally weighted)\n")
             parts.append("- Diagnostic: shows prediction quality for the ultimate goal\n")
             parts.append("")
+            parts.append("**Spearman Rank Correlation** (ranking ability):\n")
+            parts.append("- Measures whether the model correctly ranks which parameters are better\n")
+            parts.append("- Search only needs correct ranking, not accurate absolute values\n")
+            parts.append("- R² can be low when loss variance is small, but ranking may still be effective\n")
+            parts.append("- High value → model knows which parameters are better\n")
+            parts.append("")
+            parts.append("**Top-K Recall** (search hit rate):\n")
+            parts.append("- Fraction of search's top-K predictions that are actually in the top-K\n")
+            parts.append("- Directly measures whether the selected parameters are good\n")
+            parts.append("- Most practical metric: answers 'are my chosen parameters actually good?'\n")
+            parts.append("")
+            if sp is not None and sp > 0.5:
+                parts.append("✓ **Spearman > 0.5**: Ranking is reliable, search results trustworthy\n")
+            elif sp is not None and sp > 0.3:
+                parts.append("⚠️ **Spearman 0.3-0.5**: Moderate ranking ability, search may find decent parameters\n")
+            elif sp is not None:
+                parts.append("⚠️ **Spearman < 0.3**: Weak ranking ability, search results unreliable\n")
+            
+            if tk is not None and tk > 0.5:
+                parts.append(f"✓ **Top-{tk_val} Recall > 0.5**: Search finds good parameters\n")
+            elif tk is not None and tk > 0.3:
+                parts.append(f"⚠️ **Top-{tk_val} Recall 0.3-0.5**: Search finds some good parameters\n")
+            elif tk is not None:
+                parts.append(f"⚠️ **Top-{tk_val} Recall < 0.3**: Search struggles to find good parameters\n")
+            
             if ens_r2 > 0.3 and eq_r2 is not None and eq_r2 > 0.3:
-                parts.append("✓ **Both metrics strong**: Search strategy effective and downstream predictions accurate\n")
+                parts.append("✓ **Both R² metrics strong**: Search strategy effective and downstream predictions accurate\n")
             elif ens_r2 > 0.3 and eq_r2 is not None and eq_r2 < 0.3:
                 parts.append("⚠️ **Overall strong but Equal-Wt weak**: R²-weighting helps search but may sacrifice low-R² tasks\n")
             elif ens_r2 < 0.3 and eq_r2 is not None and eq_r2 > 0.3:
                 parts.append("⚠️ **Equal-Wt strong but Overall weak**: Consider using equal-weight search instead\n")
             else:
-                parts.append("⚠️ **Both metrics weak**: Model predictions unreliable, search results may be poor\n")
+                parts.append("⚠️ **Both R² metrics weak**: But check Spearman/Top-K — ranking may still be effective\n")
             parts.append("")
 
     if proxy_loss_stats:
