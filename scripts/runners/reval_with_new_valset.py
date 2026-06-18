@@ -23,6 +23,7 @@ Usage:
 import argparse
 import json
 import os
+import shutil
 import sys
 import time
 import urllib.request
@@ -227,11 +228,18 @@ def main():
         print("  Ensure the original run saved model weights (model.pt in each exp dir).")
         return 1
 
-    # ── Stage 2: Re-evaluate on new validation set ─────────
-    _t = time.time()
-    print(f"\n[Stage 2] Re-evaluating {len(experiments)} models on {val_set_name}...")
+    output_proxy_dir = os.path.join(output_dir, "proxy_experiments")
+    os.makedirs(output_proxy_dir, exist_ok=True)
 
-    from quadmix.pipeline.essential_proxy_runner import EssentialWebProxyRunner
+    done_experiments = set()
+    for d in os.listdir(output_proxy_dir):
+        if os.path.exists(os.path.join(output_proxy_dir, d, "meta.json")):
+            done_experiments.add(d)
+
+    pending_experiments = [e for e in experiments if e[0] not in done_experiments]
+    if done_experiments:
+        print(f"  [Resume] {len(done_experiments)} already done, "
+              f"{len(pending_experiments)} pending")
 
     config = QuaDMixConfig(
         num_domains=10, num_quality_criteria=5,
@@ -241,45 +249,74 @@ def main():
         target_tokens=int(args.target_tokens * 1e9) if args.target_tokens > 0 else 0,
     )
 
-    runner = EssentialWebProxyRunner(
-        config=config,
-        metadata_manager=mm,
-        val_data_path=val_path,
-        output_dir=os.path.join(output_dir, "proxy_experiments"),
-        device_type=args.device_type,
-        model_variant=args.model_variant,
-        test_block_size=args.block_size,
-        token_cache_dir=os.path.join(QUADMIX_TEMP_DIR, "token_cache"),
-        checkpoint_interval=0,
-    )
+    if not pending_experiments:
+        print(f"  [Resume] All {len(experiments)} experiments already done, skipping Stage 2")
+    else:
+        # ── Stage 2: Re-evaluate on new validation set ─────────
+        _t = time.time()
+        print(f"\n[Stage 2] Re-evaluating {len(pending_experiments)} models on {val_set_name}...")
 
-    model_paths = [exp[3] for exp in experiments]
-    reval_results = runner.revalidate_batch_parallel(
-        model_paths,
-        device_type=args.device_type,
-        num_gpus=args.num_gpus,
-    )
+        from quadmix.pipeline.essential_proxy_runner import EssentialWebProxyRunner
 
+        runner = EssentialWebProxyRunner(
+            config=config,
+            metadata_manager=mm,
+            val_data_path=val_path,
+            output_dir=output_proxy_dir,
+            device_type=args.device_type,
+            model_variant=args.model_variant,
+            test_block_size=args.block_size,
+            token_cache_dir=os.path.join(QUADMIX_TEMP_DIR, "token_cache"),
+            checkpoint_interval=0,
+        )
+
+        def _save_reval_result(idx: int, val_loss: float, per_task_losses):
+            exp_name = pending_experiments[idx][0]
+            meta_path = pending_experiments[idx][2]
+            with open(meta_path) as f:
+                meta = json.load(f)
+            old_val_loss = meta["val_loss"]
+            new_meta = dict(meta)
+            new_meta["val_loss"] = val_loss
+            new_meta["val_ppl"] = float(np.exp(val_loss))
+            new_meta["original_val_loss"] = old_val_loss
+            new_meta["reval_source"] = result_dir
+            new_meta["reval_val_set"] = val_set_name
+            if per_task_losses is not None:
+                new_meta["per_task_losses"] = per_task_losses
+            exp_out_dir = os.path.join(output_proxy_dir, exp_name)
+            os.makedirs(exp_out_dir, exist_ok=True)
+            with open(os.path.join(exp_out_dir, "meta.json"), "w") as f:
+                json.dump(new_meta, f, indent=2)
+            idx_path = os.path.join(proxy_dir, exp_name, "selected_indices.npy")
+            if os.path.exists(idx_path):
+                shutil.copy2(idx_path, os.path.join(exp_out_dir, "selected_indices.npy"))
+
+        model_paths = [exp[3] for exp in pending_experiments]
+        runner.revalidate_batch_parallel(
+            model_paths,
+            device_type=args.device_type,
+            num_gpus=args.num_gpus,
+            on_result=_save_reval_result,
+        )
+        stage_times["stage2_reval"] = time.time() - _t
+        print(f"[Stage 2] Re-evaluation: {stage_times['stage2_reval']:.1f}s")
+
+    # ── Load all results (done + new) ──────────────────────
     results = []
     reval_meta = []
-    for i, (exp_name, exp_path, meta_path, model_path) in enumerate(experiments):
+    for exp_name, exp_path, meta_path, model_path in experiments:
+        out_meta_path = os.path.join(output_proxy_dir, exp_name, "meta.json")
+        if not os.path.exists(out_meta_path):
+            continue
+        with open(out_meta_path) as f:
+            new_meta = json.load(f)
         with open(meta_path) as f:
-            meta = json.load(f)
-
-        new_val_loss, new_per_task_losses = reval_results[i]
-
-        old_val_loss = meta["val_loss"]
-        params = reconstruct_params_from_meta(meta)
-
-        new_meta = dict(meta)
-        new_meta["val_loss"] = new_val_loss
-        new_meta["val_ppl"] = float(np.exp(new_val_loss))
-        new_meta["original_val_loss"] = old_val_loss
-        new_meta["reval_source"] = result_dir
-        new_meta["reval_val_set"] = val_set_name
-        if new_per_task_losses is not None:
-            new_meta["per_task_losses"] = new_per_task_losses
-
+            old_meta = json.load(f)
+        new_val_loss = new_meta["val_loss"]
+        old_val_loss = old_meta["val_loss"]
+        new_per_task_losses = new_meta.get("per_task_losses")
+        params = reconstruct_params_from_meta(old_meta)
         results.append(ProxyResult(
             parameters=params,
             validation_loss=new_val_loss,
@@ -293,11 +330,8 @@ def main():
             "delta": new_val_loss - old_val_loss,
         })
 
-    stage_times["stage2_reval"] = time.time() - _t
-    print(f"[Stage 2] Re-evaluation: {stage_times['stage2_reval']:.1f}s")
-
     losses = np.array([r.validation_loss for r in results])
-    print(f"  New aggregate loss stats ({len(results)} experiments): "
+    print(f"  Aggregate loss stats ({len(results)} experiments): "
           f"mean={losses.mean():.4f}, std={losses.std():.4f}, "
           f"min={losses.min():.4f}, max={losses.max():.4f}")
 
@@ -321,20 +355,6 @@ def main():
             task_losses = np.array([r.per_task_losses[task] for r in results])
             print(f"    {task:<30} {per_task_means[task]:>8.4f} {per_task_stds[task]:>8.4f} "
                   f"{np.min(task_losses):>8.4f} {np.max(task_losses):>8.4f}")
-
-    # Save re-evaluation results
-    os.makedirs(os.path.join(output_dir, "proxy_experiments"), exist_ok=True)
-    for r, rm in zip(results, reval_meta):
-        exp_out_dir = os.path.join(output_dir, "proxy_experiments", rm["exp_name"])
-        os.makedirs(exp_out_dir, exist_ok=True)
-        with open(os.path.join(exp_out_dir, "meta.json"), "w") as f:
-            json.dump(r.metadata, f, indent=2)
-        idx_path = os.path.join(
-            proxy_dir, rm["exp_name"], "selected_indices.npy",
-        )
-        if os.path.exists(idx_path):
-            import shutil
-            shutil.copy2(idx_path, os.path.join(exp_out_dir, "selected_indices.npy"))
 
     # ── Stage 5: LightGBM Regression ────────────────────
     _t = time.time()

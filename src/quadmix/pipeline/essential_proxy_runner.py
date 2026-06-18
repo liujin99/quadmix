@@ -26,7 +26,7 @@ import os, math, time, json, glob
 import multiprocessing as mp
 import multiprocessing.shared_memory
 from functools import partial
-from typing import List, Optional, Dict, Tuple
+from typing import List, Optional, Dict, Tuple, Callable
 from contextlib import contextmanager
 import pandas as pd
 
@@ -1235,6 +1235,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         model_paths: list[str],
         device_type: str = "cuda",
         num_gpus: int | None = None,
+        on_result: Optional[Callable[[int, float, Optional[Dict[str, float]]], None]] = None,
     ) -> list[tuple[float, dict[str, float] | None]]:
         """Revalidate multiple models in parallel across GPUs.
 
@@ -1242,6 +1243,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             model_paths: list of saved model weight paths
             device_type: 'cuda' or 'npu'
             num_gpus: number of GPUs to use (default: all available)
+            on_result: optional callback(idx, val_loss, per_task_losses)
+                       called as each result arrives (for incremental saving)
 
         Returns:
             list of (val_loss, per_task_losses) in same order as model_paths
@@ -1266,6 +1269,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             for i, mpath in enumerate(model_paths):
                 r = self.revalidate_from_saved(mpath, device_type=device_type)
                 results.append(r)
+                if on_result is not None:
+                    on_result(i, r[0], r[1])
                 if (i + 1) % 50 == 0 or i == n_models - 1:
                     print(f"  [{i+1}/{n_models}] sequential reval done")
             return results
@@ -1324,6 +1329,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 exp_idx, val_loss, per_task_losses = item
                 all_results[exp_idx] = (val_loss, per_task_losses)
                 collected += 1
+                if on_result is not None:
+                    on_result(exp_idx, val_loss, per_task_losses)
                 if collected % 50 == 0 or collected == n_models:
                     print(f"  [RevalParallel] {collected}/{n_models} collected")
 
