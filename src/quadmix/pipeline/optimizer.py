@@ -689,7 +689,7 @@ class QuaDMixOptimizer:
             
             # ── Top-K recall (search hit rate) ──
             # Measures: what fraction of search's top-K are actually in the top-K?
-            k = min(self.config.top_k, n_val)
+            k = min(self.config.top_k_average, n_val)
             pred_top_k = set(np.argsort(eq_pred)[:k])
             actual_top_k = set(np.argsort(eq_actual)[:k])
             top_k_recall = len(pred_top_k & actual_top_k) / k if k > 0 else 0.0
