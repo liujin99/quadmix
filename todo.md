@@ -832,3 +832,192 @@ micro_batch=32, block_size=2048, vocab=50432 时的显存分布（bf16 后）：
 | F11 | _cache_add_rows dict 去重 | 每 shard 几十 ms | 待实施 |
 | F12 | precompute_samples np.unique | 一次性数秒 | 待实施 |
 | F13 | _run_validation list+cat | 每次 val 数十 ms | 待实施 |
+
+---
+
+## 推理准确性与置信度提升 — 2026-06-22
+
+### 搜索策略升级
+
+#### G1. Bayesian Optimization 替代随机搜索
+- **文件**: `src/quadmix/pipeline/optimizer.py:search_optimal()`
+- **问题**: 100K 点在 90 维空间极度稀疏（每维平均 ~3 个点），随机搜索效率低
+- **方案**:
+  1. **TPE (Tree-structured Parzen Estimator)**: 用已评估点构建概率模型，迭代采样更有希望的区域
+  2. **CMA-ES**: 协方差矩阵自适应进化策略，适合连续高维空间
+  3. 在 `search_optimal()` 中增加 `bayesian` 模式，用 `optuna` 库
+- **预期效果**: 同等搜索预算下，Search Lift 提升 2-5x，Spearman +0.1~0.2
+- **实施成本**: 中（加 optuna 依赖，~200 行代码）
+- **关联**: 扩展 B2
+
+#### G2. 两阶段搜索（粗筛 + 精搜）
+- **文件**: `src/quadmix/pipeline/optimizer.py:search_optimal()`
+- **方案**:
+  - Stage 1: 100K 随机点粗筛 → top-1000
+  - Stage 2: 在 top-1000 邻域做局部精细搜索（小范围扰动 + BO）
+- **预期效果**: 有效提高 Top-K Recall
+- **实施成本**: 低（在现有随机搜索基础上增加第二阶段）
+
+### 模型改进
+
+#### G3. Conformal Prediction（严格预测区间）
+- **文件**: `src/quadmix/pipeline/optimizer.py`
+- **问题**: 当前只有 bootstrap CI，缺乏严格的预测区间
+- **方案**:
+  1. **Conformal Prediction**: 无需分布假设，保证覆盖率（如 90% 预测区间）
+  2. **LightGBM Quantile Regression**: 直接预测 10%/90% 分位数
+  3. 每个搜索结果附带置信区间，回答"这个配比有多可靠"
+- **预期效果**: 提供有理论保证的预测区间，增强搜索结果可信度
+- **实施成本**: 低（后处理，~100 行代码）
+
+#### G4. 多模型家族集成
+- **文件**: `src/quadmix/pipeline/optimizer.py`
+- **问题**: 只用 LightGBM 一种回归器（B9 的扩展）
+- **方案**:
+  1. **XGBoost + CatBoost**: 不同树结构偏好，减少单模型偏差
+  2. **Ridge/ElasticNet**: 线性 baseline，高维时可能更稳
+  3. **Gaussian Process**: 自带不确定性估计，适合小数据
+  4. 取 ensemble average 或 stacking
+- **预期效果**: R² +0.05~0.1，降低单模型偏差
+- **实施成本**: 中（需统一接口 + 集成策略）
+
+#### G5. Multi-Task 学习 / Stacking
+- **文件**: `src/quadmix/pipeline/optimizer.py:_train_per_task_models()`
+- **问题**: 21 个独立 LightGBM 无法共享跨 task 信息
+- **方案**:
+  1. **Stacking**: 为每个 task 添加其他 task 的预测作为额外特征
+  2. **共享特征工程**: 利用 task 间相关性提升低 R² task 的预测
+- **预期效果**: 减少过拟合，提升低 R² task 的预测质量
+- **实施成本**: 中
+
+### 实验设计优化
+
+#### G6. Active Learning 选择实验点
+- **文件**: `src/quadmix/pipeline/param_sampler.py`, `src/quadmix/pipeline/optimizer.py`
+- **问题**: 当前 ~900 个实验是随机采样的，信息密度不均
+- **方案**:
+  1. 用已有模型预测未评估区域的**不确定性**
+  2. 优先在**高不确定性 + 高预测性能**区域跑新实验
+  3. 迭代式：训练 → 选点 → 评估 → 重新训练
+- **预期效果**: 用更少实验获得更高信息增益
+- **实施成本**: 中
+
+#### G7. 增加实验数量到 2000+
+- **问题**: 当前 874 实验 vs 90 维参数 → ~10 samples/dim，偏少
+- **方案**: 增加到 2000-3000 实验，配合 Active Learning 选择最有信息量的点
+- **预期效果**: R² +0.1~0.2
+- **实施成本**: 高（算力，每实验 ~30 分钟 NPU 训练）
+
+#### G8. 参数空间正交化
+- **文件**: `src/quadmix/pipeline/param_sampler.py`, `src/quadmix/core/sampler.py`
+- **问题**: 不同 (λ, ω, η, ε) 组合产生相似采样曲线，引入回归不确定性（B3 扩展）
+- **方案**:
+  1. **PCA/特征变换**: 将 4 个采样参数映射到"采样曲线形状"的主成分空间
+  2. 对 sigmoid 输出做 PCA，取前 2-3 个主成分作为新参数
+- **预期效果**: 降低有效维度（90 → ~60），减少回归噪声
+- **实施成本**: 中
+
+#### G9. 多 Proxy 集成（减少标签噪声）
+- **文件**: `src/quadmix/pipeline/essential_proxy_runner.py`
+- **问题**: 单个 proxy model 训练有随机性，同一参数配置不同 seed 可能得到不同 loss
+- **方案**:
+  1. 对同一参数配置训练 3 个不同 seed 的 proxy model
+  2. 取 loss 均值作为标签 → 减少训练随机性噪声
+  3. 取 loss 方差 → 额外的不确定性信号
+- **预期效果**: 标签噪声降低 ~√3 倍
+- **实施成本**: 高（3x 训练算力）
+
+### 验证与评估增强
+
+#### G10. 扩大验证集（特别是低样本 task）
+- **文件**: `scripts/validation_set/prepare_core_bmk_v5.py`
+- **问题**: 部分 task 样本太少（repeat_copy_logic 32, operators 210, lsat_ar 230），loss 估计方差大 → 噪声标签
+- **方案**: 扩充到 50K+ samples，特别是 <500 样本的 task 补充到 500+
+- **预期效果**: 减少 label noise，提升 per-task R²
+- **实施成本**: 中（需要找到可用数据源）
+
+#### G11. Proxy 模型容量提升
+- **文件**: `src/quadmix/core/proxy_model.py`
+- **问题**: 1M 参数无法做推理任务（copa, commonsense_qa, lsat_ar），这些 task 的 loss 信号接近噪声
+- **方案**:
+  1. 提升到 5M-10M 参数（仍在可承受的训练成本内）
+  2. 或改用 2-3 个不同大小的 proxy，用 scaling law 外推
+- **预期效果**: 推理类 task 的 loss 信号从噪声变为有效信号
+- **实施成本**: 高（算力 + 显存）
+
+### 特征工程
+
+#### G12. 添加非线性/交互特征
+- **文件**: `src/quadmix/pipeline/optimizer.py`, `src/quadmix/core/types.py`
+- **问题**: 当前 90 维是原始参数，LightGBM 需要自己学交互
+- **方案**:
+  1. **交互特征**: alpha_i × lambda_j（质量权重 × 采样参数的交互）
+  2. **聚合特征**: 每个 domain 的"有效采样率"（sigmoid 输出积分）
+  3. **统计特征**: 每个 domain 的文档数、平均质量分等
+- **预期效果**: 帮助 LightGBM 更快学到关键 pattern
+- **实施成本**: 低
+
+#### G13. SHAP/fANOVA 参数敏感度分析
+- **文件**: `src/quadmix/pipeline/optimizer.py`
+- **方案**:
+  1. 用 SHAP 或 fANOVA 分析哪些参数对 loss 影响最大
+  2. 冻结不敏感参数 → 降低有效搜索维度
+  3. 对敏感参数做更精细的搜索网格
+- **预期效果**: 搜索效率提升 2-3x
+- **实施成本**: 低（后处理分析）
+
+### 优先级总结
+
+| 优先级 | 编号 | 改进 | 预期收益 | 实施成本 | 状态 |
+|:---|:---|:---|:---|:---|:---|
+| **P0** | G1 | Bayesian Optimization | Spearman +0.1~0.2 | 中 | 待实施 |
+| **P0** | G3 | Conformal Prediction | 置信区间保证 | 低 | 待实施 |
+| **P1** | G7 | 增加实验到 2000+ | R² +0.1~0.2 | 高（算力） | 待实施 |
+| **P1** | G4 | 多模型集成 | R² +0.05~0.1 | 中 | 待实施 |
+| **P1** | G8 | 参数正交化 | 有效维度降低 | 中 | 待实施 |
+| **P1** | G2 | 两阶段搜索 | Top-K Recall 提升 | 低 | 待实施 |
+| **P2** | G6 | Active Learning | 信息增益最大化 | 中 | 待实施 |
+| **P2** | G10 | 扩大验证集 | 标签噪声降低 | 中 | 待实施 |
+| **P2** | G5 | Multi-Task / Stacking | 低 R² task 提升 | 中 | 待实施 |
+| **P2** | G11 | Proxy 容量提升 | 推理 task 信号 | 高（算力） | 待实施 |
+| **P2** | G9 | 多 Proxy 集成 | 标签噪声 √3 倍 | 高（算力） | 待实施 |
+| **P3** | G13 | SHAP 敏感度分析 | 搜索效率 2-3x | 低 | 待实施 |
+| **P3** | G12 | 非线性/交互特征 | 模型表达力 | 低 | 待实施 |
+
+---
+
+## LightGBM 拟合质量优化 — 2026-06-22
+
+### ~~H1. 自适应超参数公式~~ ✅ 已完成
+- **文件**: `src/quadmix/pipeline/optimizer.py:_build_model()`
+- **问题**: 硬编码两档（n<500 和 n>=500），断崖跳变，无法适配不同样本量
+- **修复**: 基于 `n_train` 的连续公式，自动适配：
+  ```python
+  num_leaves = min(31, max(7, int(sqrt(n))))
+  max_depth = min(8, max(3, int(log2(n))))
+  min_child = max(5, n // 20)
+  lr = max(0.01, 0.5 / sqrt(n))
+  reg = max(0.05, 1.0 * (200/n)^0.5)
+  n_est = min(2000, max(300, 20*sqrt(n)))
+  ```
+- **效果**: 样本少时自动保守（小树+强正则），样本多时自动放开，零人工干预
+
+### ~~H2. 目标变量 log 变换~~ ✅ 已完成
+- **文件**: `src/quadmix/pipeline/optimizer.py:fit()/predict()/score()/save()/load()`
+- **问题**: cross-entropy loss 正数且右偏，直接拟合效率低
+- **修复**:
+  - `fit()`: `y = log(loss + offset)`，offset 处理 loss<=0 的情况
+  - `predict()`: `exp(raw_pred) - offset`，还原到原始 loss 空间
+  - `score()`: 手动计算 R²（在原始空间），避免 sklearn 内部 score 用 log 空间
+  - `save()/load()`: 持久化 `_log_transform` 和 `_log_offset`
+- **效果**: 对数变换让分布更对称，LightGBM 更好拟合；预测和评估仍在原始空间
+
+### ~~H3. 大样本加 max_depth~~ ✅ 已完成（包含在 H1 中）
+- **问题**: 大样本 regime 无 `max_depth`，只靠 `num_leaves` 控制复杂度
+- **修复**: H1 的连续公式对所有 n_train 都设置 `max_depth`
+
+### ~~H4. Fold 余数修复~~ ✅ 已完成
+- **文件**: `src/quadmix/pipeline/optimizer.py:_train_per_task_models()`
+- **问题**: `fold_size = n_total // n_folds` + 顺序切片，`n_total % n_folds` 个样本丢失
+- **修复**: `np.array_split(indices, n_folds)` 自动均分余数
+- **效果**: 所有样本都参与 CV 评估，R² 估计更准确

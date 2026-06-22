@@ -47,7 +47,7 @@ OUTPUT=""
 NUM_SEARCH="100000"
 TOP_K="10"
 TARGET_TOKENS="0"
-SEARCH_MODE="r2_weighted"
+SEARCH_MODE="equal_weight"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -70,7 +70,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --top-k N                Top-K average (default: 10)"
             echo "  --target-tokens N        Target in billions (default: 0)"
             echo "  --preprocessed-dir PATH  Preprocessed shards dir"
-            echo "  --search-mode MODE       r2_weighted (default) or equal_weight"
+            echo "  --search-mode MODE       equal_weight (default) or r2_weighted"
             exit 0
             ;;
         *)

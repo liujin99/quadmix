@@ -199,6 +199,7 @@ class RegressionModel:
         self.model_kwargs = model_kwargs
         self._model = None
         self._is_fitted = False
+        self._log_transform = False
 
     def _build_model(self, n_train: int = 0):
         """Build the underlying regressor model."""
@@ -210,34 +211,27 @@ class RegressionModel:
                     "LightGBM is required. Install with: pip install lightgbm"
                 )
 
-            if n_train > 0 and n_train < 500:
-                max_depth = min(5, max(3, int(np.log2(n_train))))
-                default_params = {
-                    "n_estimators": 500,
-                    "learning_rate": 0.02,
-                    "max_depth": max_depth,
-                    "num_leaves": min(15, 2 ** max_depth - 1),
-                    "min_child_samples": max(30, n_train // 6),
-                    "subsample": 0.8,
-                    "colsample_bytree": 0.6,
-                    "reg_alpha": 1.0,
-                    "reg_lambda": 1.0,
-                    "random_state": 42,
-                    "verbose": -1,
-                }
-            else:
-                default_params = {
-                    "n_estimators": 1000,
-                    "learning_rate": 0.05,
-                    "num_leaves": 31,
-                    "min_child_samples": min(20, max(5, n_train // 10)),
-                    "subsample": 0.8,
-                    "colsample_bytree": 0.8,
-                    "reg_alpha": 0.1,
-                    "reg_lambda": 0.1,
-                    "random_state": 42,
-                    "verbose": -1,
-                }
+            n = max(n_train, 10)
+            max_depth = min(8, max(3, int(np.log2(n))))
+            num_leaves = min(31, max(7, int(np.sqrt(n))))
+            min_child = max(5, n // 20)
+            lr = max(0.01, min(0.1, 0.5 / np.sqrt(n)))
+            reg = max(0.05, 1.0 * (200 / n) ** 0.5)
+            n_est = min(2000, max(300, int(20 * np.sqrt(n))))
+            colsample = 0.6 if n < 300 else 0.8
+            default_params = {
+                "n_estimators": n_est,
+                "learning_rate": lr,
+                "max_depth": max_depth,
+                "num_leaves": num_leaves,
+                "min_child_samples": min_child,
+                "subsample": 0.8,
+                "colsample_bytree": colsample,
+                "reg_alpha": reg,
+                "reg_lambda": reg,
+                "random_state": 42,
+                "verbose": -1,
+            }
             default_params.update(self.model_kwargs)
             self._model = lgb.LGBMRegressor(**default_params)
 
@@ -302,12 +296,23 @@ class RegressionModel:
         self._num_domains = num_domains
         self._num_criteria = num_criteria
 
+        # Log transform: cross-entropy losses are positive and right-skewed
+        min_loss = np.min(y)
+        if min_loss > 0:
+            self._log_transform = True
+            self._log_offset = 0.0
+            y = np.log(y)
+        else:
+            self._log_transform = True
+            self._log_offset = abs(min_loss) + 1e-6
+            y = np.log(y + self._log_offset)
+
         self._build_model(n_train=len(params_list))
 
         if (self.model_type == "lightgbm" and eval_params_list is not None
                 and eval_losses is not None and len(eval_params_list) > 0):
             X_val = np.array([p.flatten() for p in eval_params_list])
-            y_val = np.array(eval_losses)
+            y_val = np.log(np.array(eval_losses) + self._log_offset)
             import lightgbm as lgb
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", UserWarning)
@@ -339,7 +344,10 @@ class RegressionModel:
         X = np.array([p.flatten() for p in params_list])
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)
-            return self._model.predict(X)
+            raw = self._model.predict(X)
+        if self._log_transform:
+            return np.exp(raw) - self._log_offset
+        return raw
 
     def feature_importance(self) -> Optional[Dict[str, float]]:
         """Get feature importance from the fitted model (LightGBM/RF only)."""
@@ -364,13 +372,14 @@ class RegressionModel:
         return None
 
     def score(self, params_list: List[ParameterSet], losses: npt.NDArray[np.float64]) -> float:
-        """Return R² score for the model on given data."""
+        """Return R² score for the model on given data (in original loss space)."""
         if not self._is_fitted:
             raise RuntimeError("Model not fitted yet.")
-        X = np.array([p.flatten() for p in params_list])
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", UserWarning)
-            return float(self._model.score(X, losses))
+        y_true = np.array(losses)
+        y_pred = self.predict(params_list)
+        ss_res = np.sum((y_true - y_pred) ** 2)
+        ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
+        return float(1 - ss_res / ss_tot) if ss_tot > 0 else 0.0
 
     def save(self, path: str):
         """Save the regression model to disk."""
@@ -381,6 +390,8 @@ class RegressionModel:
             "model_kwargs": self.model_kwargs,
             "num_domains": self._num_domains,
             "num_criteria": self._num_criteria,
+            "log_transform": self._log_transform,
+            "log_offset": self._log_offset,
         }
         joblib.dump(data, path)
 
@@ -393,6 +404,8 @@ class RegressionModel:
         model._model = data["model"]
         model._num_domains = data["num_domains"]
         model._num_criteria = data["num_criteria"]
+        model._log_transform = data.get("log_transform", False)
+        model._log_offset = data.get("log_offset", 0.0)
         model._is_fitted = True
         return model
 
@@ -429,6 +442,7 @@ class QuaDMixOptimizer:
         self._spearman_corr: Optional[float] = None
         self._top_k_recall: Optional[float] = None
         self._top_k_value: Optional[int] = None
+        self._search_lift: Optional[float] = None
 
     def add_proxy_results(self, results: List[ProxyResult]):
         """Add proxy experiment results."""
@@ -575,8 +589,7 @@ class QuaDMixOptimizer:
             rng = np.random.RandomState(42)
             indices = np.arange(n_total)
             rng.shuffle(indices)
-            fold_size = n_total // n_folds
-            folds = [indices[i * fold_size:(i + 1) * fold_size] for i in range(n_folds)]
+            folds = np.array_split(indices, n_folds)
             print(f"[QuaDMixOptimizer] Training {len(valid_tasks)} per-task models with {n_folds}-fold CV (parallel)...")
         else:
             print(f"[QuaDMixOptimizer] Training {len(valid_tasks)} per-task models (single split, parallel)...")
@@ -635,6 +648,11 @@ class QuaDMixOptimizer:
             std = task_stds[task]
             marker = " [filtered]" if weight == 0 else ""
             print(f"  {task:<30} {train_r2:>10.4f} {r2:>14.4f} {gap:>8.3f} {weight:>8.4f} {std:>8.4f}{marker}")
+        
+        all_r2s = [self._per_task_r2[t] for t in valid_tasks.keys()]
+        mean_r2 = float(np.mean(all_r2s))
+        n_good = sum(1 for r in all_r2s if r > 0.3)
+        print(f"  Per-task R²: mean {mean_r2:.4f} ({len(all_r2s)} tasks, {n_good} with R² > 0.3)")
 
         if len(val_idx) > 0:
             val_params = [params_list[i] for i in val_idx]
@@ -699,6 +717,11 @@ class QuaDMixOptimizer:
             actual_top_k = set(np.argsort(eq_actual)[:k])
             top_k_recall = len(pred_top_k & actual_top_k) / k if k > 0 else 0.0
 
+            search_top_k_actual_mean = float(np.mean(eq_actual[list(pred_top_k)]))
+            random_mean = float(np.mean(eq_actual))
+            random_std = float(np.std(eq_actual))
+            search_lift = (random_mean - search_top_k_actual_mean) / max(random_std, 1e-12)
+
             self._ensemble_val_r2 = overall_r2
             self._ensemble_val_mae = overall_mae
             self._equal_weight_r2 = equal_weight_r2
@@ -706,10 +729,12 @@ class QuaDMixOptimizer:
             self._spearman_corr = spearman_corr
             self._top_k_recall = top_k_recall
             self._top_k_value = k
+            self._search_lift = search_lift
             r2_desc = f"CV {n_folds}-fold" if n_folds > 1 and n_total >= n_folds else "single split"
             mode_label = "equal-weight" if weight_mode == "equal_weight" else "R²-weighted"
 
             print(f"[QuaDMixOptimizer] ── Evaluation Metrics ({len(active_tasks)} active tasks, {r2_desc}) ──")
+            print(f"[QuaDMixOptimizer] Search mode: {mode_label} (optimizes {'Σ z_predᵢ / K' if weight_mode == 'equal_weight' else 'Σ wᵢ·z_predᵢ'}, matches downstream goal)")
             print(f"[QuaDMixOptimizer] Overall Val R² = {overall_r2:.4f}, MAE = {overall_mae:.4f}")
             print(f"[QuaDMixOptimizer]   → R²(Σ wᵢ·z_predᵢ, Σ wᵢ·z_actualᵢ): search objective quality (z-score via train stats, R²-weighted)")
             print(f"[QuaDMixOptimizer] Equal-Wt Val R² = {equal_weight_r2:.4f}, MAE = {equal_weight_mae:.4f}")
@@ -720,6 +745,9 @@ class QuaDMixOptimizer:
             print(f"[QuaDMixOptimizer] Top-{k} Recall = {top_k_recall:.4f} ({int(top_k_recall*k)}/{k}) ({mode_label} pred vs equal-wt actual)")
             print(f"[QuaDMixOptimizer]   → Fraction of search's top-{k} that are in equal-weight actual top-{k}")
             print(f"[QuaDMixOptimizer]   → Directly measures search quality: are selected parameters good for downstream goal?")
+            print(f"[QuaDMixOptimizer] Search Lift = {search_lift:.4f} σ ({mode_label} top-{k} vs random)")
+            print(f"[QuaDMixOptimizer]   → How much better search's top-{k} is vs random selection (in std devs)")
+            print(f"[QuaDMixOptimizer]   → Positive = search finds better parameters than random")
             if spearman_corr > 0.5:
                 print(f"[QuaDMixOptimizer] ✓ Spearman > 0.5: ranking is reliable, search results trustworthy")
             elif spearman_corr > 0.3:
@@ -734,6 +762,7 @@ class QuaDMixOptimizer:
             self._spearman_corr = None
             self._top_k_recall = None
             self._top_k_value = None
+            self._search_lift = None
 
     def _compute_reliability(
         self,
@@ -958,6 +987,10 @@ class QuaDMixOptimizer:
         return self._top_k_value
 
     @property
+    def search_lift(self) -> Optional[float]:
+        return self._search_lift
+
+    @property
     def sample_sufficient(self) -> Optional[bool]:
         return getattr(self, "_sample_sufficient", None)
 
@@ -1015,4 +1048,5 @@ class QuaDMixOptimizer:
             "spearman_corr": self._spearman_corr,
             "top_k_recall": self._top_k_recall,
             "top_k_value": self._top_k_value,
+            "search_lift": self._search_lift,
         }

@@ -296,8 +296,13 @@ def generate_report(
         sp = metrics.get("spearman_corr")
         tk = metrics.get("top_k_recall")
         tk_val = metrics.get("top_k_value")
+        sl = metrics.get("search_lift")
         if ens_r2 is not None:
             parts.append("## Model Evaluation Metrics\n")
+            mode_label = "equal-weight" if config and config.get("search_weight_mode") == "equal_weight" else "R²-weighted"
+            search_desc = "Σ z_predᵢ / K" if mode_label == "equal-weight" else "Σ wᵢ·z_predᵢ"
+            parts.append(f"**Search mode:** {mode_label} (optimizes {search_desc}, matches downstream goal)\n")
+            parts.append("")
             parts.append("Four complementary metrics assess prediction and search quality:\n")
             parts.append("")
             parts.append("| Metric | Value | Formula | Purpose |")
@@ -316,6 +321,9 @@ def generate_report(
             if tk is not None:
                 tk_quality = "✓ Excellent" if tk > 0.7 else ("✓ Good" if tk > 0.5 else ("⚠️ Moderate" if tk > 0.3 else "⚠️ Weak"))
                 parts.append(f"| **Top-{tk_val} Recall** | **{tk:.4f}** ({tk_quality}) | |pred_top_k ∩ actual_top_k| / k | Search hit rate ({mode_label}) |")
+            if sl is not None:
+                sl_quality = "✓ Excellent" if sl > 1.0 else ("✓ Good" if sl > 0.5 else ("⚠️ Moderate" if sl > 0.2 else "⚠️ Weak"))
+                parts.append(f"| **Search Lift** | **{sl:.4f}** σ ({sl_quality}) | (μ_random - μ_search_top_k) / σ | Search value vs random ({mode_label}) |")
             parts.append("")
             parts.append("### Interpretation\n")
             parts.append("")
@@ -343,6 +351,11 @@ def generate_report(
             parts.append("- Directly measures whether the selected parameters are good\n")
             parts.append("- Most practical metric: answers 'are my chosen parameters actually good?'\n")
             parts.append("")
+            parts.append(f"**Search Lift** (search value vs random, {mode_label}):\n")
+            parts.append("- How many standard deviations better search's top-K is compared to random selection\n")
+            parts.append("- Positive value means search finds better parameters than random\n")
+            parts.append("- Most intuitive metric for stakeholders: answers 'how much better is search than random?'\n")
+            parts.append("")
             if sp is not None and sp > 0.5:
                 parts.append("✓ **Spearman > 0.5**: Ranking is reliable, search results trustworthy\n")
             elif sp is not None and sp > 0.3:
@@ -356,6 +369,15 @@ def generate_report(
                 parts.append(f"⚠️ **Top-{tk_val} Recall 0.3-0.5**: Search finds some good parameters\n")
             elif tk is not None:
                 parts.append(f"⚠️ **Top-{tk_val} Recall < 0.3**: Search struggles to find good parameters\n")
+            
+            if sl is not None and sl > 1.0:
+                parts.append(f"✓ **Search Lift > 1.0σ**: Search significantly outperforms random selection\n")
+            elif sl is not None and sl > 0.5:
+                parts.append(f"✓ **Search Lift > 0.5σ**: Search moderately outperforms random selection\n")
+            elif sl is not None and sl > 0.2:
+                parts.append(f"⚠️ **Search Lift 0.2-0.5σ**: Search slightly outperforms random\n")
+            elif sl is not None:
+                parts.append(f"⚠️ **Search Lift < 0.2σ**: Search provides minimal advantage over random\n")
             
             if ens_r2 > 0.3 and eq_r2 is not None and eq_r2 > 0.3:
                 parts.append("✓ **Both R² metrics strong**: R²-weighting and equal-weight both effective in z-score space\n")
@@ -400,6 +422,16 @@ def generate_report(
             else:
                 status = "⚠️ Weak"
             parts.append(f"| {name} | {r2:.4f} | {weight:.4f} | {std_str} | {status} |")
+        
+        tasks = per_task_analysis.get("tasks", [])
+        all_r2s = [t["r2"] for t in tasks]
+        if all_r2s:
+            mean_r2 = sum(all_r2s) / len(all_r2s)
+            n_good = sum(1 for r in all_r2s if r > 0.3)
+            parts.append("")
+            parts.append(f"**Per-task R²:** mean {mean_r2:.4f} ({len(all_r2s)} tasks, {n_good} with R² > 0.3)")
+            parts.append("")
+            parts.append("Note: Per-task R² measures individual task prediction quality. Aggregate R² is lower due to correlated errors when averaging (mathematical property, not model failure).")
         parts.append("")
 
     parts += [

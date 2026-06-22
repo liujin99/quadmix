@@ -136,9 +136,9 @@ def build_parser():
     p.add_argument("--top-k", type=int, default=5)
     p.add_argument("--target-tokens", type=float, default=0.0,
                    help="Target tokens in billions (0 = no target)")
-    p.add_argument("--search-mode", default="r2_weighted",
+    p.add_argument("--search-mode", default="equal_weight",
                    choices=["r2_weighted", "equal_weight"],
-                   help="Search weighting mode (default: r2_weighted)")
+                   help="Search weighting mode (default: equal_weight)")
     return p
 
 
@@ -300,6 +300,7 @@ def main():
             "spearman_corr": pipeline._optimizer.spearman_corr,
             "top_k_recall": pipeline._optimizer.top_k_recall,
             "top_k_value": pipeline._optimizer.top_k_value,
+            "search_lift": pipeline._optimizer.search_lift,
             "best_predicted_loss": float(predicted_losses.min()),
             "top_k_avg_loss": top_k_avg_loss,
         },
@@ -393,10 +394,13 @@ def main():
     sp = pipeline._optimizer.spearman_corr
     tk = pipeline._optimizer.top_k_recall
     tk_val = pipeline._optimizer.top_k_value
+    sl = pipeline._optimizer.search_lift
     if sp is not None:
         print(f"  Spearman Rank Corr = {sp:.4f} (ranking ability)")
     if tk is not None:
         print(f"  Top-{tk_val} Recall = {tk:.4f} ({int(tk*tk_val)}/{tk_val} hits)")
+    if sl is not None:
+        print(f"  Search Lift = {sl:.4f} σ (search vs random)")
     print(f"  Output: {output_dir}/")
     print(f"    ├── optimal_parameters.json")
     print(f"    ├── pipeline_summary.json")

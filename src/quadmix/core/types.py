@@ -207,7 +207,7 @@ class QuaDMixConfig:
     num_proxy_experiments: int = 3000        # Number of proxy experiments (paper: 3000)
     num_search_points: int = 100000          # Number of points for optimal search (paper: 100000)
     top_k_average: int = 10                  # Average top-K candidates (paper: 10)
-    search_weight_mode: str = "r2_weighted"  # Search weighting: "r2_weighted" or "equal_weight"
+    search_weight_mode: str = "equal_weight"  # Search weighting: "r2_weighted" or "equal_weight"
 
     # Sampling bounds (paper defaults)
     lambda_min: float = 0.0

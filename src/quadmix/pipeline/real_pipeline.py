@@ -59,6 +59,7 @@ class PipelineOutput:
     spearman_corr: Optional[float]
     top_k_recall: Optional[float]
     top_k_value: Optional[int]
+    search_lift: Optional[float]
     best_predicted_loss: float
     selected_indices: npt.NDArray[np.int64]
     sampling_values: npt.NDArray[np.float64]
@@ -400,10 +401,13 @@ class QuaDMixPipeline:
         sp = self._optimizer.spearman_corr
         tk = self._optimizer.top_k_recall
         tk_val = self._optimizer.top_k_value
+        sl = self._optimizer.search_lift
         if sp is not None:
             print(f"  Spearman Rank Corr = {sp:.4f} (ranking ability)")
         if tk is not None:
             print(f"  Top-{tk_val} Recall = {tk:.4f} ({int(tk*tk_val)}/{tk_val} hits)")
+        if sl is not None:
+            print(f"  Search Lift = {sl:.4f} σ (search vs random)")
         print(f"  Output: {output_dir}/")
         print(f"    ├── optimal_parameters.json")
         print(f"    ├── pipeline_summary.json")
@@ -424,6 +428,7 @@ class QuaDMixPipeline:
             spearman_corr=self._optimizer.spearman_corr,
             top_k_recall=self._optimizer.top_k_recall,
             top_k_value=self._optimizer.top_k_value,
+            search_lift=self._optimizer.search_lift,
             best_predicted_loss=float(predicted_losses.min()),
             selected_indices=selected_indices,
             sampling_values=sampling_values,
@@ -652,6 +657,7 @@ class QuaDMixPipeline:
                 "spearman_corr": self._optimizer.spearman_corr,
                 "top_k_recall": self._optimizer.top_k_recall,
                 "top_k_value": self._optimizer.top_k_value,
+                "search_lift": self._optimizer.search_lift,
                 "best_predicted_loss": float(predicted_losses.min()),
                 "top_k_avg_loss": top_k_avg_loss,
             },
