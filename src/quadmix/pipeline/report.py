@@ -299,7 +299,13 @@ def generate_report(
         sl = metrics.get("search_lift")
         if ens_r2 is not None:
             parts.append("## Model Evaluation Metrics\n")
-            mode_label = "equal-weight" if config and config.get("search_weight_mode") == "equal_weight" else "R²-weighted"
+            _swm = config.get("search_weight_mode", "equal_weight") if config else "equal_weight"
+            if _swm == "equal_weight":
+                mode_label = "equal-weight"
+            elif _swm == "r2_sigma_weighted":
+                mode_label = "R²×σ-weighted"
+            else:
+                mode_label = "R²-weighted"
             search_desc = "Σ z_predᵢ / K" if mode_label == "equal-weight" else "Σ wᵢ·z_predᵢ"
             parts.append(f"**Search mode:** {mode_label} (optimizes {search_desc}, matches downstream goal)\n")
             parts.append("")
@@ -314,7 +320,6 @@ def generate_report(
                 eq_quality = "✓ Excellent" if eq_r2 > 0.6 else ("✓ Good" if eq_r2 > 0.3 else "⚠️ Weak")
                 parts.append(f"| **Equal-Wt Val R²** | **{eq_r2:.4f}** ({eq_quality}) | R²((1/K)Σ z_predᵢ, (1/K)Σ z_actualᵢ) | Downstream goal quality |")
                 parts.append(f"| Equal-Wt Val MAE | {eq_mae:.4f} | z-score space | — |")
-            mode_label = "equal-weight" if config and config.get("search_weight_mode") == "equal_weight" else "R²-weighted"
             if sp is not None:
                 sp_quality = "✓ Excellent" if sp > 0.7 else ("✓ Good" if sp > 0.5 else ("⚠️ Moderate" if sp > 0.3 else "⚠️ Weak"))
                 parts.append(f"| **Spearman Rank Corr** | **{sp:.4f}** ({sp_quality}) | corr(rank(pred), rank(actual)) | Ranking ability ({mode_label}) |")

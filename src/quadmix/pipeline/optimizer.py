@@ -609,9 +609,14 @@ class QuaDMixOptimizer:
         
         task_stds = {task: self._per_task_train_stats[task][1] for task in valid_tasks}
         raw_weights = {}
+        weight_mode = self.config.search_weight_mode
         for task in valid_tasks:
             r2 = self._per_task_r2[task]
-            raw_weights[task] = max(r2, 0.0)
+            if weight_mode == "r2_sigma_weighted":
+                sigma = task_stds[task]
+                raw_weights[task] = max(r2, 0.0) * sigma
+            else:
+                raw_weights[task] = max(r2, 0.0)
         
         total_raw = sum(raw_weights.values())
         if total_raw < 1e-12:
@@ -718,7 +723,12 @@ class QuaDMixOptimizer:
             self._top_k_value = k
             self._search_lift = search_lift
             r2_desc = f"CV {n_folds}-fold" if n_folds > 1 and n_total >= n_folds else "single split"
-            mode_label = "equal-weight" if weight_mode == "equal_weight" else "R²-weighted"
+            if weight_mode == "equal_weight":
+                mode_label = "equal-weight"
+            elif weight_mode == "r2_sigma_weighted":
+                mode_label = "R²×σ-weighted"
+            else:
+                mode_label = "R²-weighted"
 
             print(f"[QuaDMixOptimizer] ── Evaluation Metrics ({len(active_tasks)} active tasks, {r2_desc}) ──")
             print(f"[QuaDMixOptimizer] Search mode: {mode_label} (optimizes {'Σ z_predᵢ / K' if weight_mode == 'equal_weight' else 'Σ wᵢ·z_predᵢ'}, matches downstream goal)")
@@ -898,7 +908,8 @@ class QuaDMixOptimizer:
                     z_pred = (raw_pred - task_mean) / max(task_std, 1e-8)
                     z_score_sum += w * z_pred
                 predicted_losses = z_score_sum * agg_std + agg_mean
-                print(f"[QuaDMixOptimizer] Search: per-task z-score calibrated prediction ({active_count} active tasks)")
+                mode_desc = "R²×σ" if weight_mode == "r2_sigma_weighted" else "R²"
+                print(f"[QuaDMixOptimizer] Search: per-task {mode_desc}-weighted z-score prediction ({active_count} active tasks)")
         elif hasattr(self, '_bootstrap_models') and len(self._bootstrap_models) > 0:
             all_preds = np.array([m.predict(candidates) for m in self._bootstrap_models])
             predicted_losses = np.mean(all_preds, axis=0)

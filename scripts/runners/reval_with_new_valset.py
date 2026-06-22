@@ -155,6 +155,9 @@ def build_parser():
                    help="Block size for validation (must match training)")
     p.add_argument("--model-variant", type=str, default="tinyllama_1M",
                    help="Proxy model variant (must match original training)")
+    p.add_argument("--search-mode", default="equal_weight",
+                   choices=["r2_weighted", "equal_weight", "r2_sigma_weighted"],
+                   help="Search weighting mode (default: equal_weight)")
     return p
 
 
@@ -247,6 +250,7 @@ def main():
         num_search_points=args.num_search,
         top_k_average=args.top_k,
         target_tokens=int(args.target_tokens * 1e9) if args.target_tokens > 0 else 0,
+        search_weight_mode=args.search_mode,
     )
 
     if not pending_experiments:
@@ -435,6 +439,7 @@ def main():
             "num_proxy_experiments": len(experiments),
             "num_search_points": n_search,
             "val_set": val_set_name,
+            "search_weight_mode": config.search_weight_mode,
         },
         "metrics": {
             "aggregate_train_r2": pipeline._optimizer.train_r2,

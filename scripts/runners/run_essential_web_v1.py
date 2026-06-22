@@ -667,6 +667,9 @@ def build_parser():
                    help="Desired max tokens in output (in B). θ* may produce less; "
                         "if more, uniformly discard to preserve distribution. "
                         "Paper: 'more tokens not always good' (30B > 90B > 180B)")
+    p.add_argument("--search-mode", default="r2_sigma_weighted",
+                   choices=["r2_weighted", "equal_weight", "r2_sigma_weighted"],
+                   help="Search weighting mode (default: r2_sigma_weighted)")
     p.add_argument("--device-type", default="cpu",
                    choices=["cpu", "cuda", "npu"],
                    help="Device type for proxy model training")
@@ -826,6 +829,7 @@ def main():
         num_proxy_experiments=n_exp, num_search_points=n_search,
         top_k_average=top_k,
         target_tokens=int(args.target_tokens * 1e9) if args.target_tokens > 0 else 0,
+        search_weight_mode=args.search_mode,
     )
 
     pipeline = QuaDMixPipeline(config)

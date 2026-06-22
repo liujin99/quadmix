@@ -137,7 +137,7 @@ def build_parser():
     p.add_argument("--target-tokens", type=float, default=0.0,
                    help="Target tokens in billions (0 = no target)")
     p.add_argument("--search-mode", default="equal_weight",
-                   choices=["r2_weighted", "equal_weight"],
+                   choices=["r2_weighted", "equal_weight", "r2_sigma_weighted"],
                    help="Search weighting mode (default: equal_weight)")
     return p
 

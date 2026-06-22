@@ -47,7 +47,7 @@ OUTPUT=""
 NUM_SEARCH="100000"
 TOP_K="10"
 TARGET_TOKENS="0"
-SEARCH_MODE="equal_weight"
+SEARCH_MODE="r2_sigma_weighted"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in

@@ -65,6 +65,7 @@ TOP_K="10"
 TARGET_TOKENS="0"
 BLOCK_SIZE="2048"
 MODEL_VARIANT="tinyllama_1M"
+SEARCH_MODE="r2_sigma_weighted"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -79,6 +80,7 @@ while [[ $# -gt 0 ]]; do
         --block-size)    BLOCK_SIZE="$2"; shift 2 ;;
         --model-variant) MODEL_VARIANT="$2"; shift 2 ;;
         --preprocessed-dir) PREPROCESSED_DIR="$2"; shift 2 ;;
+        --search-mode)     SEARCH_MODE="$2"; shift 2 ;;
         -h|--help)
             echo "Usage: bash scripts/demo_revalidate.sh --result-dir <path> [options]"
             echo ""
@@ -154,6 +156,7 @@ ARGS=(
     --target-tokens "$TARGET_TOKENS"
     --block-size "$BLOCK_SIZE"
     --model-variant "$MODEL_VARIANT"
+    --search-mode "$SEARCH_MODE"
 )
 
 [[ -n "$VAL_PATH" ]] && ARGS+=(--val-path "$VAL_PATH")
