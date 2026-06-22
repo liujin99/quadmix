@@ -607,7 +607,7 @@ class QuaDMixOptimizer:
             self._per_task_train_r2[task] = result["train_r2"]
             self._per_task_train_stats[task] = result["train_stats"]
         
-        task_stds = {task: np.sqrt(var) for task, var in valid_tasks.items()}
+        task_stds = {task: self._per_task_train_stats[task][1] for task in valid_tasks}
         raw_weights = {}
         for task in valid_tasks:
             r2 = self._per_task_r2[task]
@@ -647,15 +647,13 @@ class QuaDMixOptimizer:
             for task in active_tasks:
                 model = self._per_task_models[task]
                 raw_pred = model.predict(val_params)
-                task_losses = all_task_losses[task]
-                actual = task_losses[val_idx]
+                actual = all_task_losses[task][val_idx]
                 
-                mean_val = float(np.mean(actual))
-                std_val = task_stds[task]
+                task_mean, task_std = self._per_task_train_stats[task]
                 w = self._per_task_weights[task]
-                if std_val > 1e-12:
-                    z_pred = (raw_pred - mean_val) / std_val
-                    z_actual = (actual - mean_val) / std_val
+                if task_std > 1e-12:
+                    z_pred = (raw_pred - task_mean) / task_std
+                    z_actual = (actual - task_mean) / task_std
                     z_weighted_pred += w * z_pred
                     z_weighted_actual += w * z_actual
             
@@ -674,11 +672,10 @@ class QuaDMixOptimizer:
                 raw_pred = model.predict(val_params)
                 actual = all_task_losses[task][val_idx]
                 
-                mean_val = float(np.mean(actual))
-                std_val = task_stds[task]
-                if std_val > 1e-12:
-                    z_pred = (raw_pred - mean_val) / std_val
-                    z_actual = (actual - mean_val) / std_val
+                task_mean, task_std = self._per_task_train_stats[task]
+                if task_std > 1e-12:
+                    z_pred = (raw_pred - task_mean) / task_std
+                    z_actual = (actual - task_mean) / task_std
                     eq_pred += z_pred / n_tasks
                     eq_actual += z_actual / n_tasks
             
@@ -687,21 +684,19 @@ class QuaDMixOptimizer:
             equal_weight_r2 = 1.0 - eq_ss_res / max(eq_ss_tot, 1e-12)
             equal_weight_mae = float(np.mean(np.abs(eq_pred - eq_actual)))
             
-            # ── Spearman & Top-K: use prediction matching search strategy ──
+            # ── Spearman & Top-K: pred from search strategy, actual always equal-weight ──
             weight_mode = self.config.search_weight_mode
             if weight_mode == "equal_weight":
                 search_pred = eq_pred
-                search_actual = eq_actual
             else:
                 search_pred = z_weighted_pred
-                search_actual = z_weighted_actual
 
             from scipy.stats import spearmanr
-            spearman_corr = float(spearmanr(search_pred, search_actual).correlation)
+            spearman_corr = float(spearmanr(search_pred, eq_actual).correlation)
 
             k = min(self.config.top_k_average, n_val)
             pred_top_k = set(np.argsort(search_pred)[:k])
-            actual_top_k = set(np.argsort(search_actual)[:k])
+            actual_top_k = set(np.argsort(eq_actual)[:k])
             top_k_recall = len(pred_top_k & actual_top_k) / k if k > 0 else 0.0
 
             self._ensemble_val_r2 = overall_r2
@@ -716,15 +711,15 @@ class QuaDMixOptimizer:
 
             print(f"[QuaDMixOptimizer] ── Evaluation Metrics ({len(active_tasks)} active tasks, {r2_desc}) ──")
             print(f"[QuaDMixOptimizer] Overall Val R² = {overall_r2:.4f}, MAE = {overall_mae:.4f}")
-            print(f"[QuaDMixOptimizer]   → R²(Σ wᵢ·z_predᵢ, Σ wᵢ·z_actualᵢ): search objective quality (z-score, R²-weighted)")
+            print(f"[QuaDMixOptimizer]   → R²(Σ wᵢ·z_predᵢ, Σ wᵢ·z_actualᵢ): search objective quality (z-score via train stats, R²-weighted)")
             print(f"[QuaDMixOptimizer] Equal-Wt Val R² = {equal_weight_r2:.4f}, MAE = {equal_weight_mae:.4f}")
-            print(f"[QuaDMixOptimizer]   → R²((1/K)Σ z_predᵢ, (1/K)Σ z_actualᵢ): downstream goal quality (z-score, equal weights)")
-            print(f"[QuaDMixOptimizer] Spearman Rank Corr = {spearman_corr:.4f} ({mode_label})")
-            print(f"[QuaDMixOptimizer]   → Ranking ability: does model know which parameters are better?")
+            print(f"[QuaDMixOptimizer]   → R²((1/K)Σ z_predᵢ, (1/K)Σ z_actualᵢ): downstream goal quality (z-score via train stats, equal weights)")
+            print(f"[QuaDMixOptimizer] Spearman Rank Corr = {spearman_corr:.4f} ({mode_label} pred vs equal-wt actual)")
+            print(f"[QuaDMixOptimizer]   → Ranking ability against downstream equal-weight goal")
             print(f"[QuaDMixOptimizer]   → Search only needs correct ranking, not accurate absolute values")
-            print(f"[QuaDMixOptimizer] Top-{k} Recall = {top_k_recall:.4f} ({int(top_k_recall*k)}/{k}) ({mode_label})")
-            print(f"[QuaDMixOptimizer]   → Fraction of search's top-{k} that are actually in top-{k}")
-            print(f"[QuaDMixOptimizer]   → Directly measures search quality: are selected parameters good?")
+            print(f"[QuaDMixOptimizer] Top-{k} Recall = {top_k_recall:.4f} ({int(top_k_recall*k)}/{k}) ({mode_label} pred vs equal-wt actual)")
+            print(f"[QuaDMixOptimizer]   → Fraction of search's top-{k} that are in equal-weight actual top-{k}")
+            print(f"[QuaDMixOptimizer]   → Directly measures search quality: are selected parameters good for downstream goal?")
             if spearman_corr > 0.5:
                 print(f"[QuaDMixOptimizer] ✓ Spearman > 0.5: ranking is reliable, search results trustworthy")
             elif spearman_corr > 0.3:
