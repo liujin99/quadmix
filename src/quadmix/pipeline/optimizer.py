@@ -694,24 +694,26 @@ class QuaDMixOptimizer:
             equal_weight_r2 = 1.0 - eq_ss_res / max(eq_ss_tot, 1e-12)
             equal_weight_mae = float(np.mean(np.abs(eq_pred - eq_actual)))
             
-            # ── Spearman & Top-K: pred from search strategy, actual always equal-weight ──
+            # ── Spearman & Top-K & Search Lift: auto-adapt to search mode ──
             weight_mode = self.config.search_weight_mode
             if weight_mode == "equal_weight":
                 search_pred = eq_pred
+                search_actual = eq_actual
             else:
                 search_pred = z_weighted_pred
+                search_actual = z_weighted_actual
 
             from scipy.stats import spearmanr
-            spearman_corr = float(spearmanr(search_pred, eq_actual).correlation)
+            spearman_corr = float(spearmanr(search_pred, search_actual).correlation)
 
             k = min(self.config.top_k_average, n_val)
             pred_top_k = set(np.argsort(search_pred)[:k])
-            actual_top_k = set(np.argsort(eq_actual)[:k])
+            actual_top_k = set(np.argsort(search_actual)[:k])
             top_k_recall = len(pred_top_k & actual_top_k) / k if k > 0 else 0.0
 
-            search_top_k_actual_mean = float(np.mean(eq_actual[list(pred_top_k)]))
-            random_mean = float(np.mean(eq_actual))
-            random_std = float(np.std(eq_actual))
+            search_top_k_actual_mean = float(np.mean(search_actual[list(pred_top_k)]))
+            random_mean = float(np.mean(search_actual))
+            random_std = float(np.std(search_actual))
             search_lift = (random_mean - search_top_k_actual_mean) / max(random_std, 1e-12)
 
             self._ensemble_val_r2 = overall_r2
@@ -731,17 +733,17 @@ class QuaDMixOptimizer:
                 mode_label = "R²-weighted"
 
             print(f"[QuaDMixOptimizer] ── Evaluation Metrics ({len(active_tasks)} active tasks, {r2_desc}) ──")
-            print(f"[QuaDMixOptimizer] Search mode: {mode_label} (optimizes {'Σ z_predᵢ / K' if weight_mode == 'equal_weight' else 'Σ wᵢ·z_predᵢ'}, matches downstream goal)")
+            print(f"[QuaDMixOptimizer] Search mode: {mode_label} (optimizes {'Σ z_predᵢ / K' if weight_mode == 'equal_weight' else 'Σ wᵢ·z_predᵢ'})")
             print(f"[QuaDMixOptimizer] Overall Val R² = {overall_r2:.4f}, MAE = {overall_mae:.4f}")
-            print(f"[QuaDMixOptimizer]   → R²(Σ wᵢ·z_predᵢ, Σ wᵢ·z_actualᵢ): search objective quality (z-score via train stats, R²-weighted)")
+            print(f"[QuaDMixOptimizer]   → R²(Σ wᵢ·z_predᵢ, Σ wᵢ·z_actualᵢ): search objective quality (z-score via train stats, {mode_label})")
             print(f"[QuaDMixOptimizer] Equal-Wt Val R² = {equal_weight_r2:.4f}, MAE = {equal_weight_mae:.4f}")
-            print(f"[QuaDMixOptimizer]   → R²((1/K)Σ z_predᵢ, (1/K)Σ z_actualᵢ): downstream goal quality (z-score via train stats, equal weights)")
-            print(f"[QuaDMixOptimizer] Spearman Rank Corr = {spearman_corr:.4f} ({mode_label} pred vs equal-wt actual)")
-            print(f"[QuaDMixOptimizer]   → Ranking ability against downstream equal-weight goal")
+            print(f"[QuaDMixOptimizer]   → R²((1/K)Σ z_predᵢ, (1/K)Σ z_actualᵢ): equal-weight diagnostic (z-score via train stats)")
+            print(f"[QuaDMixOptimizer] Spearman Rank Corr = {spearman_corr:.4f} ({mode_label} pred vs {mode_label} actual)")
+            print(f"[QuaDMixOptimizer]   → Ranking ability (auto-adapts to search mode)")
             print(f"[QuaDMixOptimizer]   → Search only needs correct ranking, not accurate absolute values")
-            print(f"[QuaDMixOptimizer] Top-{k} Recall = {top_k_recall:.4f} ({int(top_k_recall*k)}/{k}) ({mode_label} pred vs equal-wt actual)")
-            print(f"[QuaDMixOptimizer]   → Fraction of search's top-{k} that are in equal-weight actual top-{k}")
-            print(f"[QuaDMixOptimizer]   → Directly measures search quality: are selected parameters good for downstream goal?")
+            print(f"[QuaDMixOptimizer] Top-{k} Recall = {top_k_recall:.4f} ({int(top_k_recall*k)}/{k}) ({mode_label} pred vs {mode_label} actual)")
+            print(f"[QuaDMixOptimizer]   → Fraction of search's top-{k} that are in {mode_label} actual top-{k}")
+            print(f"[QuaDMixOptimizer]   → Directly measures search quality: are selected parameters good?")
             print(f"[QuaDMixOptimizer] Search Lift = {search_lift:.4f} σ ({mode_label} top-{k} vs random)")
             print(f"[QuaDMixOptimizer]   → How much better search's top-{k} is vs random selection (in std devs)")
             print(f"[QuaDMixOptimizer]   → Positive = search finds better parameters than random")
