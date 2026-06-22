@@ -307,8 +307,8 @@ def generate_report(
             parts.append(f"| Overall Val MAE | {ens_mae:.4f} | z-score space | — |")
             if eq_r2 is not None:
                 eq_quality = "✓ Excellent" if eq_r2 > 0.6 else ("✓ Good" if eq_r2 > 0.3 else "⚠️ Weak")
-                parts.append(f"| **Equal-Wt Val R²** | **{eq_r2:.4f}** ({eq_quality}) | R²((1/K)Σ predᵢ, (1/K)Σ actualᵢ) | Downstream goal quality |")
-                parts.append(f"| Equal-Wt Val MAE | {eq_mae:.4f} | raw loss space | — |")
+                parts.append(f"| **Equal-Wt Val R²** | **{eq_r2:.4f}** ({eq_quality}) | R²((1/K)Σ z_predᵢ, (1/K)Σ z_actualᵢ) | Downstream goal quality |")
+                parts.append(f"| Equal-Wt Val MAE | {eq_mae:.4f} | z-score space | — |")
             if sp is not None:
                 sp_quality = "✓ Excellent" if sp > 0.7 else ("✓ Good" if sp > 0.5 else ("⚠️ Moderate" if sp > 0.3 else "⚠️ Weak"))
                 parts.append(f"| **Spearman Rank Corr** | **{sp:.4f}** ({sp_quality}) | corr(rank(pred), rank(actual)) | Ranking ability |")
@@ -325,9 +325,9 @@ def generate_report(
             parts.append("- High value → search will find good parameters\n")
             parts.append("")
             parts.append("**Equal-Wt Val R²** (downstream goal):\n")
-            parts.append("- Uses equal-weight average in raw loss space\n")
-            parts.append("- Matches downstream evaluation (21 benchmarks equally weighted)\n")
-            parts.append("- Diagnostic: shows prediction quality for the ultimate goal\n")
+            parts.append("- Uses equal-weight average in z-score space\n")
+            parts.append("- Matches downstream evaluation (21 benchmarks equally weighted, normalized)\n")
+            parts.append("- Diagnostic: shows prediction quality when all tasks treated equally\n")
             parts.append("")
             parts.append("**Spearman Rank Correlation** (ranking ability):\n")
             parts.append("- Measures whether the model correctly ranks which parameters are better\n")
@@ -355,11 +355,11 @@ def generate_report(
                 parts.append(f"⚠️ **Top-{tk_val} Recall < 0.3**: Search struggles to find good parameters\n")
             
             if ens_r2 > 0.3 and eq_r2 is not None and eq_r2 > 0.3:
-                parts.append("✓ **Both R² metrics strong**: Search strategy effective and downstream predictions accurate\n")
+                parts.append("✓ **Both R² metrics strong**: R²-weighting and equal-weight both effective in z-score space\n")
             elif ens_r2 > 0.3 and eq_r2 is not None and eq_r2 < 0.3:
-                parts.append("⚠️ **Overall strong but Equal-Wt weak**: R²-weighting helps search but may sacrifice low-R² tasks\n")
+                parts.append("⚠️ **Overall strong but Equal-Wt weak**: R²-weighting outperforms equal-weight, high-R² tasks carry more signal\n")
             elif ens_r2 < 0.3 and eq_r2 is not None and eq_r2 > 0.3:
-                parts.append("⚠️ **Equal-Wt strong but Overall weak**: Consider using equal-weight search instead\n")
+                parts.append("⚠️ **Equal-Wt strong but Overall weak**: Equal-weight outperforms R²-weighting, consider using --search-mode equal_weight\n")
             else:
                 parts.append("⚠️ **Both R² metrics weak**: But check Spearman/Top-K — ranking may still be effective\n")
             parts.append("")

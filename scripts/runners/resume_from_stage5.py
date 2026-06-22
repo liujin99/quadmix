@@ -389,7 +389,7 @@ def main():
         print(f"    → R²(Σ wᵢ·z_predᵢ, Σ wᵢ·z_actualᵢ): search objective quality")
     if eq_r2 is not None:
         print(f"  Equal-Wt  Val R² = {eq_r2:.4f}, MAE = {eq_mae:.4f}")
-        print(f"    → R²((1/K)Σ predᵢ, (1/K)Σ actualᵢ): downstream goal quality")
+        print(f"    → R²((1/K)Σ z_predᵢ, (1/K)Σ z_actualᵢ): downstream goal quality")
     sp = pipeline._optimizer.spearman_corr
     tk = pipeline._optimizer.top_k_recall
     tk_val = pipeline._optimizer.top_k_value
