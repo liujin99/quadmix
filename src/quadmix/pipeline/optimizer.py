@@ -199,7 +199,6 @@ class RegressionModel:
         self.model_kwargs = model_kwargs
         self._model = None
         self._is_fitted = False
-        self._log_transform = False
 
     def _build_model(self, n_train: int = 0):
         """Build the underlying regressor model."""
@@ -211,27 +210,34 @@ class RegressionModel:
                     "LightGBM is required. Install with: pip install lightgbm"
                 )
 
-            n = max(n_train, 10)
-            max_depth = min(8, max(3, int(np.log2(n))))
-            num_leaves = min(31, max(7, int(np.sqrt(n))))
-            min_child = max(5, n // 20)
-            lr = max(0.01, min(0.1, 0.5 / np.sqrt(n)))
-            reg = max(0.05, 1.0 * (200 / n) ** 0.5)
-            n_est = min(2000, max(300, int(20 * np.sqrt(n))))
-            colsample = 0.6 if n < 300 else 0.8
-            default_params = {
-                "n_estimators": n_est,
-                "learning_rate": lr,
-                "max_depth": max_depth,
-                "num_leaves": num_leaves,
-                "min_child_samples": min_child,
-                "subsample": 0.8,
-                "colsample_bytree": colsample,
-                "reg_alpha": reg,
-                "reg_lambda": reg,
-                "random_state": 42,
-                "verbose": -1,
-            }
+            if n_train > 0 and n_train < 500:
+                max_depth = min(5, max(3, int(np.log2(n_train))))
+                default_params = {
+                    "n_estimators": 500,
+                    "learning_rate": 0.02,
+                    "max_depth": max_depth,
+                    "num_leaves": min(15, 2 ** max_depth - 1),
+                    "min_child_samples": max(30, n_train // 6),
+                    "subsample": 0.8,
+                    "colsample_bytree": 0.6,
+                    "reg_alpha": 1.0,
+                    "reg_lambda": 1.0,
+                    "random_state": 42,
+                    "verbose": -1,
+                }
+            else:
+                default_params = {
+                    "n_estimators": 1000,
+                    "learning_rate": 0.05,
+                    "num_leaves": 31,
+                    "min_child_samples": min(20, max(5, n_train // 10)),
+                    "subsample": 0.8,
+                    "colsample_bytree": 0.8,
+                    "reg_alpha": 0.1,
+                    "reg_lambda": 0.1,
+                    "random_state": 42,
+                    "verbose": -1,
+                }
             default_params.update(self.model_kwargs)
             self._model = lgb.LGBMRegressor(**default_params)
 
@@ -296,23 +302,12 @@ class RegressionModel:
         self._num_domains = num_domains
         self._num_criteria = num_criteria
 
-        # Log transform: cross-entropy losses are positive and right-skewed
-        min_loss = np.min(y)
-        if min_loss > 0:
-            self._log_transform = True
-            self._log_offset = 0.0
-            y = np.log(y)
-        else:
-            self._log_transform = True
-            self._log_offset = abs(min_loss) + 1e-6
-            y = np.log(y + self._log_offset)
-
         self._build_model(n_train=len(params_list))
 
         if (self.model_type == "lightgbm" and eval_params_list is not None
                 and eval_losses is not None and len(eval_params_list) > 0):
             X_val = np.array([p.flatten() for p in eval_params_list])
-            y_val = np.log(np.array(eval_losses) + self._log_offset)
+            y_val = np.array(eval_losses)
             import lightgbm as lgb
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", UserWarning)
@@ -344,10 +339,7 @@ class RegressionModel:
         X = np.array([p.flatten() for p in params_list])
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)
-            raw = self._model.predict(X)
-        if self._log_transform:
-            return np.exp(raw) - self._log_offset
-        return raw
+            return self._model.predict(X)
 
     def feature_importance(self) -> Optional[Dict[str, float]]:
         """Get feature importance from the fitted model (LightGBM/RF only)."""
@@ -372,14 +364,13 @@ class RegressionModel:
         return None
 
     def score(self, params_list: List[ParameterSet], losses: npt.NDArray[np.float64]) -> float:
-        """Return R² score for the model on given data (in original loss space)."""
+        """Return R² score for the model on given data."""
         if not self._is_fitted:
             raise RuntimeError("Model not fitted yet.")
-        y_true = np.array(losses)
-        y_pred = self.predict(params_list)
-        ss_res = np.sum((y_true - y_pred) ** 2)
-        ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
-        return float(1 - ss_res / ss_tot) if ss_tot > 0 else 0.0
+        X = np.array([p.flatten() for p in params_list])
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            return float(self._model.score(X, losses))
 
     def save(self, path: str):
         """Save the regression model to disk."""
@@ -390,8 +381,6 @@ class RegressionModel:
             "model_kwargs": self.model_kwargs,
             "num_domains": self._num_domains,
             "num_criteria": self._num_criteria,
-            "log_transform": self._log_transform,
-            "log_offset": self._log_offset,
         }
         joblib.dump(data, path)
 
@@ -404,8 +393,6 @@ class RegressionModel:
         model._model = data["model"]
         model._num_domains = data["num_domains"]
         model._num_criteria = data["num_criteria"]
-        model._log_transform = data.get("log_transform", False)
-        model._log_offset = data.get("log_offset", 0.0)
         model._is_fitted = True
         return model
 

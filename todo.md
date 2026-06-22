@@ -988,33 +988,29 @@ micro_batch=32, block_size=2048, vocab=50432 时的显存分布（bf16 后）：
 
 ## LightGBM 拟合质量优化 — 2026-06-22
 
-### ~~H1. 自适应超参数公式~~ ✅ 已完成
+### ~~H1. 自适应超参数公式~~ ❌ 已回退
 - **文件**: `src/quadmix/pipeline/optimizer.py:_build_model()`
-- **问题**: 硬编码两档（n<500 和 n>=500），断崖跳变，无法适配不同样本量
-- **修复**: 基于 `n_train` 的连续公式，自动适配：
-  ```python
-  num_leaves = min(31, max(7, int(sqrt(n))))
-  max_depth = min(8, max(3, int(log2(n))))
-  min_child = max(5, n // 20)
-  lr = max(0.01, 0.5 / sqrt(n))
-  reg = max(0.05, 1.0 * (200/n)^0.5)
-  n_est = min(2000, max(300, 20*sqrt(n)))
-  ```
-- **效果**: 样本少时自动保守（小树+强正则），样本多时自动放开，零人工干预
+- **设计**: 基于 `n_train` 的连续公式自动适配超参数
+- **实验结果**（874 experiments, v5 验证集）：
 
-### ~~H2. 目标变量 log 变换~~ ✅ 已完成
+| 指标 | 回退前 (H1+H2) | 原始 (91041a1) | 变化 |
+|:---|:---|:---|:---|
+| Overall Val R² | 0.2919 | 0.3124 | -0.0205 |
+| Equal-Wt Val R² | 0.2446 | 0.2776 | -0.0330 |
+| Spearman | 0.5092 | 0.5190 | -0.0098 |
+| Top-10 Recall | 0.20 | 0.30 | -0.10 |
+| Per-task R² mean | 0.4954 | ~0.58 | -0.08 |
+
+- **回退原因**: n=874 时自适应公式给出 reg=0.48（原 0.1 的 4.8x），min_child=43（原 20 的 2.2x），过度正则化导致欠拟合
+
+### ~~H2. 目标变量 log 变换~~ ❌ 已回退
 - **文件**: `src/quadmix/pipeline/optimizer.py:fit()/predict()/score()/save()/load()`
-- **问题**: cross-entropy loss 正数且右偏，直接拟合效率低
-- **修复**:
-  - `fit()`: `y = log(loss + offset)`，offset 处理 loss<=0 的情况
-  - `predict()`: `exp(raw_pred) - offset`，还原到原始 loss 空间
-  - `score()`: 手动计算 R²（在原始空间），避免 sklearn 内部 score 用 log 空间
-  - `save()/load()`: 持久化 `_log_transform` 和 `_log_offset`
-- **效果**: 对数变换让分布更对称，LightGBM 更好拟合；预测和评估仍在原始空间
+- **设计**: 训练在 log 空间，预测/评估自动还原到原始空间
+- **回退原因**: 与 H1 一起实验，整体指标回退。cross-entropy loss 范围窄（5.3~11.6），右偏不严重，log 变换可能扭曲了 loss 关系
 
-### ~~H3. 大样本加 max_depth~~ ✅ 已完成（包含在 H1 中）
+### ~~H3. 大样本加 max_depth~~ ❌ 已回退（包含在 H1 中）
 - **问题**: 大样本 regime 无 `max_depth`，只靠 `num_leaves` 控制复杂度
-- **修复**: H1 的连续公式对所有 n_train 都设置 `max_depth`
+- **回退原因**: 随 H1 一起回退
 
 ### ~~H4. Fold 余数修复~~ ✅ 已完成
 - **文件**: `src/quadmix/pipeline/optimizer.py:_train_per_task_models()`
