@@ -687,19 +687,23 @@ class QuaDMixOptimizer:
             equal_weight_r2 = 1.0 - eq_ss_res / max(eq_ss_tot, 1e-12)
             equal_weight_mae = float(np.mean(np.abs(eq_pred - eq_actual)))
             
-            # ── Spearman rank correlation (search ranking quality) ──
-            # Measures: does the model correctly rank which parameters are better?
-            # Search only needs correct ranking, not accurate absolute values
+            # ── Spearman & Top-K: use prediction matching search strategy ──
+            weight_mode = self.config.search_weight_mode
+            if weight_mode == "equal_weight":
+                search_pred = eq_pred
+                search_actual = eq_actual
+            else:
+                search_pred = z_weighted_pred
+                search_actual = z_weighted_actual
+
             from scipy.stats import spearmanr
-            spearman_corr = float(spearmanr(eq_pred, eq_actual).correlation)
-            
-            # ── Top-K recall (search hit rate) ──
-            # Measures: what fraction of search's top-K are actually in the top-K?
+            spearman_corr = float(spearmanr(search_pred, search_actual).correlation)
+
             k = min(self.config.top_k_average, n_val)
-            pred_top_k = set(np.argsort(eq_pred)[:k])
-            actual_top_k = set(np.argsort(eq_actual)[:k])
+            pred_top_k = set(np.argsort(search_pred)[:k])
+            actual_top_k = set(np.argsort(search_actual)[:k])
             top_k_recall = len(pred_top_k & actual_top_k) / k if k > 0 else 0.0
-            
+
             self._ensemble_val_r2 = overall_r2
             self._ensemble_val_mae = overall_mae
             self._equal_weight_r2 = equal_weight_r2
@@ -708,16 +712,17 @@ class QuaDMixOptimizer:
             self._top_k_recall = top_k_recall
             self._top_k_value = k
             r2_desc = f"CV {n_folds}-fold" if n_folds > 1 and n_total >= n_folds else "single split"
-            
+            mode_label = "equal-weight" if weight_mode == "equal_weight" else "R²-weighted"
+
             print(f"[QuaDMixOptimizer] ── Evaluation Metrics ({len(active_tasks)} active tasks, {r2_desc}) ──")
             print(f"[QuaDMixOptimizer] Overall Val R² = {overall_r2:.4f}, MAE = {overall_mae:.4f}")
             print(f"[QuaDMixOptimizer]   → R²(Σ wᵢ·z_predᵢ, Σ wᵢ·z_actualᵢ): search objective quality (z-score, R²-weighted)")
             print(f"[QuaDMixOptimizer] Equal-Wt Val R² = {equal_weight_r2:.4f}, MAE = {equal_weight_mae:.4f}")
             print(f"[QuaDMixOptimizer]   → R²((1/K)Σ z_predᵢ, (1/K)Σ z_actualᵢ): downstream goal quality (z-score, equal weights)")
-            print(f"[QuaDMixOptimizer] Spearman Rank Corr = {spearman_corr:.4f}")
+            print(f"[QuaDMixOptimizer] Spearman Rank Corr = {spearman_corr:.4f} ({mode_label})")
             print(f"[QuaDMixOptimizer]   → Ranking ability: does model know which parameters are better?")
             print(f"[QuaDMixOptimizer]   → Search only needs correct ranking, not accurate absolute values")
-            print(f"[QuaDMixOptimizer] Top-{k} Recall = {top_k_recall:.4f} ({int(top_k_recall*k)}/{k})")
+            print(f"[QuaDMixOptimizer] Top-{k} Recall = {top_k_recall:.4f} ({int(top_k_recall*k)}/{k}) ({mode_label})")
             print(f"[QuaDMixOptimizer]   → Fraction of search's top-{k} that are actually in top-{k}")
             print(f"[QuaDMixOptimizer]   → Directly measures search quality: are selected parameters good?")
             if spearman_corr > 0.5:
@@ -1007,6 +1012,7 @@ class QuaDMixOptimizer:
             "n_active": sum(1 for t in tasks if t["weight"] > 0),
             "n_filtered": sum(1 for t in tasks if t["weight"] == 0),
             "r2_method": r2_method,
+            "search_weight_mode": self.config.search_weight_mode,
             "ensemble_val_r2": self._ensemble_val_r2,
             "ensemble_val_mae": self._ensemble_val_mae,
             "equal_weight_r2": self._equal_weight_r2,
