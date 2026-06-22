@@ -31,3 +31,6 @@ Thumbs.db
 # Environment
 .env
 hermes_conversation_*.json
+
+# Local analysis
+数据配比业界洞察分析/
