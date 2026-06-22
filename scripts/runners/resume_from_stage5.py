@@ -136,6 +136,9 @@ def build_parser():
     p.add_argument("--top-k", type=int, default=5)
     p.add_argument("--target-tokens", type=float, default=0.0,
                    help="Target tokens in billions (0 = no target)")
+    p.add_argument("--search-mode", default="r2_weighted",
+                   choices=["r2_weighted", "equal_weight"],
+                   help="Search weighting mode (default: r2_weighted)")
     return p
 
 
@@ -189,6 +192,7 @@ def main():
         num_proxy_experiments=n_exp, num_search_points=n_search,
         top_k_average=top_k,
         target_tokens=int(args.target_tokens * 1e9) if args.target_tokens > 0 else 0,
+        search_weight_mode=args.search_mode,
     )
 
     pipeline = QuaDMixPipeline(config)
@@ -283,6 +287,7 @@ def main():
             "num_quality_criteria": config.num_quality_criteria,
             "num_proxy_experiments": n_exp,
             "num_search_points": n_search,
+            "search_weight_mode": config.search_weight_mode,
         },
         "metrics": {
             "aggregate_train_r2": pipeline._optimizer.train_r2,
@@ -373,6 +378,7 @@ def main():
     total_elapsed = time.time() - t_start
     print(f"\n{'=' * 70}")
     print(f"  Resume Complete! ({total_elapsed:.1f}s)")
+    print(f"  Search mode: {config.search_weight_mode}")
     print(f"  Aggregate Val R² = {pipeline._optimizer.val_r2:.4f} (diagnostic)")
     ens_r2 = pipeline._optimizer.ensemble_val_r2
     ens_mae = pipeline._optimizer.ensemble_val_mae

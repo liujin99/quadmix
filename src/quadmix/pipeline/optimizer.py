@@ -854,21 +854,26 @@ class QuaDMixOptimizer:
         # Predict losses using per-task weighted prediction if available
         if self._per_task_models and self._per_task_weights and self._per_task_train_stats and self._aggregate_train_stats:
             agg_mean, agg_std = self._aggregate_train_stats
-            z_score_sum = np.zeros(n_search)
-            active_count = 0
-            
-            for task, model in self._per_task_models.items():
-                w = self._per_task_weights[task]
-                if w <= 0:
-                    continue
-                task_mean, task_std = self._per_task_train_stats[task]
-                raw_pred = model.predict(candidates)
-                z_pred = (raw_pred - task_mean) / max(task_std, 1e-8)
-                z_score_sum += w * z_pred
-                active_count += 1
-            
-            predicted_losses = z_score_sum * agg_std + agg_mean
-            print(f"[QuaDMixOptimizer] Search: per-task z-score calibrated prediction ({active_count} active tasks)")
+            weight_mode = self.config.search_weight_mode
+            active_tasks = [(t, m) for t, m in self._per_task_models.items() if self._per_task_weights[t] > 0]
+            active_count = len(active_tasks)
+
+            if weight_mode == "equal_weight":
+                raw_sum = np.zeros(n_search)
+                for task, model in active_tasks:
+                    raw_sum += model.predict(candidates)
+                predicted_losses = raw_sum / max(active_count, 1)
+                print(f"[QuaDMixOptimizer] Search: per-task equal-weight raw prediction ({active_count} active tasks)")
+            else:
+                z_score_sum = np.zeros(n_search)
+                for task, model in active_tasks:
+                    w = self._per_task_weights[task]
+                    task_mean, task_std = self._per_task_train_stats[task]
+                    raw_pred = model.predict(candidates)
+                    z_pred = (raw_pred - task_mean) / max(task_std, 1e-8)
+                    z_score_sum += w * z_pred
+                predicted_losses = z_score_sum * agg_std + agg_mean
+                print(f"[QuaDMixOptimizer] Search: per-task z-score calibrated prediction ({active_count} active tasks)")
         elif hasattr(self, '_bootstrap_models') and len(self._bootstrap_models) > 0:
             all_preds = np.array([m.predict(candidates) for m in self._bootstrap_models])
             predicted_losses = np.mean(all_preds, axis=0)

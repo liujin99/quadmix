@@ -24,6 +24,9 @@
 #
 # 指定目标数据量（单位 B tokens）：
 #   bash scripts/demo_reoptimize.sh --result-dir result/xxx --target-tokens 10
+#
+# 切换搜索模式（等权 vs R²加权）：
+#   bash scripts/demo_reoptimize.sh --search-mode equal_weight
 # ──────────────────────────────────────────────────────────────
 
 set -euo pipefail
@@ -39,11 +42,12 @@ export QUADMIX_TEMP_DIR="${QUADMIX_TEMP_DIR:-$HOME/.cache/QuaDMix/temp}"
 
 PREPROCESSED_DIR="$QUADMIX_TEMP_DIR/preprocessed"
 
-RESULT_DIR="$QUADMIX_DIR/result/demo_full_20260612_214550"
+RESULT_DIR="$QUADMIX_DIR/result/revalidate_core_bmk_v5_20260618_094511"
 OUTPUT=""
-NUM_SEARCH="100000"
+NUM_SEARCH="500000"
 TOP_K="10"
 TARGET_TOKENS="0"
+SEARCH_MODE="r2_weighted"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -53,6 +57,7 @@ while [[ $# -gt 0 ]]; do
         --top-k)         TOP_K="$2"; shift 2 ;;
         --target-tokens) TARGET_TOKENS="$2"; shift 2 ;;
         --preprocessed-dir) PREPROCESSED_DIR="$2"; shift 2 ;;
+        --search-mode)     SEARCH_MODE="$2"; shift 2 ;;
         -h|--help)
             echo "Usage: bash scripts/demo_reoptimize.sh --result-dir <path> [options]"
             echo ""
@@ -65,6 +70,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --top-k N                Top-K average (default: 10)"
             echo "  --target-tokens N        Target in billions (default: 0)"
             echo "  --preprocessed-dir PATH  Preprocessed shards dir"
+            echo "  --search-mode MODE       r2_weighted (default) or equal_weight"
             exit 0
             ;;
         *)
@@ -106,6 +112,7 @@ echo "  Experiments:   $EXP_COUNT"
 echo "  Preprocessed:  $PREPROCESSED_DIR"
 echo "  Search points: $NUM_SEARCH"
 echo "  Top-K:         $TOP_K"
+echo "  Search mode:   $SEARCH_MODE"
 [[ "$TARGET_TOKENS" != "0" ]] && echo "  Target tokens: ${TARGET_TOKENS}B"
 echo ""
 echo "╚═════════════════════════════════════════╝"
@@ -117,6 +124,7 @@ ARGS=(
     --num-search "$NUM_SEARCH"
     --top-k "$TOP_K"
     --target-tokens "$TARGET_TOKENS"
+    --search-mode "$SEARCH_MODE"
 )
 
 [[ -n "$OUTPUT" ]] && ARGS+=(--output "$OUTPUT")
