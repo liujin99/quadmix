@@ -105,18 +105,18 @@ def _read_docs_from_shard(args):
 
 def read_docs_from_shards(shard_paths, selections, num_workers=None, desc=None):
     if num_workers is None:
-        num_workers = min(mp.cpu_count(), 16) or 1
+        num_workers = min(mp.cpu_count(), 32) or 1
     shard_to_docs = {}
     for shard_id, doc_id in selections:
         if shard_id not in shard_to_docs:
             shard_to_docs[shard_id] = []
         shard_to_docs[shard_id].append(doc_id)
     tasks = [(str(shard_paths[sid]), indices) for sid, indices in shard_to_docs.items()]
-    with ThreadPool(num_workers) as pool:
+    with _SPAWN_CTX.Pool(num_workers) as pool:
         results = list(tqdm(
             pool.imap_unordered(_read_docs_from_shard, tasks, chunksize=1),
             total=len(tasks),
-            desc=desc or f"  Reading selected docs ({num_workers} threads)",
+            desc=desc or f"  Reading selected docs ({num_workers} processes)",
         ))
     return [doc for shard_docs in results for doc in shard_docs]
 
@@ -131,14 +131,14 @@ def _scan_preprocessed_shard_indexed(args):
 
 def scan_preprocessed_shards(preprocessed_data_dir, num_workers=None, max_shards=None):
     if num_workers is None:
-        num_workers = min(mp.cpu_count(), 16) or 1
+        num_workers = min(mp.cpu_count(), 32) or 1
     shard_files = sorted(Path(preprocessed_data_dir).glob("preprocessed_*.parquet"))
     if not shard_files:
         raise FileNotFoundError(f"No preprocessed_*.parquet files found in {preprocessed_data_dir}")
     if max_shards is not None:
         shard_files = shard_files[:max_shards]
     tasks = [(i, str(p)) for i, p in enumerate(shard_files)]
-    with ThreadPool(num_workers) as pool:
+    with _SPAWN_CTX.Pool(num_workers) as pool:
         results = [None] * len(shard_files)
         for idx, docs in tqdm(
             pool.imap_unordered(_scan_preprocessed_shard_indexed, tasks, chunksize=1),
