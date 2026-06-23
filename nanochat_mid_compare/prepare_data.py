@@ -75,17 +75,27 @@ def load_tokenizer(tokenizer_pkl_path):
         return None
 
 
-def count_tokens_mp(texts, tokenizer_pkl_path, num_workers=None):
+def count_tokens_mp(texts, tokenizer_pkl_path, num_workers=None, chunk_timeout=600):
     if num_workers is None:
-        num_workers = min(mp.cpu_count() // 4, 32) or 1
+        num_workers = min(mp.cpu_count() // 4, 8) or 1
     chunk_size = max(1, len(texts) // (num_workers * 4))
     chunks = [texts[i:i + chunk_size] for i in range(0, len(texts), chunk_size)]
     with _SPAWN_CTX.Pool(num_workers, initializer=_init_worker, initargs=(tokenizer_pkl_path,)) as pool:
-        results = list(tqdm(
-            pool.imap_unordered(_worker_encode_batch, chunks, chunksize=1),
-            total=len(chunks),
-            desc=f"  Tokenizing ({num_workers} processes x 4 rust threads)",
-        ))
+        async_results = [(i, pool.apply_async(_worker_encode_batch, (chunk,)))
+                         for i, chunk in enumerate(chunks)]
+        results = [None] * len(chunks)
+        pbar = tqdm(total=len(chunks), desc=f"  Tokenizing ({num_workers} processes x 4 rust threads)")
+        for i, ar in async_results:
+            try:
+                results[i] = ar.get(timeout=chunk_timeout)
+            except mp.TimeoutError:
+                print(f"\n  WARNING: chunk {i} timed out after {chunk_timeout}s, using estimates")
+                results[i] = [len(t) // 4 for t in chunks[i]]
+            except Exception as e:
+                print(f"\n  WARNING: chunk {i} failed: {e}, using estimates")
+                results[i] = [len(t) // 4 for t in chunks[i]]
+            pbar.update(1)
+        pbar.close()
     return [c for batch in results for c in batch]
 
 
