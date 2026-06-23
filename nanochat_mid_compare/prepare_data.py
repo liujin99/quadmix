@@ -199,7 +199,7 @@ def select_quality_topk(prep_files, prep_metadata, quality_method, total_tokens,
 
     quality_docs = read_docs_from_shards(
         prep_files, q_selected, num_workers=num_workers,
-        desc=f"  Reading quality docs ({num_workers or 'auto'} threads)")
+        desc=f"  Reading quality docs ({num_workers or 'auto'} processes)")
 
     del all_quality_docs
     gc.collect()
@@ -370,6 +370,19 @@ def main():
     print(f"  Random docs: {len(random_docs):,}")
     print(f"  Tokens ({token_method}): {accumulated_tokens:,}")
 
+    import tempfile
+    _tmp_dir = tempfile.mkdtemp(prefix="prepare_data_")
+    print(f"\n  Saving docs to temp dir to free memory: {_tmp_dir}")
+    _qm_tmp = os.path.join(_tmp_dir, "quadmix.parquet")
+    _rd_tmp = os.path.join(_tmp_dir, "random.parquet")
+    pq.write_table(pa.table({"text": [d["text"] for d in quadmix_docs],
+                              "token_count": [d["token_count"] for d in quadmix_docs]}), _qm_tmp)
+    pq.write_table(pa.table({"text": [d["text"] for d in random_docs],
+                              "token_count": [d["token_count"] for d in random_docs]}), _rd_tmp)
+    del quadmix_docs, random_docs
+    gc.collect()
+    print(f"  Freed quadmix_docs + random_docs from memory")
+
     quality_datasets = {}
     if do_quality:
         for mi, method in enumerate(quality_methods):
@@ -380,6 +393,20 @@ def main():
             quality_datasets[method] = (q_docs, q_tokens)
     else:
         print(f"\n[4/6] Quality baseline skipped (no quality methods specified)")
+
+    print(f"\n  Reloading docs from temp dir...")
+    _qm_df = pq.read_table(_qm_tmp).to_pandas()
+    quadmix_docs = [{"text": t, "char_count": len(t), "token_count": tc}
+                    for t, tc in zip(_qm_df["text"], _qm_df["token_count"])]
+    del _qm_df
+    _rd_df = pq.read_table(_rd_tmp).to_pandas()
+    random_docs = [{"text": t, "char_count": len(t), "token_count": tc}
+                   for t, tc in zip(_rd_df["text"], _rd_df["token_count"])]
+    del _rd_df
+    gc.collect()
+    import shutil
+    shutil.rmtree(_tmp_dir, ignore_errors=True)
+    print(f"  Reloaded {len(quadmix_docs):,} quadmix + {len(random_docs):,} random docs")
 
     print(f"\n[5/6] Splitting train/val (val_ratio={args.val_ratio})...")
     n_val = int(len(quadmix_docs) * args.val_ratio) if args.val_ratio > 0 else 0
