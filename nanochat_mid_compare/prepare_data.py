@@ -21,17 +21,21 @@ Usage:
 
 import os
 import sys
+import gc
 import argparse
 import random
 import json
 import pickle
 import multiprocessing as mp
+from multiprocessing.pool import ThreadPool
 import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 from pathlib import Path
 from tqdm import tqdm
+
+_SPAWN_CTX = mp.get_context("spawn")
 
 
 QUALITY_SCORE_MAP = {
@@ -76,7 +80,7 @@ def count_tokens_mp(texts, tokenizer_pkl_path, num_workers=None):
         num_workers = min(mp.cpu_count() // 4, 32) or 1
     chunk_size = max(1, len(texts) // (num_workers * 4))
     chunks = [texts[i:i + chunk_size] for i in range(0, len(texts), chunk_size)]
-    with mp.Pool(num_workers, initializer=_init_worker, initargs=(tokenizer_pkl_path,)) as pool:
+    with _SPAWN_CTX.Pool(num_workers, initializer=_init_worker, initargs=(tokenizer_pkl_path,)) as pool:
         results = list(tqdm(
             pool.imap_unordered(_worker_encode_batch, chunks, chunksize=1),
             total=len(chunks),
@@ -101,39 +105,40 @@ def _read_docs_from_shard(args):
 
 def read_docs_from_shards(shard_paths, selections, num_workers=None, desc=None):
     if num_workers is None:
-        num_workers = min(mp.cpu_count() // 4, 32) or 1
+        num_workers = min(mp.cpu_count(), 16) or 1
     shard_to_docs = {}
     for shard_id, doc_id in selections:
         if shard_id not in shard_to_docs:
             shard_to_docs[shard_id] = []
         shard_to_docs[shard_id].append(doc_id)
     tasks = [(str(shard_paths[sid]), indices) for sid, indices in shard_to_docs.items()]
-    with mp.Pool(num_workers) as pool:
+    with ThreadPool(num_workers) as pool:
         results = list(tqdm(
             pool.imap_unordered(_read_docs_from_shard, tasks, chunksize=1),
             total=len(tasks),
-            desc=desc or f"  Reading selected docs ({num_workers} processes)",
+            desc=desc or f"  Reading selected docs ({num_workers} threads)",
         ))
     return [doc for shard_docs in results for doc in shard_docs]
 
 
 def _scan_preprocessed_shard_indexed(args):
     idx, shard_path = args
-    df = pq.read_table(shard_path, columns=["text", "doc_char_count"]).to_pandas()
-    texts = df["text"].tolist()
-    char_counts = df["doc_char_count"].tolist()
-    valid = [(i, cc) for i, cc in enumerate(char_counts) if texts[i] and len(texts[i]) >= 100]
+    table = pq.read_table(shard_path, columns=["doc_char_count"])
+    char_counts = table["doc_char_count"].to_pylist()
+    valid = [(i, cc) for i, cc in enumerate(char_counts) if cc and cc >= 100]
     return idx, valid
 
 
-def scan_preprocessed_shards(preprocessed_data_dir, num_workers=None):
+def scan_preprocessed_shards(preprocessed_data_dir, num_workers=None, max_shards=None):
     if num_workers is None:
-        num_workers = min(mp.cpu_count() // 4, 32) or 1
+        num_workers = min(mp.cpu_count(), 16) or 1
     shard_files = sorted(Path(preprocessed_data_dir).glob("preprocessed_*.parquet"))
     if not shard_files:
         raise FileNotFoundError(f"No preprocessed_*.parquet files found in {preprocessed_data_dir}")
+    if max_shards is not None:
+        shard_files = shard_files[:max_shards]
     tasks = [(i, str(p)) for i, p in enumerate(shard_files)]
-    with mp.Pool(num_workers) as pool:
+    with ThreadPool(num_workers) as pool:
         results = [None] * len(shard_files)
         for idx, docs in tqdm(
             pool.imap_unordered(_scan_preprocessed_shard_indexed, tasks, chunksize=1),
@@ -162,17 +167,14 @@ def trim_docs_to_target(docs, target_tokens):
     return trimmed, trim_tokens
 
 
-def select_quality_topk(preprocessed_data_dir, quality_method, total_tokens,
+def select_quality_topk(prep_files, prep_metadata, quality_method, total_tokens,
                         tokenizer_pkl=None, num_workers=None, enc=None):
     quality_col = QUALITY_SCORE_MAP[quality_method]
-    print(f"  Scanning preprocessed shards...")
-    prep_files, prep_metadata = scan_preprocessed_shards(
-        preprocessed_data_dir, num_workers=num_workers)
-    print(f"  Found {len(prep_files)} preprocessed shards")
+    print(f"  Using {len(prep_files)} preprocessed shards (pre-scanned)")
 
     print(f"  Reading quality scores ({quality_col})...")
     all_quality_docs = []
-    for shard_id, docs in enumerate(prep_metadata):
+    for shard_id, docs in enumerate(tqdm(prep_metadata, desc=f"  Reading quality scores")):
         if not docs:
             continue
         df = pq.read_table(str(prep_files[shard_id]), columns=[quality_col]).to_pandas()
@@ -197,7 +199,10 @@ def select_quality_topk(preprocessed_data_dir, quality_method, total_tokens,
 
     quality_docs = read_docs_from_shards(
         prep_files, q_selected, num_workers=num_workers,
-        desc=f"  Reading quality docs ({num_workers or 'auto'} processes)")
+        desc=f"  Reading quality docs ({num_workers or 'auto'} threads)")
+
+    del all_quality_docs
+    gc.collect()
 
     quality_tokens = 0
     if enc and tokenizer_pkl:
@@ -206,6 +211,8 @@ def select_quality_topk(preprocessed_data_dir, quality_method, total_tokens,
         q_exact = count_tokens_mp(q_texts, tokenizer_pkl, num_workers=num_workers)
         for doc, tc in zip(quality_docs, q_exact):
             doc["token_count"] = tc
+        del q_texts, q_exact
+        gc.collect()
         quality_tokens = sum(d["token_count"] for d in quality_docs)
         print(f"  Exact tokens before trim: {quality_tokens:,} (target: {total_tokens:,})")
 
@@ -308,13 +315,15 @@ def main():
     ]
     total_tokens = sum(token_counts)
 
+    del quadmix_df, texts, valid_texts, token_counts
+    gc.collect()
+
     print(f"  QuadMix docs: {len(quadmix_docs):,}")
     print(f"  Tokens ({token_method}): {total_tokens:,}")
 
     print(f"\n[2/6] Scanning preprocessed shards metadata...")
-    prep_files, prep_metadata = scan_preprocessed_shards(args.preprocessed_data_dir, num_workers=args.num_workers)
-    prep_files = prep_files[:args.max_random_scan]
-    prep_metadata = prep_metadata[:args.max_random_scan]
+    prep_files, prep_metadata = scan_preprocessed_shards(
+        args.preprocessed_data_dir, num_workers=args.num_workers, max_shards=args.max_random_scan)
     print(f"  Scanning {len(prep_files)} shards (metadata only)...")
 
     all_candidates = []
@@ -345,6 +354,8 @@ def main():
         exact_counts = count_tokens_mp(random_texts, args.tokenizer_pkl, num_workers=args.num_workers)
         for doc, tc in zip(random_docs, exact_counts):
             doc["token_count"] = tc
+        del random_texts, exact_counts
+        gc.collect()
         accumulated_tokens = sum(d["token_count"] for d in random_docs)
         print(f"  Exact tokens before trim: {accumulated_tokens:,} (target: {total_tokens:,})")
 
@@ -352,6 +363,9 @@ def main():
             n_before = len(random_docs)
             random_docs, accumulated_tokens = trim_docs_to_target(random_docs, total_tokens)
             print(f"  Trimmed {n_before - len(random_docs):,} docs to match target")
+
+    del all_candidates, selected
+    gc.collect()
 
     print(f"  Random docs: {len(random_docs):,}")
     print(f"  Tokens ({token_method}): {accumulated_tokens:,}")
@@ -361,7 +375,7 @@ def main():
         for mi, method in enumerate(quality_methods):
             print(f"\n[4.{mi+1}/6] Quality-Only Top-K selection ({method})...")
             q_docs, q_tokens = select_quality_topk(
-                args.preprocessed_data_dir, method, total_tokens,
+                prep_files, prep_metadata, method, total_tokens,
                 tokenizer_pkl=args.tokenizer_pkl, num_workers=args.num_workers, enc=enc)
             quality_datasets[method] = (q_docs, q_tokens)
     else:
