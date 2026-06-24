@@ -59,18 +59,17 @@ export PYTORCH_NPU_ENABLE_TORCHscript=1
 export NPU_PERF_MODE=high_performance
 export NANOCHAT_DTYPE=bfloat16
 
-BATCH_DIR="$NANOCHAT_MODEL_DIR/mid_checkpoints/replay_batches"
-START_STEP=320
-END_STEP=330
-
-export PYTHONPATH="$SCRIPT_DIR:$NANOCHAT_REPO:${PYTHONPATH:-}"
+BATCH_DIR="${BATCH_DIR:-$NANOCHAT_MODEL_DIR/mid_checkpoints/replay_batches}"
+START_STEP="${START_STEP:-320}"
+END_STEP="${END_STEP:-330}"
+BASE_MODEL_TAG="${BASE_MODEL_TAG:-d24_0320}"
 
 pushd "$NANOCHAT_REPO" > /dev/null
 python3 -m torch.distributed.run --standalone --nproc_per_node="$NUM_NPU" -m replay_training -- \
     --batch-dir="$BATCH_DIR" \
     --start-step=$START_STEP \
     --end-step=$END_STEP \
-    --model-tag=base \
+    --model-tag="$BASE_MODEL_TAG" \
     --model-step=0 \
     --device-batch-size=8 \
     --max-seq-len=2048 \
