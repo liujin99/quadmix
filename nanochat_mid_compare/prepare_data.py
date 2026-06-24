@@ -150,7 +150,7 @@ def _read_docs_from_shard_tagged(args):
 
 def read_docs_from_shards(shard_paths, selections, num_workers=None, desc=None):
     if num_workers is None:
-        num_workers = min(mp.cpu_count(), 32) or 1
+        num_workers = min(mp.cpu_count() // 4, 48) or 1
     shard_to_docs = {}
     for shard_id, doc_id in selections:
         if shard_id not in shard_to_docs:
@@ -197,7 +197,7 @@ def _scan_preprocessed_shard_indexed(args):
 def scan_preprocessed_shards(preprocessed_data_dir, num_workers=None, max_shards=None,
                              max_chars=1000000, max_char_repeat_ratio=0.3):
     if num_workers is None:
-        num_workers = min(mp.cpu_count(), 32) or 1
+        num_workers = min(mp.cpu_count() // 4, 48) or 1
     shard_files = sorted(Path(preprocessed_data_dir).glob("preprocessed_*.parquet"))
     if not shard_files:
         raise FileNotFoundError(f"No preprocessed_*.parquet files found in {preprocessed_data_dir}")
