@@ -24,6 +24,7 @@ import sys
 import gc
 import argparse
 import random
+from collections import Counter
 import json
 import pickle
 import multiprocessing as mp
@@ -126,8 +127,16 @@ def estimate_tokens(text):
     return len(text) // 4
 
 
+def _has_char_repetition(text, max_ratio=0.3):
+    if len(text) < 1000:
+        return False
+    counts = Counter(text)
+    most_common_count = counts.most_common(1)[0][1]
+    return most_common_count / len(text) > max_ratio
+
+
 def _read_docs_from_shard_tagged(args):
-    shard_id, shard_path, doc_indices, max_chars = args
+    shard_id, shard_path, doc_indices, max_chars, max_char_repeat_ratio = args
     table = pq.read_table(shard_path, columns=["text"])
     texts = table["text"].to_pylist()
     result = []
@@ -135,11 +144,14 @@ def _read_docs_from_shard_tagged(args):
         text = texts[i]
         if max_chars and len(text) > max_chars:
             continue
+        if _has_char_repetition(text, max_char_repeat_ratio):
+            continue
         result.append({"text": text, "char_count": len(text), "token_count": len(text) // 4})
     return shard_id, result
 
 
-def read_docs_from_shards(shard_paths, selections, num_workers=None, desc=None, max_chars=200000):
+def read_docs_from_shards(shard_paths, selections, num_workers=None, desc=None,
+                          max_chars=1000000, max_char_repeat_ratio=0.3):
     if num_workers is None:
         num_workers = min(mp.cpu_count(), 32) or 1
     shard_to_docs = {}
@@ -147,7 +159,8 @@ def read_docs_from_shards(shard_paths, selections, num_workers=None, desc=None, 
         if shard_id not in shard_to_docs:
             shard_to_docs[shard_id] = []
         shard_to_docs[shard_id].append(doc_id)
-    tasks = [(sid, str(shard_paths[sid]), indices, max_chars) for sid, indices in shard_to_docs.items()]
+    tasks = [(sid, str(shard_paths[sid]), indices, max_chars, max_char_repeat_ratio)
+             for sid, indices in shard_to_docs.items()]
     with _SPAWN_CTX.Pool(num_workers) as pool:
         unordered = list(tqdm(
             pool.imap_unordered(_read_docs_from_shard_tagged, tasks, chunksize=1),
@@ -173,7 +186,7 @@ def _scan_preprocessed_shard_indexed(args):
     return idx, valid
 
 
-def scan_preprocessed_shards(preprocessed_data_dir, num_workers=None, max_shards=None, max_chars=200000):
+def scan_preprocessed_shards(preprocessed_data_dir, num_workers=None, max_shards=None, max_chars=1000000):
     if num_workers is None:
         num_workers = min(mp.cpu_count(), 32) or 1
     shard_files = sorted(Path(preprocessed_data_dir).glob("preprocessed_*.parquet"))
@@ -212,7 +225,8 @@ def trim_docs_to_target(docs, target_tokens):
 
 
 def select_quality_topk(prep_files, prep_metadata, quality_method, total_tokens,
-                        tokenizer_pkl=None, num_workers=None, enc=None, max_chars=200000):
+                        tokenizer_pkl=None, num_workers=None, enc=None,
+                        max_chars=1000000, max_char_repeat_ratio=0.3):
     quality_col = QUALITY_SCORE_MAP[quality_method]
     print(f"  Using {len(prep_files)} preprocessed shards (pre-scanned)")
 
@@ -244,7 +258,7 @@ def select_quality_topk(prep_files, prep_metadata, quality_method, total_tokens,
     quality_docs = read_docs_from_shards(
         prep_files, q_selected, num_workers=num_workers,
         desc=f"  Reading quality docs ({num_workers or 'auto'} processes)",
-        max_chars=max_chars)
+        max_chars=max_chars, max_char_repeat_ratio=max_char_repeat_ratio)
 
     del all_quality_docs
     gc.collect()
@@ -300,8 +314,11 @@ def main():
                              "Shard read: threads. Default: auto")
     parser.add_argument("--num-npu", type=int, default=8,
                         help="Number of NPUs for DDP (ensures enough row groups per shard)")
-    parser.add_argument("--max-chars", type=int, default=200000,
-                        help="Skip documents longer than this (prevents tokenizer hangs). Default: 200000")
+    parser.add_argument("--max-chars", type=int, default=1000000,
+                        help="Skip documents longer than this (safety net). Default: 1000000")
+    parser.add_argument("--max-char-repeat-ratio", type=float, default=0.3,
+                        help="Skip documents where any single char exceeds this ratio "
+                             "(filters corrupted/binary data). Default: 0.3")
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -395,7 +412,8 @@ def main():
     print(f"\n[3.5/6] Reading selected documents...")
     random_docs = read_docs_from_shards(prep_files, selected, num_workers=args.num_workers,
                                         desc=f"  Reading random docs ({args.num_workers or 'auto'} processes)",
-                                        max_chars=args.max_chars)
+                                        max_chars=args.max_chars,
+                                        max_char_repeat_ratio=args.max_char_repeat_ratio)
 
     if enc and args.tokenizer_pkl:
         print(f"  Re-counting tokens for {len(random_docs):,} docs (exact)...")
@@ -439,7 +457,8 @@ def main():
             q_docs, q_tokens = select_quality_topk(
                 prep_files, prep_metadata, method, total_tokens,
                 tokenizer_pkl=args.tokenizer_pkl, num_workers=args.num_workers, enc=enc,
-                max_chars=args.max_chars)
+                max_chars=args.max_chars,
+                max_char_repeat_ratio=args.max_char_repeat_ratio)
             quality_datasets[method] = (q_docs, q_tokens)
     else:
         print(f"\n[4/6] Quality baseline skipped (no quality methods specified)")
