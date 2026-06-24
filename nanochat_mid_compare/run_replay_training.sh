@@ -13,6 +13,8 @@ END_STEP="${END_STEP:-330}"
 BASE_MODEL_TAG="${BASE_MODEL_TAG:-d24_0320}"
 BASE_MODEL_STEP="${BASE_MODEL_STEP:-6612}"
 DEVICE_BATCH_SIZE="${DEVICE_BATCH_SIZE:-8}"
+TOTAL_BATCH_SIZE="${TOTAL_BATCH_SIZE:-524288}"
+NUM_ITERATIONS="${NUM_ITERATIONS:-627}"
 
 # ══════ NPU ENVIRONMENT (identical to run_experiment.sh) ══════
 export OMP_NUM_THREADS=1
@@ -93,6 +95,8 @@ python3 -m torch.distributed.run --standalone --nproc_per_node="$NUM_NPU" -m scr
     --model-tag="$BASE_MODEL_TAG" \
     --model-step="$BASE_MODEL_STEP" \
     --device-batch-size="$DEVICE_BATCH_SIZE" \
+    --total-batch-size="$TOTAL_BATCH_SIZE" \
+    --num-iterations="$NUM_ITERATIONS" \
     --core-metric-every=-1 \
     --eval-every=-1 \
     --sample-every=-1 \

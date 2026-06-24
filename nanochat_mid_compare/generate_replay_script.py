@@ -87,21 +87,6 @@ y = y.to(device, non_blocking=True)
         'parser.add_argument("--replay-dir", type=str, default=None, help="[replay] unused, kept for compat")\nparser.add_argument("--data-dir"'
     )
 
-    num_iter_point = 'print0(f"Total tokens: {total_tokens:,}, Steps: {num_iterations:,}")'
-    assert num_iter_point in source, f"num_iterations print not found in mid_train.py"
-    source = source.replace(
-        num_iter_point,
-        num_iter_point + '''
-
-# ══════ OVERRIDE NUM_ITERATIONS FOR REPLAY (auto-injected) ══════
-if _replay_dir:
-    num_iterations = _replay_end - _replay_start + 1
-    total_tokens = total_batch_size * num_iterations
-    print0(f"[REPLAY] Overriding: Steps={num_iterations}, Total tokens={total_tokens:,}")
-# ══════ END OVERRIDE ══════
-'''
-    )
-
     source = source.replace(
         'min_val_bpb = float("inf")',
         '''# ══════ DISABLE EVAL/SAMPLE/SAVE FOR REPLAY (auto-injected) ══════
@@ -120,7 +105,7 @@ min_val_bpb = float("inf")'''
 
     print(f"Generated: {output_path}")
     print(f"  Source: {mid_train_path}")
-    print(f"  Modifications: replay dataloader, disabled eval/sample/save, num_iterations override")
+    print(f"  Modifications: replay dataloader, disabled eval/sample/save")
 
 
 if __name__ == "__main__":
