@@ -63,6 +63,8 @@ BATCH_DIR="$NANOCHAT_MODEL_DIR/mid_checkpoints/replay_batches"
 START_STEP=320
 END_STEP=330
 
+export PYTHONPATH="$SCRIPT_DIR:$NANOCHAT_REPO:${PYTHONPATH:-}"
+
 pushd "$NANOCHAT_REPO" > /dev/null
 python3 -m torch.distributed.run --standalone --nproc_per_node="$NUM_NPU" -m replay_training -- \
     --batch-dir="$BATCH_DIR" \
