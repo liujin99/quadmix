@@ -77,9 +77,12 @@ def load_tokenizer(tokenizer_pkl_path):
 
 def count_tokens_mp(texts, tokenizer_pkl_path, num_workers=None, chunk_timeout=600):
     if num_workers is None:
-        num_workers = min(mp.cpu_count() // 4, 8) or 1
+        num_workers = min(mp.cpu_count() // 4, 48) or 1
     chunk_size = max(1, len(texts) // (num_workers * 4))
     chunks = [texts[i:i + chunk_size] for i in range(0, len(texts), chunk_size)]
+    
+    enc = load_tokenizer(tokenizer_pkl_path)
+    
     with _SPAWN_CTX.Pool(num_workers, initializer=_init_worker, initargs=(tokenizer_pkl_path,)) as pool:
         async_results = [(i, pool.apply_async(_worker_encode_batch, (chunk,)))
                          for i, chunk in enumerate(chunks)]
@@ -89,11 +92,27 @@ def count_tokens_mp(texts, tokenizer_pkl_path, num_workers=None, chunk_timeout=6
             try:
                 results[i] = ar.get(timeout=chunk_timeout)
             except mp.TimeoutError:
-                print(f"\n  WARNING: chunk {i} timed out after {chunk_timeout}s, using estimates")
-                results[i] = [len(t) // 4 for t in chunks[i]]
+                print(f"\n  WARNING: chunk {i} timed out after {chunk_timeout}s, retrying in main process...")
+                try:
+                    if hasattr(enc, "encode_ordinary_batch"):
+                        results[i] = [len(ids) for ids in enc.encode_ordinary_batch(chunks[i], num_threads=1)]
+                    else:
+                        results[i] = [len(enc.encode_ordinary(t)) for t in chunks[i]]
+                    print(f"  Retry succeeded for chunk {i}")
+                except Exception as e2:
+                    print(f"  Retry failed: {e2}, using estimates")
+                    results[i] = [len(t) // 4 for t in chunks[i]]
             except Exception as e:
-                print(f"\n  WARNING: chunk {i} failed: {e}, using estimates")
-                results[i] = [len(t) // 4 for t in chunks[i]]
+                print(f"\n  WARNING: chunk {i} failed: {e}, retrying in main process...")
+                try:
+                    if hasattr(enc, "encode_ordinary_batch"):
+                        results[i] = [len(ids) for ids in enc.encode_ordinary_batch(chunks[i], num_threads=1)]
+                    else:
+                        results[i] = [len(enc.encode_ordinary(t)) for t in chunks[i]]
+                    print(f"  Retry succeeded for chunk {i}")
+                except Exception as e2:
+                    print(f"  Retry failed: {e2}, using estimates")
+                    results[i] = [len(t) // 4 for t in chunks[i]]
             pbar.update(1)
         pbar.close()
     return [c for batch in results for c in batch]
