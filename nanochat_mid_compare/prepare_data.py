@@ -126,11 +126,11 @@ def estimate_tokens(text):
     return len(text) // 4
 
 
-def _read_docs_from_shard(args):
-    shard_path, doc_indices = args
+def _read_docs_from_shard_tagged(args):
+    shard_id, shard_path, doc_indices = args
     table = pq.read_table(shard_path, columns=["text"])
     texts = table["text"].to_pylist()
-    return [
+    return shard_id, [
         {"text": texts[i], "char_count": len(texts[i]), "token_count": len(texts[i]) // 4}
         for i in doc_indices
     ]
@@ -144,14 +144,21 @@ def read_docs_from_shards(shard_paths, selections, num_workers=None, desc=None):
         if shard_id not in shard_to_docs:
             shard_to_docs[shard_id] = []
         shard_to_docs[shard_id].append(doc_id)
-    tasks = [(str(shard_paths[sid]), indices) for sid, indices in shard_to_docs.items()]
+    tasks = [(sid, str(shard_paths[sid]), indices) for sid, indices in shard_to_docs.items()]
     with _SPAWN_CTX.Pool(num_workers) as pool:
-        results = list(tqdm(
-            pool.imap_unordered(_read_docs_from_shard, tasks, chunksize=1),
+        unordered = list(tqdm(
+            pool.imap_unordered(_read_docs_from_shard_tagged, tasks, chunksize=1),
             total=len(tasks),
             desc=desc or f"  Reading selected docs ({num_workers} processes)",
         ))
-    return [doc for shard_docs in results for doc in shard_docs]
+    shard_result_map = {sid: docs for sid, docs in unordered}
+    shard_cursors = {sid: 0 for sid in shard_to_docs}
+    result = []
+    for shard_id, _ in selections:
+        idx = shard_cursors[shard_id]
+        result.append(shard_result_map[shard_id][idx])
+        shard_cursors[shard_id] = idx + 1
+    return result
 
 
 def _scan_preprocessed_shard_indexed(args):
