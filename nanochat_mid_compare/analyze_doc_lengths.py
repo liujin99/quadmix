@@ -19,8 +19,9 @@ from tqdm import tqdm
 
 def scan_shard(args):
     idx, path = args
-    table = pq.read_table(path, columns=["doc_char_count"])
-    return idx, table["doc_char_count"].to_numpy()
+    table = pq.read_table(path, columns=["text"])
+    texts = table["text"].to_pylist()
+    return idx, np.array([len(t) for t in texts])
 
 
 def main():
