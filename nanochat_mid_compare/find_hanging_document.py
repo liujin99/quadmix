@@ -1,39 +1,43 @@
 """
-Find the specific document that causes tokenizer to hang on a given rank.
+Find documents that cause tokenizer to hang on a given rank.
 
-Processes documents one by one with timeout, reports which document hangs.
+Uses concurrent workers with per-document timeout.
 
 Usage:
     python3 find_hanging_document.py \
         --data-dir /path/to/quality_data_fineweb_edu \
         --tokenizer-dir /home/ma-user/work/nanochat_model_dir/tokenizer \
         --rank 5 \
-        --timeout 10
+        --timeout 10 \
+        --num-workers 16
 """
 
 import os
 import pickle
 import argparse
-import signal
-from queue import Queue
-from threading import Thread
+import multiprocessing as mp
 
 import pyarrow.parquet as pq
 
+_SPAWN_CTX = mp.get_context("spawn")
 
-class TimeoutError(Exception):
-    pass
-
-
-def timeout_handler(signum, frame):
-    raise TimeoutError("Tokenizer timeout")
+_worker_tokenizer = None
 
 
-def load_tokenizer(tokenizer_dir):
+def _init_worker(tokenizer_dir):
+    global _worker_tokenizer
     pkl_path = os.path.join(tokenizer_dir, "tokenizer.pkl")
     with open(pkl_path, "rb") as f:
-        enc = pickle.load(f)
-    return enc
+        _worker_tokenizer = pickle.load(f)
+
+
+def _tokenize_one(task):
+    pq_idx, rg_idx, doc_idx, text, timeout = task
+    try:
+        tokens = _worker_tokenizer.encode_ordinary(text)
+        return (pq_idx, rg_idx, doc_idx, len(text), len(tokens), text[:500], None)
+    except Exception as e:
+        return (pq_idx, rg_idx, doc_idx, len(text), 0, text[:500], str(e))
 
 
 def list_train_parquets(data_dir):
@@ -46,123 +50,93 @@ def list_train_parquets(data_dir):
     return [os.path.join(data_dir, f) for f in files[:-1]]
 
 
-def document_batches_for_rank(parquet_paths, rank, world_size, tokenizer_batch_size):
+def collect_docs_for_rank(parquet_paths, rank, world_size):
+    docs = []
     for pq_idx, filepath in enumerate(parquet_paths):
         pf = pq.ParquetFile(filepath)
         rg_idx = rank
         while rg_idx < pf.num_row_groups:
             rg = pf.read_row_group(rg_idx)
-            batch = rg.column('text').to_pylist()
-            for i in range(0, len(batch), tokenizer_batch_size):
-                yield batch[i:i + tokenizer_batch_size], pq_idx, rg_idx
+            texts = rg.column('text').to_pylist()
+            for doc_idx, text in enumerate(texts):
+                docs.append((pq_idx, rg_idx, doc_idx, text))
             rg_idx += world_size
-
-
-def tokenize_with_timeout(enc, texts, timeout):
-    """Tokenize in a thread with timeout."""
-    result_queue = Queue()
-
-    def worker():
-        try:
-            tokens = enc.encode_ordinary_batch(texts, num_threads=1)
-            result_queue.put(("ok", tokens))
-        except Exception as e:
-            result_queue.put(("error", e))
-
-    thread = Thread(target=worker)
-    thread.daemon = True
-    thread.start()
-    thread.join(timeout=timeout)
-
-    if thread.is_alive():
-        raise TimeoutError(f"Tokenizer hung for {timeout}s")
-
-    if result_queue.empty():
-        raise TimeoutError("No result from tokenizer")
-
-    status, result = result_queue.get()
-    if status == "error":
-        raise result
-    return result
+    return docs
 
 
 def find_hanging_document(args):
-    enc = load_tokenizer(args.tokenizer_dir)
     parquet_paths = list_train_parquets(args.data_dir)
 
-    print(f"Scanning rank {args.rank} documents with {args.timeout}s timeout per batch")
-    print(f"Looking for documents that cause tokenizer to hang")
+    print(f"Collecting documents for rank {args.rank}...")
+    docs = collect_docs_for_rank(parquet_paths, args.rank, args.num_npu)
+    print(f"  Total documents: {len(docs):,}")
+    print(f"Scanning with {args.num_workers} workers, {args.timeout}s timeout per doc")
     print()
 
-    batches = document_batches_for_rank(
-        parquet_paths, args.rank, args.num_npu, args.tokenizer_batch_size
-    )
+    tasks = [(pq_idx, rg_idx, doc_idx, text, args.timeout)
+             for pq_idx, rg_idx, doc_idx, text in docs]
 
-    total_docs = 0
     hanging_docs = []
-    rg_batch_counter = {}
+    long_docs = []
+    processed = 0
 
-    for batch_idx, (doc_batch, pq_idx, rg_idx) in enumerate(batches):
-        rg_key = (pq_idx, rg_idx)
-        if rg_key not in rg_batch_counter:
-            rg_batch_counter[rg_key] = 0
-        batch_offset = rg_batch_counter[rg_key] * args.tokenizer_batch_size
-        rg_batch_counter[rg_key] += 1
+    with _SPAWN_CTX.Pool(args.num_workers, initializer=_init_worker,
+                         initargs=(args.tokenizer_dir,)) as pool:
+        results = []
+        for task in tasks:
+            r = pool.apply_async(_tokenize_one, (task,))
+            results.append(r)
 
-        for doc_idx, text in enumerate(doc_batch):
-            total_docs += 1
-            abs_doc_idx = batch_offset + doc_idx
-
-            if total_docs % 1000 == 0:
-                print(f"  Processed {total_docs} docs, found {len(hanging_docs)} hanging...",
-                      end="\r", flush=True)
-
+        for i, r in enumerate(results):
+            pq_idx, rg_idx, doc_idx, text = docs[i]
             try:
-                tokens = tokenize_with_timeout(enc, [text], args.timeout)
-                token_count = len(tokens[0])
+                result = r.get(timeout=args.timeout)
+                _, _, _, char_len, tok_len, preview, error = result
+                processed += 1
 
-                if token_count > 100000:
-                    print(f"\n[WARNING] Very long doc: {token_count} tokens "
-                          f"(pq={pq_idx} rg={rg_idx} doc={abs_doc_idx})")
+                if error:
+                    print(f"\n[ERROR] pq={pq_idx} rg={rg_idx} doc={doc_idx}: {error}")
+                elif tok_len > 100000:
+                    long_docs.append(result)
+                    print(f"\n[WARNING] Very long: {tok_len} tokens "
+                          f"(pq={pq_idx} rg={rg_idx} doc={doc_idx}, {char_len} chars)")
 
-            except TimeoutError as e:
-                print(f"\n[HANG] Document caused tokenizer to hang!")
-                print(f"  Location: pq={pq_idx} rg={rg_idx} doc={abs_doc_idx}")
-                print(f"  Length: {len(text)} chars")
-                print(f"  Preview: {text[:500]}...")
-                print()
-
+            except mp.TimeoutError:
                 hanging_docs.append({
                     "pq_idx": pq_idx,
                     "rg_idx": rg_idx,
-                    "doc_idx": abs_doc_idx,
+                    "doc_idx": doc_idx,
                     "length": len(text),
                     "preview": text[:500]
                 })
+                print(f"\n[HANG] pq={pq_idx} rg={rg_idx} doc={doc_idx} "
+                      f"({len(text):,} chars)")
+                print(f"  Preview: {text[:300]}...")
+                print()
 
                 if len(hanging_docs) >= args.max_hanging:
                     print(f"Found {len(hanging_docs)} hanging documents, stopping")
+                    pool.terminate()
                     break
 
-            except Exception as e:
-                print(f"\n[ERROR] Tokenizer error: {e}")
-                print(f"  Location: pq={pq_idx} rg={rg_idx} doc={doc_idx}")
-
-        if len(hanging_docs) >= args.max_hanging:
-            break
+            if processed % 5000 == 0 and processed > 0:
+                print(f"  Processed {processed:,} docs, "
+                      f"found {len(hanging_docs)} hanging...", end="\r", flush=True)
 
     print()
     print("=" * 70)
     print(f"Summary:")
-    print(f"  Total documents processed: {total_docs}")
-    print(f"  Hanging documents found: {len(hanging_docs)}")
+    print(f"  Total documents: {len(docs):,}")
+    print(f"  Processed: {processed:,}")
+    print(f"  Hanging: {len(hanging_docs)}")
+    print(f"  Very long (>100K tokens): {len(long_docs)}")
     print()
 
     if hanging_docs:
         print("Hanging documents:")
         for i, doc in enumerate(hanging_docs):
             print(f"\n{i+1}. pq={doc['pq_idx']} rg={doc['rg_idx']} doc={doc['doc_idx']}")
-            print(f"   Length: {doc['length']} chars")
+            print(f"   Length: {doc['length']:,} chars")
             print(f"   Preview: {doc['preview'][:200]}...")
 
     return hanging_docs
@@ -174,11 +148,12 @@ def main():
     parser.add_argument("--tokenizer-dir", required=True)
     parser.add_argument("--rank", type=int, required=True)
     parser.add_argument("--num-npu", type=int, default=8)
-    parser.add_argument("--tokenizer-batch-size", type=int, default=256)
     parser.add_argument("--timeout", type=int, default=10,
                         help="Seconds to wait before declaring hang")
     parser.add_argument("--max-hanging", type=int, default=10,
                         help="Stop after finding this many hanging docs")
+    parser.add_argument("--num-workers", type=int, default=16,
+                        help="Number of concurrent worker processes")
     args = parser.parse_args()
 
     find_hanging_document(args)
