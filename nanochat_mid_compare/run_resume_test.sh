@@ -2,14 +2,18 @@
 # ──────────────────────────────────────────────────────────────
 # Resume Test: Isolate whether crash is pure-data or model-state+data
 #
-# Phase 1: Run normal mid_train.py from step 0 → RESUME_STEP (save checkpoint)
-# Phase 2: Resume from checkpoint, replay captured batches through crash step
+# Phase 1: Run FULL mid-training (0→NUM_ITERATIONS) with save_every=RESUME_STEP
+#          Saves checkpoint at step RESUME_STEP along the way
+#          Expected to crash at step CRASH_STEP (329)
+# Phase 2: If crashed, resume from step RESUME_STEP checkpoint,
+#          replay captured batches through crash step to test reproducibility
 #
-# If Phase 2 crashes → crash is reproducible with correct model state
-# If Phase 2 doesn't crash → something about the full 0→330 trajectory differs
+# One script does two things:
+#   1. Confirms crash still happens at the same step
+#   2. Tests if crash is reproducible from saved checkpoint
 # ──────────────────────────────────────────────────────────────
 
-set -euo pipefail
+set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 NANOCHAT_REPO="${NANOCHAT_REPO:-/home/ma-user/work/nanochat_midtrain_326}"
@@ -95,7 +99,7 @@ fi
 
 echo ""
 echo "════════════════════════════════════════════════════════════"
-echo "  Resume Test: step 0 → $RESUME_STEP → $END_STEP"
+echo "  Resume Test: Full training + Resume from step $RESUME_STEP"
 echo "════════════════════════════════════════════════════════════"
 echo ""
 echo "  Data:           $DATA_DIR"
@@ -104,31 +108,45 @@ echo "  Model tag:      $MODEL_TAG"
 echo "  Base model:     $BASE_MODEL_TAG (step $BASE_MODEL_STEP)"
 echo "  Total batch:    $TOTAL_BATCH_SIZE"
 echo "  Num iterations: $NUM_ITERATIONS"
+echo "  Save checkpoint: every $RESUME_STEP steps"
+echo ""
+echo "  Phase 1: Run full training (expected crash at step ~329)"
+echo "  Phase 2: If crashed, resume from step $RESUME_STEP and replay batches $RESUME_STEP-$END_STEP"
 echo ""
 
 # ══════════════════════════════════════════════════════════════
-#  PHASE 1: Normal training from step 0 → RESUME_STEP
+#  PHASE 1: Full training (expected to crash at step 329)
 # ══════════════════════════════════════════════════════════════
 
-echo "╔══ Phase 1: Normal training step 0 → $RESUME_STEP ══╗"
+echo "╔══ Phase 1: Full training 0 → $NUM_ITERATIONS (save checkpoint at step $RESUME_STEP) ══╗"
 echo ""
 
+PHASE1_EXIT_CODE=0
 pushd "$NANOCHAT_REPO" > /dev/null
 python3 -m torch.distributed.run --standalone --nproc_per_node="$NUM_NPU" -m scripts.mid_train -- \
     --run="resume_phase1" \
     --model-tag="$MODEL_TAG" \
     --device-batch-size="$DEVICE_BATCH_SIZE" \
     --total-batch-size="$TOTAL_BATCH_SIZE" \
-    --num-iterations="$RESUME_STEP" \
+    --num-iterations="$NUM_ITERATIONS" \
     --save-every="$RESUME_STEP" \
     --core-metric-every=-1 \
     --eval-every=-1 \
     --sample-every=-1 \
-    --data-dir="$DATA_DIR"
+    --data-dir="$DATA_DIR" || PHASE1_EXIT_CODE=$?
 popd > /dev/null
 
 echo ""
 echo "╚══════════════════════════════════════════════════════════╝"
+echo ""
+
+if [ $PHASE1_EXIT_CODE -eq 0 ]; then
+    echo "Phase 1 completed without crash!"
+    echo "No crash detected, skipping Phase 2."
+    exit 0
+fi
+
+echo "Phase 1 crashed with exit code $PHASE1_EXIT_CODE (expected)"
 echo ""
 
 # ══════════════════════════════════════════════════════════════
@@ -138,6 +156,7 @@ echo ""
 CKPT_DIR="$NANOCHAT_MODEL_DIR/mid_checkpoints/$MODEL_TAG"
 if [ ! -f "$CKPT_DIR/model_$(printf '%06d' $RESUME_STEP).pt" ]; then
     echo "ERROR: Phase 1 checkpoint not found at $CKPT_DIR/model_$(printf '%06d' $RESUME_STEP).pt"
+    echo "The crash happened before step $RESUME_STEP, cannot resume."
     exit 1
 fi
 echo "Phase 1 checkpoint verified: step $RESUME_STEP"
@@ -157,6 +176,7 @@ export REPLAY_END="$END_STEP"
 echo "Generating replay_mid_train.py (with --resume-step=$RESUME_STEP)..."
 python3 "$SCRIPT_DIR/generate_replay_script.py" "$NANOCHAT_REPO" --resume-step="$RESUME_STEP"
 
+PHASE2_EXIT_CODE=0
 pushd "$NANOCHAT_REPO" > /dev/null
 python3 -m torch.distributed.run --standalone --nproc_per_node="$NUM_NPU" -m scripts.replay_mid_train -- \
     --run="resume_phase2" \
@@ -169,10 +189,31 @@ python3 -m torch.distributed.run --standalone --nproc_per_node="$NUM_NPU" -m scr
     --eval-every=-1 \
     --sample-every=-1 \
     --save-every=-1 \
-    --data-dir="$BATCH_DIR"
+    --data-dir="$BATCH_DIR" || PHASE2_EXIT_CODE=$?
 popd > /dev/null
 
 echo ""
 echo "╚══════════════════════════════════════════════════════════╝"
 echo ""
-echo "Resume test completed successfully (no crash)!"
+
+# ══════════════════════════════════════════════════════════════
+#  SUMMARY
+# ══════════════════════════════════════════════════════════════
+
+echo "════════════════════════════════════════════════════════════"
+echo "  Resume Test Results"
+echo "════════════════════════════════════════════════════════════"
+echo ""
+echo "  Phase 1 (full training):  CRASHED at step ~329 (exit code $PHASE1_EXIT_CODE)"
+echo "  Phase 2 (resume+replay):  $([ $PHASE2_EXIT_CODE -eq 0 ] && echo 'NO CRASH' || echo "CRASHED (exit code $PHASE2_EXIT_CODE)")"
+echo ""
+
+if [ $PHASE2_EXIT_CODE -eq 0 ]; then
+    echo "  Conclusion: Crash is NOT reproducible from step $RESUME_STEP checkpoint"
+    echo "  → Something about the full 0→329 trajectory differs from resume"
+else
+    echo "  Conclusion: Crash IS reproducible from step $RESUME_STEP checkpoint"
+    echo "  → Crash is caused by model state at step $RESUME_STEP + specific batch data"
+fi
+echo ""
+echo "════════════════════════════════════════════════════════════"
