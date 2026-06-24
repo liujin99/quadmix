@@ -84,6 +84,10 @@ def main():
     num_iterations = args.end_step - args.start_step + 1
     print0(f"Will train for {num_iterations} steps (replay steps {args.start_step}-{args.end_step})")
 
+    torch.npu.empty_cache()
+    import gc
+    gc.collect()
+
     step = 0
     for original_step in range(args.start_step, args.end_step + 1):
         batch_file = os.path.join(args.batch_dir, f"step{original_step}_rank{ddp_rank}.pt")
