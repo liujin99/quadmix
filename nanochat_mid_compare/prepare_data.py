@@ -140,14 +140,18 @@ def _read_docs_from_shard_tagged(args):
     table = pq.read_table(shard_path, columns=["text"])
     texts = table["text"].to_pylist()
     result = []
+    filtered_long = 0
+    filtered_repeat = 0
     for i in doc_indices:
         text = texts[i]
         if max_chars and len(text) > max_chars:
+            filtered_long += 1
             continue
         if _has_char_repetition(text, max_char_repeat_ratio):
+            filtered_repeat += 1
             continue
         result.append({"text": text, "char_count": len(text), "token_count": len(text) // 4})
-    return shard_id, result
+    return shard_id, result, filtered_long, filtered_repeat
 
 
 def read_docs_from_shards(shard_paths, selections, num_workers=None, desc=None,
@@ -167,13 +171,19 @@ def read_docs_from_shards(shard_paths, selections, num_workers=None, desc=None,
             total=len(tasks),
             desc=desc or f"  Reading selected docs ({num_workers} processes)",
         ))
-    shard_result_map = {sid: docs for sid, docs in unordered}
+    shard_result_map = {sid: (docs, fl, fr) for sid, docs, fl, fr in unordered}
+    total_filtered_long = sum(fl for _, (_, fl, fr) in shard_result_map.items())
+    total_filtered_repeat = sum(fr for _, (_, fl, fr) in shard_result_map.items())
+    shard_result_map = {sid: docs for sid, (docs, _, _) in shard_result_map.items()}
     shard_cursors = {sid: 0 for sid in shard_to_docs}
     result = []
     for shard_id, _ in selections:
         idx = shard_cursors[shard_id]
         result.append(shard_result_map[shard_id][idx])
         shard_cursors[shard_id] = idx + 1
+    if total_filtered_long > 0 or total_filtered_repeat > 0:
+        print(f"  Filtered {total_filtered_long:,} docs (>{max_chars:,} chars), "
+              f"{total_filtered_repeat:,} docs (single char >{max_char_repeat_ratio*100:.0f}% repetition)")
     return result
 
 
