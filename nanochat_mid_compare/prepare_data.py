@@ -92,7 +92,11 @@ def count_tokens_mp(texts, tokenizer_pkl_path, num_workers=None, chunk_timeout=6
             try:
                 results[i] = ar.get(timeout=chunk_timeout)
             except mp.TimeoutError:
-                print(f"\n  WARNING: chunk {i} timed out after {chunk_timeout}s, retrying in main process...")
+                chunk = chunks[i]
+                lengths = [len(t) for t in chunk]
+                print(f"\n  WARNING: chunk {i} timed out after {chunk_timeout}s")
+                print(f"    Chunk stats: {len(chunk)} docs, min={min(lengths)}, max={max(lengths)}, avg={sum(lengths)//len(lengths)}")
+                print(f"    Retrying in main process...")
                 try:
                     if hasattr(enc, "encode_ordinary_batch"):
                         results[i] = [len(ids) for ids in enc.encode_ordinary_batch(chunks[i], num_threads=1)]
