@@ -6,7 +6,17 @@ NANOCHAT_REPO="${NANOCHAT_REPO:-/home/ma-user/work/nanochat_midtrain_326}"
 NANOCHAT_MODEL_DIR="${NANOCHAT_MODEL_DIR:-/home/ma-user/work/nanochat_model_dir}"
 NUM_NPU=8
 
+# ══════ CONFIGURATION ══════
+BATCH_DIR="${BATCH_DIR:-$NANOCHAT_MODEL_DIR/mid_checkpoints/replay_batches}"
+START_STEP="${START_STEP:-320}"
+END_STEP="${END_STEP:-330}"
+BASE_MODEL_TAG="${BASE_MODEL_TAG:-d24_0320}"
+BASE_MODEL_STEP="${BASE_MODEL_STEP:-6612}"
+DEVICE_BATCH_SIZE="${DEVICE_BATCH_SIZE:-8}"
+
+# ══════ NPU ENVIRONMENT (identical to run_experiment.sh) ══════
 export OMP_NUM_THREADS=1
+export WANDB_MODE=offline
 export NANOCHAT_BASE_DIR="$NANOCHAT_MODEL_DIR"
 
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
@@ -59,25 +69,33 @@ export PYTORCH_NPU_ENABLE_TORCHscript=1
 export NPU_PERF_MODE=high_performance
 export NANOCHAT_DTYPE=bfloat16
 
-BATCH_DIR="${BATCH_DIR:-$NANOCHAT_MODEL_DIR/mid_checkpoints/replay_batches}"
-START_STEP="${START_STEP:-320}"
-END_STEP="${END_STEP:-330}"
-BASE_MODEL_TAG="${BASE_MODEL_TAG:-d24_0320}"
+# ══════ REPLAY ENV VARS (consumed by replay_mid_train.py) ══════
+export REPLAY_DIR="$BATCH_DIR"
+export REPLAY_START="$START_STEP"
+export REPLAY_END="$END_STEP"
 
 export PYTHONPATH="$SCRIPT_DIR:$NANOCHAT_REPO:${PYTHONPATH:-}"
 
+# ══════ STEP 1: Generate replay_mid_train.py from mid_train.py ══════
+echo "Generating replay_mid_train.py from mid_train.py..."
+python3 "$SCRIPT_DIR/generate_replay_script.py" "$NANOCHAT_REPO"
+
+# ══════ STEP 2: Run replay training ══════
+echo ""
+echo "Replay training: steps $START_STEP-$END_STEP from $BATCH_DIR"
+echo "  Base model: $BASE_MODEL_TAG (step $BASE_MODEL_STEP)"
+echo "  Device batch size: $DEVICE_BATCH_SIZE"
+echo ""
+
 pushd "$NANOCHAT_REPO" > /dev/null
-python3 -m torch.distributed.run --standalone --nproc_per_node="$NUM_NPU" -m replay_training -- \
-    --batch-dir="$BATCH_DIR" \
-    --start-step=$START_STEP \
-    --end-step=$END_STEP \
+python3 -m torch.distributed.run --standalone --nproc_per_node="$NUM_NPU" -m scripts.replay_mid_train -- \
+    --run="replay_mid" \
     --model-tag="$BASE_MODEL_TAG" \
-    --model-step=6612 \
-    --device-batch-size=8 \
-    --max-seq-len=2048 \
-    --total-batch-size=524288 \
-    --embedding-lr=0.3 \
-    --unembedding-lr=0.008 \
-    --matrix-lr=0.02 \
-    --weight-decay=0.28
+    --model-step="$BASE_MODEL_STEP" \
+    --device-batch-size="$DEVICE_BATCH_SIZE" \
+    --core-metric-every=-1 \
+    --eval-every=-1 \
+    --sample-every=-1 \
+    --save-every=-1 \
+    --data-dir="$BATCH_DIR"
 popd > /dev/null
