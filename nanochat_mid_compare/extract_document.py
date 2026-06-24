@@ -24,8 +24,12 @@ def main():
     parser.add_argument("--output", default="extracted_doc.txt")
     args = parser.parse_args()
 
-    files = sorted(f for f in os.listdir(args.data_dir) if f.endswith(".parquet"))
-    filepath = os.path.join(args.data_dir, files[args.parquet_idx])
+    files = sorted(f for f in os.listdir(args.data_dir) if f.endswith(".parquet") and not f.endswith(".tmp"))
+    if len(files) >= 2:
+        train_files = files[:-1]
+    else:
+        train_files = files
+    filepath = os.path.join(args.data_dir, train_files[args.parquet_idx])
     print(f"Reading: {filepath}")
     print(f"  Parquet index: {args.parquet_idx}, Row group: {args.row_group}, Doc index: {args.doc_idx}")
 

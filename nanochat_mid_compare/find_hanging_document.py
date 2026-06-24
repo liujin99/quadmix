@@ -100,10 +100,18 @@ def find_hanging_document(args):
 
     total_docs = 0
     hanging_docs = []
+    rg_batch_counter = {}
 
     for batch_idx, (doc_batch, pq_idx, rg_idx) in enumerate(batches):
+        rg_key = (pq_idx, rg_idx)
+        if rg_key not in rg_batch_counter:
+            rg_batch_counter[rg_key] = 0
+        batch_offset = rg_batch_counter[rg_key] * args.tokenizer_batch_size
+        rg_batch_counter[rg_key] += 1
+
         for doc_idx, text in enumerate(doc_batch):
             total_docs += 1
+            abs_doc_idx = batch_offset + doc_idx
 
             if total_docs % 1000 == 0:
                 print(f"  Processed {total_docs} docs, found {len(hanging_docs)} hanging...",
@@ -115,11 +123,11 @@ def find_hanging_document(args):
 
                 if token_count > 100000:
                     print(f"\n[WARNING] Very long doc: {token_count} tokens "
-                          f"(pq={pq_idx} rg={rg_idx} doc={doc_idx})")
+                          f"(pq={pq_idx} rg={rg_idx} doc={abs_doc_idx})")
 
             except TimeoutError as e:
                 print(f"\n[HANG] Document caused tokenizer to hang!")
-                print(f"  Location: pq={pq_idx} rg={rg_idx} doc={doc_idx}")
+                print(f"  Location: pq={pq_idx} rg={rg_idx} doc={abs_doc_idx}")
                 print(f"  Length: {len(text)} chars")
                 print(f"  Preview: {text[:500]}...")
                 print()
@@ -127,7 +135,7 @@ def find_hanging_document(args):
                 hanging_docs.append({
                     "pq_idx": pq_idx,
                     "rg_idx": rg_idx,
-                    "doc_idx": doc_idx,
+                    "doc_idx": abs_doc_idx,
                     "length": len(text),
                     "preview": text[:500]
                 })
