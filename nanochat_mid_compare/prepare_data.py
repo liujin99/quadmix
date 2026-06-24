@@ -165,14 +165,15 @@ def read_docs_from_shards(shard_paths, selections, num_workers=None, desc=None, 
 
 
 def _scan_preprocessed_shard_indexed(args):
-    idx, shard_path = args
+    idx, shard_path, max_chars = args
     table = pq.read_table(shard_path, columns=["doc_char_count"])
     char_counts = table["doc_char_count"].to_pylist()
-    valid = [(i, cc) for i, cc in enumerate(char_counts) if cc and cc >= 100]
+    valid = [(i, cc) for i, cc in enumerate(char_counts)
+             if cc and cc >= 100 and (max_chars is None or cc <= max_chars)]
     return idx, valid
 
 
-def scan_preprocessed_shards(preprocessed_data_dir, num_workers=None, max_shards=None):
+def scan_preprocessed_shards(preprocessed_data_dir, num_workers=None, max_shards=None, max_chars=200000):
     if num_workers is None:
         num_workers = min(mp.cpu_count(), 32) or 1
     shard_files = sorted(Path(preprocessed_data_dir).glob("preprocessed_*.parquet"))
@@ -180,7 +181,7 @@ def scan_preprocessed_shards(preprocessed_data_dir, num_workers=None, max_shards
         raise FileNotFoundError(f"No preprocessed_*.parquet files found in {preprocessed_data_dir}")
     if max_shards is not None:
         shard_files = shard_files[:max_shards]
-    tasks = [(i, str(p)) for i, p in enumerate(shard_files)]
+    tasks = [(i, str(p), max_chars) for i, p in enumerate(shard_files)]
     with _SPAWN_CTX.Pool(num_workers) as pool:
         results = [None] * len(shard_files)
         for idx, docs in tqdm(
@@ -369,7 +370,8 @@ def main():
 
     print(f"\n[2/6] Scanning preprocessed shards metadata...")
     prep_files, prep_metadata = scan_preprocessed_shards(
-        args.preprocessed_data_dir, num_workers=args.num_workers, max_shards=args.max_random_scan)
+        args.preprocessed_data_dir, num_workers=args.num_workers, max_shards=args.max_random_scan,
+        max_chars=args.max_chars)
     print(f"  Scanning {len(prep_files)} shards (metadata only)...")
 
     all_candidates = []
