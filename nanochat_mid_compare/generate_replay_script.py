@@ -15,6 +15,12 @@ import os
 
 def main():
     nanochat_repo = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("NANOCHAT_REPO", "/home/ma-user/work/nanochat_midtrain_326")
+    resume_step = None
+    for i, arg in enumerate(sys.argv[1:], 1):
+        if arg.startswith("--resume-step="):
+            resume_step = int(arg.split("=")[1])
+        elif arg.startswith("--resume-step") and i < len(sys.argv) - 1:
+            resume_step = int(sys.argv[i + 1])
     mid_train_path = os.path.join(nanochat_repo, "scripts", "mid_train.py")
     output_path = os.path.join(nanochat_repo, "scripts", "replay_mid_train.py")
 
@@ -100,12 +106,29 @@ if _replay_dir:
 min_val_bpb = float("inf")'''
     )
 
+    modifications = ["replay dataloader", "disabled eval/sample/save"]
+
+    if resume_step is not None:
+        source = source.replace(
+            'load_model("base",',
+            'load_model("mid",'
+        )
+        source = source.replace(
+            'load_optimizer_state("base",',
+            'load_optimizer_state("mid",'
+        )
+        source = source.replace(
+            '\nstep = 0\n',
+            f'\nstep = {resume_step}\n'
+        )
+        modifications.append(f"resume from mid checkpoint at step {resume_step}")
+
     with open(output_path, "w") as f:
         f.write(source)
 
     print(f"Generated: {output_path}")
     print(f"  Source: {mid_train_path}")
-    print(f"  Modifications: replay dataloader, disabled eval/sample/save")
+    print(f"  Modifications: {', '.join(modifications)}")
 
 
 if __name__ == "__main__":
