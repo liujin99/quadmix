@@ -34,8 +34,9 @@ def main():
     thresholds = [int(t) for t in args.thresholds.split(",")]
     num_workers = args.num_workers or min(32, __import__("os").cpu_count() or 1)
 
-    shard_files = sorted(Path(args.preprocessed_data_dir).glob("preprocessed_*.parquet"))
-    print(f"Scanning {len(shard_files)} shards...")
+    data_dir = Path(args.preprocessed_data_dir)
+    shard_files = sorted(data_dir.glob("*.parquet"))
+    print(f"Scanning {len(shard_files)} parquet files from {data_dir}...")
 
     tasks = [(i, str(p)) for i, p in enumerate(shard_files)]
     all_counts = []
