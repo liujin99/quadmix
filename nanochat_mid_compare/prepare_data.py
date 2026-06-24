@@ -130,9 +130,12 @@ def estimate_tokens(text):
 def _has_char_repetition(text, max_ratio=0.3):
     if len(text) < 1000:
         return False
-    counts = Counter(text)
+    non_ws = [c for c in text if not c.isspace()]
+    if len(non_ws) < 1000:
+        return False
+    counts = Counter(non_ws)
     most_common_count = counts.most_common(1)[0][1]
-    return most_common_count / len(text) > max_ratio
+    return most_common_count / len(non_ws) > max_ratio
 
 
 def _read_docs_from_shard_tagged(args):
