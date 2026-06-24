@@ -70,18 +70,23 @@ if _replay_dir:
     injection_point = "x, y, dataloader_state_dict = next(train_loader)\nx = x.to(device, non_blocking=True)\ny = y.to(device, non_blocking=True)"
     assert injection_point in source, f"Injection point not found in mid_train.py"
 
-    source = source.replace(
-        injection_point,
-        replay_dataloader_code + injection_point + '''
+    wrapped_injection = '''if not _replay_dir:
+    x, y, dataloader_state_dict = next(train_loader)
+    x = x.to(device, non_blocking=True)
+    y = y.to(device, non_blocking=True)
 
 # ══════ REPLACE DATALOADER FOR REPLAY (auto-injected) ══════
 if _replay_dir:
     train_loader = _ReplayDataLoader(_replay_dir, _replay_start, _replay_end, ddp_rank)
-    x, y, dataloader_state_dict = next(train_loader)
-    x = x.to(device, non_blocking=True)
-    y = y.to(device, non_blocking=True)
+x, y, dataloader_state_dict = next(train_loader)
+x = x.to(device, non_blocking=True)
+y = y.to(device, non_blocking=True)
 # ══════ END REPLACE ══════
 '''
+
+    source = source.replace(
+        injection_point,
+        replay_dataloader_code + wrapped_injection
     )
 
     source = source.replace(
