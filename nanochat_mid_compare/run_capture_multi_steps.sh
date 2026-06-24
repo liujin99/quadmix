@@ -59,7 +59,7 @@ export PYTORCH_NPU_ENABLE_TORCHscript=1
 export NPU_PERF_MODE=high_performance
 export NANOCHAT_DTYPE=bfloat16
 
-DATA_DIR="$NANOCHAT_MODEL_DIR/mid_train_data/quality_data_fineweb_edu"
+DATA_DIR="${DATA_DIR:-/home/ma-user/work/QuaDMix/nanochat_mid_compare/results/20260623_220114/data/quality_data_fineweb_edu}"
 OUTPUT_DIR="$NANOCHAT_MODEL_DIR/mid_checkpoints/replay_batches"
 START_STEP=320
 END_STEP=330
