@@ -1,6 +1,10 @@
 """
 Capture dataloader batches for a range of steps.
 
+Mirrors mid_train.py's batch consumption pattern exactly:
+  1. Initial prefetch before training loop (used as first batch of step 0)
+  2. Each step: grad_accum_steps micro-batches, last prefetch is first batch of next step
+
 Usage:
     torchrun --standalone --nproc_per_node=8 -m capture_multi_steps -- \
         --data-dir=/path/to/quality_data_fineweb_edu \
@@ -49,26 +53,27 @@ def main():
     x = x.to(device, non_blocking=True)
     y = y.to(device, non_blocking=True)
 
-    total_micro_steps_to_capture = args.end_step * args.grad_accum_steps
-    print0(f"  Advancing to step {args.end_step} ({total_micro_steps_to_capture} micro_steps)...")
+    print0(f"  Advancing to step {args.start_step}...")
 
     all_batches = {}
 
-    for micro_step in range(total_micro_steps_to_capture):
+    for step in range(args.end_step + 1):
+        step_batches = [{"x": x.cpu(), "y": y.cpu()}]
+        for micro in range(args.grad_accum_steps - 1):
+            x, y, dataloader_state_dict = next(train_loader)
+            x = x.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True)
+            step_batches.append({"x": x.cpu(), "y": y.cpu()})
+
+        if step >= args.start_step:
+            all_batches[step] = step_batches
+
         x, y, dataloader_state_dict = next(train_loader)
         x = x.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
 
-        current_step = micro_step // args.grad_accum_steps
-        micro_step_in_step = micro_step % args.grad_accum_steps
-
-        if current_step >= args.start_step:
-            if current_step not in all_batches:
-                all_batches[current_step] = []
-            all_batches[current_step].append({"x": x.cpu(), "y": y.cpu()})
-
-        if (micro_step + 1) % 100 == 0:
-            print0(f"  micro_step {micro_step + 1}/{total_micro_steps_to_capture} (step {current_step})")
+        if step % 50 == 0 or step == args.end_step:
+            print0(f"  step {step}/{args.end_step}")
 
     print0(f"  Captured {len(all_batches)} steps")
 

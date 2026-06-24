@@ -31,33 +31,26 @@ if _replay_dir:
             self.start_step = start_step
             self.end_step = end_step
             self.rank = rank
-            self.current_step = start_step
-            self.current_micro = 0
-            self.batches = None
+            self.all_batches = []
+            self.idx = 0
             self.epoch = 0
-            self._load_step()
-
-        def _load_step(self):
-            path = os.path.join(self.replay_dir, f"step{self.current_step}_rank{self.rank}.pt")
-            if os.path.exists(path):
-                self.batches = torch.load(path, map_location="cpu")
-            else:
-                self.batches = None
+            for s in range(start_step, end_step + 1):
+                path = os.path.join(replay_dir, f"step{s}_rank{rank}.pt")
+                if os.path.exists(path):
+                    batches = torch.load(path, map_location="cpu")
+                    self.all_batches.extend(batches)
+                else:
+                    print0(f"[REPLAY] WARNING: missing {path}")
+            print0(f"[REPLAY] Loaded {len(self.all_batches)} total batches from steps {start_step}-{end_step}")
 
         def __next__(self):
-            if self.batches is None or self.current_micro >= len(self.batches):
-                self.current_step += 1
-                self.current_micro = 0
-                if self.current_step > self.end_step:
-                    self.epoch += 1
-                    self.current_step = self.start_step
-                self._load_step()
-                if self.batches is None:
-                    raise StopIteration
-            batch = self.batches[self.current_micro]
-            self.current_micro += 1
+            if self.idx >= len(self.all_batches):
+                self.epoch += 1
+                self.idx = 0
+            batch = self.all_batches[self.idx]
+            self.idx += 1
             x, y = batch["x"], batch["y"]
-            state = {"epoch": self.epoch, "pq_idx": self.current_step, "rg_idx": self.current_micro}
+            state = {"epoch": self.epoch, "pq_idx": self.idx, "rg_idx": 0}
             return x, y, state
 
     _replay_start = int(os.environ.get('REPLAY_START', '0'))
