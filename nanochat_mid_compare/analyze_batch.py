@@ -55,7 +55,7 @@ def analyze_per_row(batch_data, name="batch"):
     return results
 
 
-def find_bos_positions(batch_data, bos_token_id=1):
+def find_bos_positions(batch_data, bos_token_id=32759):
     results = []
     for bi, batch in enumerate(batch_data):
         x = batch["x"].numpy()
@@ -115,6 +115,8 @@ def main():
     parser.add_argument("--all-ranks-dir", type=str, default=None,
                         help="Directory with batches_rank{0-7}.pt for cross-rank analysis")
     parser.add_argument("--output-dir", type=str, default=None)
+    parser.add_argument("--bos-token-id", type=int, default=32759,
+                        help="BOS token ID (default: 32759 for nanochat vocab_size=32768)")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -137,7 +139,7 @@ def main():
             print(f"    batch={r['batch_idx']} row={r['row_idx']} unique={r['unique_tokens']} max_run={r['max_repeat_run']} top5={r['top5_tokens'][:3]}")
 
     print(f"\n[2] BOS/document structure (crash batch):")
-    crash_bos = find_bos_positions(crash_data)
+    crash_bos = find_bos_positions(crash_data, bos_token_id=args.bos_token_id)
     num_docs = [b["num_docs"] for b in crash_bos]
     doc_lens = [l for b in crash_bos for l in b["doc_lengths"]]
     print(f"  Docs per row: min={min(num_docs)}, max={max(num_docs)}, mean={np.mean(num_docs):.1f}")
@@ -158,7 +160,7 @@ def main():
         print(f"  Unique tokens/row: min={min(n_unique_counts)}, max={max(n_unique_counts)}, mean={np.mean(n_unique_counts):.1f}")
 
         print(f"\n[4] BOS/document structure (normal batch):")
-        normal_bos = find_bos_positions(normal_data)
+        normal_bos = find_bos_positions(normal_data, bos_token_id=args.bos_token_id)
         n_num_docs = [b["num_docs"] for b in normal_bos]
         n_doc_lens = [l for b in normal_bos for l in b["doc_lengths"]]
         print(f"  Docs per row: min={min(n_num_docs)}, max={max(n_num_docs)}, mean={np.mean(n_num_docs):.1f}")
