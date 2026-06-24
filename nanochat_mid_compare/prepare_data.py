@@ -136,26 +136,16 @@ def _has_char_repetition(text, max_ratio=0.3):
 
 
 def _read_docs_from_shard_tagged(args):
-    shard_id, shard_path, doc_indices, max_chars, max_char_repeat_ratio = args
+    shard_id, shard_path, doc_indices = args
     table = pq.read_table(shard_path, columns=["text"])
     texts = table["text"].to_pylist()
-    result = []
-    filtered_long = 0
-    filtered_repeat = 0
-    for i in doc_indices:
-        text = texts[i]
-        if max_chars and len(text) > max_chars:
-            filtered_long += 1
-            continue
-        if _has_char_repetition(text, max_char_repeat_ratio):
-            filtered_repeat += 1
-            continue
-        result.append({"text": text, "char_count": len(text), "token_count": len(text) // 4})
-    return shard_id, result, filtered_long, filtered_repeat
+    return shard_id, [
+        {"text": texts[i], "char_count": len(texts[i]), "token_count": len(texts[i]) // 4}
+        for i in doc_indices
+    ]
 
 
-def read_docs_from_shards(shard_paths, selections, num_workers=None, desc=None,
-                          max_chars=1000000, max_char_repeat_ratio=0.3):
+def read_docs_from_shards(shard_paths, selections, num_workers=None, desc=None):
     if num_workers is None:
         num_workers = min(mp.cpu_count(), 32) or 1
     shard_to_docs = {}
@@ -163,40 +153,46 @@ def read_docs_from_shards(shard_paths, selections, num_workers=None, desc=None,
         if shard_id not in shard_to_docs:
             shard_to_docs[shard_id] = []
         shard_to_docs[shard_id].append(doc_id)
-    tasks = [(sid, str(shard_paths[sid]), indices, max_chars, max_char_repeat_ratio)
-             for sid, indices in shard_to_docs.items()]
+    tasks = [(sid, str(shard_paths[sid]), indices) for sid, indices in shard_to_docs.items()]
     with _SPAWN_CTX.Pool(num_workers) as pool:
         unordered = list(tqdm(
             pool.imap_unordered(_read_docs_from_shard_tagged, tasks, chunksize=1),
             total=len(tasks),
             desc=desc or f"  Reading selected docs ({num_workers} processes)",
         ))
-    shard_result_map = {sid: (docs, fl, fr) for sid, docs, fl, fr in unordered}
-    total_filtered_long = sum(fl for _, (_, fl, fr) in shard_result_map.items())
-    total_filtered_repeat = sum(fr for _, (_, fl, fr) in shard_result_map.items())
-    shard_result_map = {sid: docs for sid, (docs, _, _) in shard_result_map.items()}
+    shard_result_map = {sid: docs for sid, docs in unordered}
     shard_cursors = {sid: 0 for sid in shard_to_docs}
     result = []
     for shard_id, _ in selections:
         idx = shard_cursors[shard_id]
         result.append(shard_result_map[shard_id][idx])
         shard_cursors[shard_id] = idx + 1
-    if total_filtered_long > 0 or total_filtered_repeat > 0:
-        print(f"  Filtered {total_filtered_long:,} docs (>{max_chars:,} chars), "
-              f"{total_filtered_repeat:,} docs (single char >{max_char_repeat_ratio*100:.0f}% repetition)")
     return result
 
 
 def _scan_preprocessed_shard_indexed(args):
-    idx, shard_path, max_chars = args
-    table = pq.read_table(shard_path, columns=["doc_char_count"])
+    idx, shard_path, max_chars, max_char_repeat_ratio = args
+    table = pq.read_table(shard_path, columns=["doc_char_count", "text"])
     char_counts = table["doc_char_count"].to_pylist()
-    valid = [(i, cc) for i, cc in enumerate(char_counts)
-             if cc and cc >= 100 and (max_chars is None or cc <= max_chars)]
-    return idx, valid
+    texts = table["text"].to_pylist()
+    valid = []
+    filtered_long = 0
+    filtered_repeat = 0
+    for i, cc in enumerate(char_counts):
+        if not cc or cc < 100:
+            continue
+        if max_chars is not None and cc > max_chars:
+            filtered_long += 1
+            continue
+        if _has_char_repetition(texts[i], max_char_repeat_ratio):
+            filtered_repeat += 1
+            continue
+        valid.append((i, cc))
+    return idx, valid, filtered_long, filtered_repeat
 
 
-def scan_preprocessed_shards(preprocessed_data_dir, num_workers=None, max_shards=None, max_chars=1000000):
+def scan_preprocessed_shards(preprocessed_data_dir, num_workers=None, max_shards=None,
+                             max_chars=1000000, max_char_repeat_ratio=0.3):
     if num_workers is None:
         num_workers = min(mp.cpu_count(), 32) or 1
     shard_files = sorted(Path(preprocessed_data_dir).glob("preprocessed_*.parquet"))
@@ -204,15 +200,22 @@ def scan_preprocessed_shards(preprocessed_data_dir, num_workers=None, max_shards
         raise FileNotFoundError(f"No preprocessed_*.parquet files found in {preprocessed_data_dir}")
     if max_shards is not None:
         shard_files = shard_files[:max_shards]
-    tasks = [(i, str(p), max_chars) for i, p in enumerate(shard_files)]
+    tasks = [(i, str(p), max_chars, max_char_repeat_ratio) for i, p in enumerate(shard_files)]
     with _SPAWN_CTX.Pool(num_workers) as pool:
         results = [None] * len(shard_files)
-        for idx, docs in tqdm(
+        total_filtered_long = 0
+        total_filtered_repeat = 0
+        for idx, docs, fl, fr in tqdm(
             pool.imap_unordered(_scan_preprocessed_shard_indexed, tasks, chunksize=1),
             total=len(tasks),
             desc=f"  Scanning preprocessed shards ({num_workers} processes)",
         ):
             results[idx] = docs
+            total_filtered_long += fl
+            total_filtered_repeat += fr
+    if total_filtered_long > 0 or total_filtered_repeat > 0:
+        print(f"  Filtered {total_filtered_long:,} docs (>{max_chars:,} chars), "
+              f"{total_filtered_repeat:,} docs (single char >{max_char_repeat_ratio*100:.0f}% repetition)")
     return shard_files, results
 
 
@@ -235,8 +238,7 @@ def trim_docs_to_target(docs, target_tokens):
 
 
 def select_quality_topk(prep_files, prep_metadata, quality_method, total_tokens,
-                        tokenizer_pkl=None, num_workers=None, enc=None,
-                        max_chars=1000000, max_char_repeat_ratio=0.3):
+                        tokenizer_pkl=None, num_workers=None, enc=None):
     quality_col = QUALITY_SCORE_MAP[quality_method]
     print(f"  Using {len(prep_files)} preprocessed shards (pre-scanned)")
 
@@ -267,8 +269,7 @@ def select_quality_topk(prep_files, prep_metadata, quality_method, total_tokens,
 
     quality_docs = read_docs_from_shards(
         prep_files, q_selected, num_workers=num_workers,
-        desc=f"  Reading quality docs ({num_workers or 'auto'} processes)",
-        max_chars=max_chars, max_char_repeat_ratio=max_char_repeat_ratio)
+        desc=f"  Reading quality docs ({num_workers or 'auto'} processes)")
 
     del all_quality_docs
     gc.collect()
@@ -398,7 +399,7 @@ def main():
     print(f"\n[2/6] Scanning preprocessed shards metadata...")
     prep_files, prep_metadata = scan_preprocessed_shards(
         args.preprocessed_data_dir, num_workers=args.num_workers, max_shards=args.max_random_scan,
-        max_chars=args.max_chars)
+        max_chars=args.max_chars, max_char_repeat_ratio=args.max_char_repeat_ratio)
     print(f"  Scanning {len(prep_files)} shards (metadata only)...")
 
     all_candidates = []
@@ -421,9 +422,7 @@ def main():
 
     print(f"\n[3.5/6] Reading selected documents...")
     random_docs = read_docs_from_shards(prep_files, selected, num_workers=args.num_workers,
-                                        desc=f"  Reading random docs ({args.num_workers or 'auto'} processes)",
-                                        max_chars=args.max_chars,
-                                        max_char_repeat_ratio=args.max_char_repeat_ratio)
+                                        desc=f"  Reading random docs ({args.num_workers or 'auto'} processes)")
 
     if enc and args.tokenizer_pkl:
         print(f"  Re-counting tokens for {len(random_docs):,} docs (exact)...")
@@ -466,9 +465,7 @@ def main():
             print(f"\n[4.{mi+1}/6] Quality-Only Top-K selection ({method})...")
             q_docs, q_tokens = select_quality_topk(
                 prep_files, prep_metadata, method, total_tokens,
-                tokenizer_pkl=args.tokenizer_pkl, num_workers=args.num_workers, enc=enc,
-                max_chars=args.max_chars,
-                max_char_repeat_ratio=args.max_char_repeat_ratio)
+                tokenizer_pkl=args.tokenizer_pkl, num_workers=args.num_workers, enc=enc)
             quality_datasets[method] = (q_docs, q_tokens)
     else:
         print(f"\n[4/6] Quality baseline skipped (no quality methods specified)")
