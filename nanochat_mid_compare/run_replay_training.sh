@@ -64,6 +64,8 @@ START_STEP="${START_STEP:-320}"
 END_STEP="${END_STEP:-330}"
 BASE_MODEL_TAG="${BASE_MODEL_TAG:-d24_0320}"
 
+export PYTHONPATH="$SCRIPT_DIR:$NANOCHAT_REPO:${PYTHONPATH:-}"
+
 pushd "$NANOCHAT_REPO" > /dev/null
 python3 -m torch.distributed.run --standalone --nproc_per_node="$NUM_NPU" -m replay_training -- \
     --batch-dir="$BATCH_DIR" \
