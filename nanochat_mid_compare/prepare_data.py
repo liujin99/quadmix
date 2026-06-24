@@ -127,16 +127,19 @@ def estimate_tokens(text):
 
 
 def _read_docs_from_shard_tagged(args):
-    shard_id, shard_path, doc_indices = args
+    shard_id, shard_path, doc_indices, max_chars = args
     table = pq.read_table(shard_path, columns=["text"])
     texts = table["text"].to_pylist()
-    return shard_id, [
-        {"text": texts[i], "char_count": len(texts[i]), "token_count": len(texts[i]) // 4}
-        for i in doc_indices
-    ]
+    result = []
+    for i in doc_indices:
+        text = texts[i]
+        if max_chars and len(text) > max_chars:
+            continue
+        result.append({"text": text, "char_count": len(text), "token_count": len(text) // 4})
+    return shard_id, result
 
 
-def read_docs_from_shards(shard_paths, selections, num_workers=None, desc=None):
+def read_docs_from_shards(shard_paths, selections, num_workers=None, desc=None, max_chars=200000):
     if num_workers is None:
         num_workers = min(mp.cpu_count(), 32) or 1
     shard_to_docs = {}
@@ -144,7 +147,7 @@ def read_docs_from_shards(shard_paths, selections, num_workers=None, desc=None):
         if shard_id not in shard_to_docs:
             shard_to_docs[shard_id] = []
         shard_to_docs[shard_id].append(doc_id)
-    tasks = [(sid, str(shard_paths[sid]), indices) for sid, indices in shard_to_docs.items()]
+    tasks = [(sid, str(shard_paths[sid]), indices, max_chars) for sid, indices in shard_to_docs.items()]
     with _SPAWN_CTX.Pool(num_workers) as pool:
         unordered = list(tqdm(
             pool.imap_unordered(_read_docs_from_shard_tagged, tasks, chunksize=1),
@@ -208,7 +211,7 @@ def trim_docs_to_target(docs, target_tokens):
 
 
 def select_quality_topk(prep_files, prep_metadata, quality_method, total_tokens,
-                        tokenizer_pkl=None, num_workers=None, enc=None):
+                        tokenizer_pkl=None, num_workers=None, enc=None, max_chars=200000):
     quality_col = QUALITY_SCORE_MAP[quality_method]
     print(f"  Using {len(prep_files)} preprocessed shards (pre-scanned)")
 
@@ -239,7 +242,8 @@ def select_quality_topk(prep_files, prep_metadata, quality_method, total_tokens,
 
     quality_docs = read_docs_from_shards(
         prep_files, q_selected, num_workers=num_workers,
-        desc=f"  Reading quality docs ({num_workers or 'auto'} processes)")
+        desc=f"  Reading quality docs ({num_workers or 'auto'} processes)",
+        max_chars=max_chars)
 
     del all_quality_docs
     gc.collect()
@@ -295,6 +299,8 @@ def main():
                              "Shard read: threads. Default: auto")
     parser.add_argument("--num-npu", type=int, default=8,
                         help="Number of NPUs for DDP (ensures enough row groups per shard)")
+    parser.add_argument("--max-chars", type=int, default=200000,
+                        help="Skip documents longer than this (prevents tokenizer hangs). Default: 200000")
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -386,7 +392,8 @@ def main():
 
     print(f"\n[3.5/6] Reading selected documents...")
     random_docs = read_docs_from_shards(prep_files, selected, num_workers=args.num_workers,
-                                        desc=f"  Reading random docs ({args.num_workers or 'auto'} processes)")
+                                        desc=f"  Reading random docs ({args.num_workers or 'auto'} processes)",
+                                        max_chars=args.max_chars)
 
     if enc and args.tokenizer_pkl:
         print(f"  Re-counting tokens for {len(random_docs):,} docs (exact)...")
@@ -429,7 +436,8 @@ def main():
             print(f"\n[4.{mi+1}/6] Quality-Only Top-K selection ({method})...")
             q_docs, q_tokens = select_quality_topk(
                 prep_files, prep_metadata, method, total_tokens,
-                tokenizer_pkl=args.tokenizer_pkl, num_workers=args.num_workers, enc=enc)
+                tokenizer_pkl=args.tokenizer_pkl, num_workers=args.num_workers, enc=enc,
+                max_chars=args.max_chars)
             quality_datasets[method] = (q_docs, q_tokens)
     else:
         print(f"\n[4/6] Quality baseline skipped (no quality methods specified)")
