@@ -21,7 +21,7 @@ NANOCHAT_MODEL_DIR="${NANOCHAT_MODEL_DIR:-/home/ma-user/work/nanochat_model_dir}
 NUM_NPU=8
 
 # ══════ CONFIGURATION ══════
-DATA_DIR="${DATA_DIR:-$NANOCHAT_MODEL_DIR/mid_train_data}"
+DATA_DIR="${DATA_DIR:-/home/ma-user/work/QuaDMix/nanochat_mid_compare/results/20260623_220114/data/quality_data_fineweb_edu}"
 BATCH_DIR="${BATCH_DIR:-$NANOCHAT_MODEL_DIR/mid_checkpoints/replay_batches}"
 RESUME_STEP="${RESUME_STEP:-320}"
 END_STEP="${END_STEP:-330}"
