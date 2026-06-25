@@ -73,6 +73,8 @@ fi
 
 PREPARED_DATA_DIR=""
 
+DATA_SOURCE="$DATA_DIR"
+
 if [ -f "$DATA_DIR" ] && [[ "$DATA_DIR" == *.parquet ]]; then
     echo "╔══ Preparing training data from parquet ══╗"
     echo ""
@@ -264,7 +266,10 @@ echo "════════════════════════�
 echo "  QuadMix Mid-Training — Quick Validation"
 echo "════════════════════════════════════════════════════════════"
 echo ""
-echo "  Data dir:            $DATA_DIR"
+echo "  Data source:         $DATA_SOURCE"
+if [ "$DATA_SOURCE" != "$DATA_DIR" ]; then
+    echo "  Data dir (prepared): $DATA_DIR"
+fi
 echo "  Nanochat model dir:  $NANOCHAT_MODEL_DIR"
 echo "  Nanochat repo:       $NANOCHAT_REPO"
 echo "  Base model tag:      $BASE_MODEL_TAG"
