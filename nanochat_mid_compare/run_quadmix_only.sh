@@ -4,15 +4,14 @@
 # ──────────────────────────────────────────────────────────────
 #
 # Runs ONLY the QuadMix mid-training + CORE eval.
-# Extracted from run_experiment.sh for quick algorithm validation.
-#
-# Prerequisites:
-#   Data must already be prepared by a prior run_experiment.sh,
-#   or set DATA_DIR to a directory containing quadmix_data/ and dataset_stats.json.
 #
 # Usage:
-#   DATA_DIR=nanochat_mid_compare/results/20250620_120000/data \
-#     bash nanochat_mid_compare/run_quadmix_only.sh
+#   bash nanochat_mid_compare/run_quadmix_only.sh \
+#     --data-dir /path/to/sampled_dataset.parquet
+#
+# Or reuse previously prepared data:
+#   bash nanochat_mid_compare/run_quadmix_only.sh \
+#     --data-dir nanochat_mid_compare/results/20250620_120000/data
 #
 # ──────────────────────────────────────────────────────────────
 
@@ -21,6 +20,18 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 QUADMIX_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+
+# ══════════════════════════════════════════════════════════════
+#  CLI ARGUMENTS
+# ══════════════════════════════════════════════════════════════
+
+DATA_DIR=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --data-dir) DATA_DIR="$2"; shift 2 ;;
+        *) echo "Unknown argument: $1"; exit 1 ;;
+    esac
+done
 
 # ══════════════════════════════════════════════════════════════
 #  CONFIGURATION
@@ -38,26 +49,135 @@ DEVICE_BATCH_SIZE="${DEVICE_BATCH_SIZE:-8}"
 NUM_NPU="${NUM_NPU:-8}"
 CORE_METRIC_EVERY="${CORE_METRIC_EVERY:--1}"
 EVAL_EVERY="${EVAL_EVERY:--1}"
+SHARD_SIZE="${SHARD_SIZE:-10000}"
 
 QUADMIX_MODEL_TAG="${QUADMIX_MODEL_TAG:-${BASE_MODEL_TAG}_quadmix_${TIMESTAMP}}"
 
 # ══════════════════════════════════════════════════════════════
-#  VALIDATION
+#  DATA PREPARATION
 # ══════════════════════════════════════════════════════════════
 
-DATA_DIR="${DATA_DIR:-}"
+TOKENIZER_PKL="$NANOCHAT_MODEL_DIR/tokenizer/tokenizer.pkl"
 
 if [ -z "$DATA_DIR" ]; then
     DATA_DIR="$(ls -dt "$SCRIPT_DIR"/results/*/data 2>/dev/null | head -1)"
     DATA_DIR="${DATA_DIR:-}"
 fi
 
-if [ -z "$DATA_DIR" ] || [ ! -d "$DATA_DIR/quadmix_data" ] || [ ! -f "$DATA_DIR/dataset_stats.json" ]; then
-    echo "ERROR: QuadMix data not found."
-    echo "  Run run_experiment.sh first, or set DATA_DIR to a directory containing quadmix_data/ and dataset_stats.json."
-    echo "  Example: DATA_DIR=nanochat_mid_compare/results/20250620_120000/data bash $0"
+if [ -z "$DATA_DIR" ]; then
+    echo "ERROR: No data source specified."
+    echo "  Usage: $0 --data-dir /path/to/sampled_dataset.parquet"
+    echo "     or: $0 --data-dir /path/to/prepared/data/dir"
     exit 1
 fi
+
+PREPARED_DATA_DIR=""
+
+if [ -f "$DATA_DIR" ] && [[ "$DATA_DIR" == *.parquet ]]; then
+    echo "╔══ Preparing training data from parquet ══╗"
+    echo ""
+    echo "  Source: $DATA_DIR"
+
+    PREPARED_DATA_DIR="$RESULT_DIR/data"
+    QUADMIX_DATA="$PREPARED_DATA_DIR/quadmix_data"
+    mkdir -p "$QUADMIX_DATA"
+
+    QUADMIX_TOKENS=$(DATA_DIR="$DATA_DIR" TOKENIZER_PKL="$TOKENIZER_PKL" SHARD_SIZE="$SHARD_SIZE" \
+        NUM_NPU="$NUM_NPU" QUADMIX_DATA="$QUADMIX_DATA" PREPARED_DATA_DIR="$PREPARED_DATA_DIR" \
+        python3 -c "
+import os, json, pyarrow.parquet as pq, pyarrow as pa
+
+src = os.environ['DATA_DIR']
+out_dir = os.environ['QUADMIX_DATA']
+stats_dir = os.environ['PREPARED_DATA_DIR']
+shard_size = int(os.environ['SHARD_SIZE'])
+num_npu = int(os.environ['NUM_NPU'])
+tokenizer_pkl = os.environ['TOKENIZER_PKL']
+
+print(f'  Reading {src}...')
+table = pq.read_table(src, columns=['text'])
+texts = [t for t in table['text'].to_pylist() if t and len(t) >= 100]
+print(f'  Valid docs: {len(texts):,}')
+
+enc = None
+token_method = 'char_count // 4 (estimate)'
+if os.path.exists(tokenizer_pkl):
+    import pickle
+    with open(tokenizer_pkl, 'rb') as f:
+        enc = pickle.load(f)
+    if hasattr(enc, 'encode_ordinary_batch'):
+        token_method = 'nanochat tokenizer'
+    else:
+        enc = None
+
+if enc:
+    print(f'  Counting tokens ({token_method})...')
+    token_counts = [len(ids) for ids in enc.encode_ordinary_batch(texts, num_threads=16)]
+else:
+    print(f'  Estimating tokens ({token_method})...')
+    token_counts = [len(t) // 4 for t in texts]
+
+total_tokens = sum(token_counts)
+print(f'  Total tokens: {total_tokens:,}')
+
+n_shards = max(1, (len(texts) + shard_size - 1) // shard_size)
+rg_size = max(1, shard_size // (num_npu * 2))
+for i in range(n_shards):
+    start = i * shard_size
+    end = min(start + shard_size, len(texts))
+    shard_texts = texts[start:end]
+    shard_table = pa.table({'text': shard_texts})
+    out_path = os.path.join(out_dir, f'shard_{i:05d}.parquet')
+    pq.write_table(shard_table, out_path, row_group_size=rg_size)
+
+dummy_val = pa.table({'text': ['dummy']})
+val_path = os.path.join(out_dir, f'shard_{n_shards:05d}.parquet')
+pq.write_table(dummy_val, val_path, row_group_size=1)
+
+stats = {
+    'quadmix': {
+        'train_docs': len(texts),
+        'val_docs': 0,
+        'tokens': total_tokens,
+        'shards': n_shards,
+    },
+    'config': {
+        'seed': 42,
+        'shard_size': shard_size,
+        'val_ratio': 0,
+        'token_method': token_method,
+        'quadmix_source': src,
+        'baselines': ['quadmix'],
+    }
+}
+stats_path = os.path.join(stats_dir, 'dataset_stats.json')
+with open(stats_path, 'w') as f:
+    json.dump(stats, f, indent=2)
+
+print(f'  Wrote {n_shards} train shards + 1 dummy val -> {out_dir}')
+print(f'  Stats -> {stats_path}')
+print(f'  Token method: {token_method}')
+print(f'  Docs: {len(texts):,}, Tokens: {total_tokens:,}')
+")
+
+    DATA_DIR="$PREPARED_DATA_DIR"
+    echo ""
+    echo "╚══════════════════════════════════════════╝"
+    echo ""
+
+elif [ -d "$DATA_DIR/quadmix_data" ] && [ -f "$DATA_DIR/dataset_stats.json" ]; then
+    echo "  Using prepared data: $DATA_DIR"
+else
+    echo "ERROR: Invalid data source: $DATA_DIR"
+    echo "  Expected: .parquet file or directory with quadmix_data/ + dataset_stats.json"
+    exit 1
+fi
+
+QUADMIX_DATA="$DATA_DIR/quadmix_data"
+
+# ══════════════════════════════════════════════════════════════
+#  VALIDATION
+# ══════════════════════════════════════════════════════════════
 
 if [ ! -d "$NANOCHAT_REPO" ]; then
     echo "ERROR: Nanochat repo not found: $NANOCHAT_REPO"
@@ -138,8 +258,6 @@ export NANOCHAT_DTYPE=bfloat16
 # ══════════════════════════════════════════════════════════════
 #  PRINT CONFIG
 # ══════════════════════════════════════════════════════════════
-
-QUADMIX_DATA="$DATA_DIR/quadmix_data"
 
 echo ""
 echo "════════════════════════════════════════════════════════════"
