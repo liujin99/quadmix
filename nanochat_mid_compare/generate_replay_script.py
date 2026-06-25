@@ -14,7 +14,7 @@ import os
 
 
 def main():
-    nanochat_repo = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("NANOCHAT_REPO", "/home/ma-user/work/nanochat_midtrain_326")
+    nanochat_repo = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("NANOCHAT_REPO", "/home/ma-user/work/nanochat-npu")
     resume_step = None
     for i, arg in enumerate(sys.argv[1:], 1):
         if arg.startswith("--resume-step="):

@@ -1,0 +1,429 @@
+#!/usr/bin/env bash
+# ──────────────────────────────────────────────────────────────
+# QuadMix Mid-Training — Standalone Quick Validation
+# ──────────────────────────────────────────────────────────────
+#
+# Runs ONLY the QuadMix mid-training + CORE eval.
+# Extracted from run_experiment.sh for quick algorithm validation.
+#
+# Prerequisites:
+#   Data must already be prepared by a prior run_experiment.sh,
+#   or set DATA_DIR to a directory containing quadmix_data/ and dataset_stats.json.
+#
+# Usage:
+#   DATA_DIR=nanochat_mid_compare/results/20250620_120000/data \
+#     bash nanochat_mid_compare/run_quadmix_only.sh
+#
+# ──────────────────────────────────────────────────────────────
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+QUADMIX_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+
+# ══════════════════════════════════════════════════════════════
+#  CONFIGURATION
+# ══════════════════════════════════════════════════════════════
+
+NANOCHAT_MODEL_DIR="${NANOCHAT_MODEL_DIR:-/home/ma-user/work/nanochat_model_dir}"
+BASE_MODEL_TAG="${BASE_MODEL_TAG:-d24_0320}"
+NANOCHAT_REPO="${NANOCHAT_REPO:-/home/ma-user/work/nanochat-npu}"
+MID_CHECKPOINTS_OUTPUT_DIR="${MID_CHECKPOINTS_OUTPUT_DIR:-$HOME/.cache/nanochat_mid_compare/mid_checkpoints}"
+RESULT_DIR="${RESULT_DIR:-$SCRIPT_DIR/results/quadmix_only_$TIMESTAMP}"
+
+TARGET_PARAM_DATA_RATIO="${TARGET_PARAM_DATA_RATIO:-0.5}"
+NUM_SCALING_PARAMS="${NUM_SCALING_PARAMS:-1300000000}"
+DEVICE_BATCH_SIZE="${DEVICE_BATCH_SIZE:-8}"
+NUM_NPU="${NUM_NPU:-8}"
+CORE_METRIC_EVERY="${CORE_METRIC_EVERY:--1}"
+EVAL_EVERY="${EVAL_EVERY:--1}"
+
+QUADMIX_MODEL_TAG="${QUADMIX_MODEL_TAG:-${BASE_MODEL_TAG}_quadmix_${TIMESTAMP}}"
+
+# ══════════════════════════════════════════════════════════════
+#  VALIDATION
+# ══════════════════════════════════════════════════════════════
+
+DATA_DIR="${DATA_DIR:-}"
+
+if [ -z "$DATA_DIR" ]; then
+    DATA_DIR="$(ls -dt "$SCRIPT_DIR"/results/*/data 2>/dev/null | head -1)"
+    DATA_DIR="${DATA_DIR:-}"
+fi
+
+if [ -z "$DATA_DIR" ] || [ ! -d "$DATA_DIR/quadmix_data" ] || [ ! -f "$DATA_DIR/dataset_stats.json" ]; then
+    echo "ERROR: QuadMix data not found."
+    echo "  Run run_experiment.sh first, or set DATA_DIR to a directory containing quadmix_data/ and dataset_stats.json."
+    echo "  Example: DATA_DIR=nanochat_mid_compare/results/20250620_120000/data bash $0"
+    exit 1
+fi
+
+if [ ! -d "$NANOCHAT_REPO" ]; then
+    echo "ERROR: Nanochat repo not found: $NANOCHAT_REPO"
+    exit 1
+fi
+
+BASE_CKPT_DIR="$NANOCHAT_MODEL_DIR/base_checkpoints/$BASE_MODEL_TAG"
+if [ ! -d "$BASE_CKPT_DIR" ]; then
+    echo "ERROR: Base model checkpoint not found: $BASE_CKPT_DIR"
+    exit 1
+fi
+
+# ══════════════════════════════════════════════════════════════
+#  NPU ENVIRONMENT SETUP
+# ══════════════════════════════════════════════════════════════
+
+export OMP_NUM_THREADS=1
+export WANDB_MODE=offline
+export NANOCHAT_BASE_DIR="$NANOCHAT_MODEL_DIR"
+mkdir -p "$NANOCHAT_MODEL_DIR"
+
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+
+export ASCEND_HCCL_PATH=/usr/local/Ascend/ascend-toolkit/latest/hccl
+export LD_LIBRARY_PATH=${ASCEND_HCCL_PATH}/lib64:${LD_LIBRARY_PATH:-}
+export HCCL_CONNECT_TIMEOUT=1200
+export HCCL_WHITELIST_DISABLE=1
+export NCCL_IB_DISABLE=1
+export NCCL_SOCKET_IFNAME=eth0
+
+export PYTORCH_ALLOC_CONF=expandable_segments:True
+export ASCEND_GLOBAL_LOG_LEVEL=3
+
+if [ -z "${ASCEND_DEVICE_ID:-}" ] && [ -n "${LOCAL_RANK:-}" ]; then
+    export ASCEND_DEVICE_ID=$LOCAL_RANK
+elif [ -z "${ASCEND_DEVICE_ID:-}" ]; then
+    export ASCEND_DEVICE_ID=0
+fi
+
+ASCEND_DEVICE_LIST=$(seq -s, 0 $((NUM_NPU - 1)))
+export ASCEND_VISIBLE_DEVICES="$ASCEND_DEVICE_LIST"
+export RANK_SIZE=$NUM_NPU
+export MASTER_ADDR=127.0.0.1
+export MASTER_PORT=29500
+export HCCL_EXEC_TIMEOUT=1200
+export ASCEND_DISABLE_MEM_SWAP=1
+export ASCEND_LAUNCH_BLOCKING=0
+export NPU_DISABLE_RECORD=1
+export PYTHONUNBUFFERED=1
+export ASCEND_COMPILE_OPT_LEVEL=O3
+export TORCH_NPU_LAZY_COMPILE=1
+export PYTHONPRELOAD=torch_npu
+export TORCH_NPU_ALLOC_CONF="expandable_segments:True,max_split_size_mb:256,memory_pool:True"
+export PYTORCH_NPU_ALLOC_MAX_SIZE=60G
+export ASCEND_ENABLE_CACHE=1
+export ASCEND_CACHE_POLICY=2
+export ASCEND_FUSION_ENABLE=1
+export ASCEND_GEMM_DTiling=1
+export TORCH_NPU_ENABLE_NUMA=1
+export ASCEND_MEMORY_COPY_MODE=1
+export ASCEND_HBM_ALLOC_TYPE=1
+export ASCEND_OPP_LEVEL=O3
+export ASCEND_FUSION_PASS_ENABLE=1
+export ASCEND_GEMM_BTiling=1
+export ASCEND_GEMM_ATiling=1
+export ASCEND_CONV_ALGO_SELECTION=1
+export ASCEND_ENABLE_TRANSFORMER_FUSION=1
+export ASCEND_MEMORY_REUSE_MODE=2
+export ASCEND_ENABLE_PREFETCH=1
+export ASCEND_NPU_ENABLE_UNIFIED_MEMORY=1
+export ASCEND_OPTIMIZER_AGGRESSIVE_MODE=1
+export ASCEND_SYNCHRONIZATION_MODE=0
+export PYTORCH_NPU_ENABLE_LARGE_CONCAT=1
+export PYTORCH_NPU_ENABLE_TORCHscript=1
+export NPU_PERF_MODE=high_performance
+export NANOCHAT_DTYPE=bfloat16
+
+# ══════════════════════════════════════════════════════════════
+#  PRINT CONFIG
+# ══════════════════════════════════════════════════════════════
+
+QUADMIX_DATA="$DATA_DIR/quadmix_data"
+
+echo ""
+echo "════════════════════════════════════════════════════════════"
+echo "  QuadMix Mid-Training — Quick Validation"
+echo "════════════════════════════════════════════════════════════"
+echo ""
+echo "  Data dir:            $DATA_DIR"
+echo "  Nanochat model dir:  $NANOCHAT_MODEL_DIR"
+echo "  Nanochat repo:       $NANOCHAT_REPO"
+echo "  Base model tag:      $BASE_MODEL_TAG"
+echo "  Model tag (save):    $QUADMIX_MODEL_TAG"
+echo "  Output dir:          $RESULT_DIR"
+if [ -n "$MID_CHECKPOINTS_OUTPUT_DIR" ]; then
+    echo "  Mid checkpoint out:  $MID_CHECKPOINTS_OUTPUT_DIR"
+fi
+echo ""
+echo "  Mid-training config:"
+echo "    target-param-data-ratio: $TARGET_PARAM_DATA_RATIO"
+echo "    num-scaling-params:      $NUM_SCALING_PARAMS"
+echo "    device-batch-size:       $DEVICE_BATCH_SIZE"
+echo "    NPU cards:               $NUM_NPU"
+echo ""
+echo "════════════════════════════════════════════════════════════"
+echo ""
+
+mkdir -p "$RESULT_DIR"
+
+# ══════════════════════════════════════════════════════════════
+#  SETUP MID_CHECKPOINTS DIRECTORY
+# ══════════════════════════════════════════════════════════════
+
+if [ -n "$MID_CHECKPOINTS_OUTPUT_DIR" ]; then
+    mkdir -p "$MID_CHECKPOINTS_OUTPUT_DIR"
+    LINK_PATH="$NANOCHAT_MODEL_DIR/mid_checkpoints"
+
+    if [ -L "$LINK_PATH" ]; then
+        echo "  Symlink exists: $LINK_PATH -> $(readlink "$LINK_PATH")"
+    elif [ -d "$LINK_PATH" ]; then
+        echo "  WARNING: $LINK_PATH exists as a directory (not a symlink)."
+    else
+        echo "  Creating symlink: $LINK_PATH -> $MID_CHECKPOINTS_OUTPUT_DIR"
+        ln -s "$MID_CHECKPOINTS_OUTPUT_DIR" "$LINK_PATH"
+    fi
+    echo ""
+fi
+
+# ══════════════════════════════════════════════════════════════
+#  MID-TRAINING
+# ══════════════════════════════════════════════════════════════
+
+QUADMIX_TOKENS=$(DATA_DIR="$DATA_DIR" python3 -c "
+import os, json
+s = json.load(open(os.path.join(os.environ['DATA_DIR'], 'dataset_stats.json')))
+print(s['quadmix']['tokens'])
+")
+
+TOTAL_BATCH_SIZE=524288
+TARGET_TOKENS=$(python3 -c "print(int($TARGET_PARAM_DATA_RATIO * $NUM_SCALING_PARAMS))")
+ACTUAL_TOKENS=$(python3 -c "print(min($TARGET_TOKENS, $QUADMIX_TOKENS))")
+NUM_ITERATIONS=$((ACTUAL_TOKENS / TOTAL_BATCH_SIZE))
+ACTUAL_RATIO=$(python3 -c "print(f'{$ACTUAL_TOKENS / $NUM_SCALING_PARAMS:.4f}')")
+
+echo "╔══ Mid-training on QuadMix data ══╗"
+echo ""
+echo "  Data:       $QUADMIX_DATA"
+echo "  Source:     $BASE_MODEL_TAG (base)"
+echo "  Save as:    $QUADMIX_MODEL_TAG (mid)"
+echo "  Dataset:    $QUADMIX_TOKENS tokens"
+echo "  Target:     $TARGET_TOKENS tokens (ratio=$TARGET_PARAM_DATA_RATIO)"
+echo "  Actual:     $ACTUAL_TOKENS tokens (ratio=$ACTUAL_RATIO)"
+echo "  Steps:      $NUM_ITERATIONS"
+
+QUADMIX_LOG="$RESULT_DIR/mid_train_quadmix.log"
+
+LINK_DIR="$NANOCHAT_MODEL_DIR/base_checkpoints/$QUADMIX_MODEL_TAG"
+if [ ! -e "$LINK_DIR" ]; then
+    echo "  Creating symlink: $LINK_DIR -> $BASE_CKPT_DIR"
+    ln -s "$BASE_CKPT_DIR" "$LINK_DIR"
+fi
+
+pushd "$NANOCHAT_REPO" > /dev/null
+python3 -m torch.distributed.run --standalone --nproc_per_node="$NUM_NPU" -m scripts.mid_train -- \
+    --num-iterations="$NUM_ITERATIONS" \
+    --target-param-data-ratio="$ACTUAL_RATIO" \
+    --device-batch-size="$DEVICE_BATCH_SIZE" \
+    --run="quadmix_mid" \
+    --model-tag="$QUADMIX_MODEL_TAG" \
+    --core-metric-every="$CORE_METRIC_EVERY" \
+    --eval-every="$EVAL_EVERY" \
+    --data-dir="$QUADMIX_DATA" \
+    2>&1 | tee "$QUADMIX_LOG"
+popd > /dev/null
+
+if [ -L "$LINK_DIR" ]; then
+    rm "$LINK_DIR"
+fi
+
+echo ""
+echo "╚══════════════════════════════════════════╗"
+echo ""
+
+# ══════════════════════════════════════════════════════════════
+#  EVALUATION
+# ══════════════════════════════════════════════════════════════
+
+echo "╔══ Evaluation ══╗"
+echo ""
+echo "  Evaluating: $QUADMIX_MODEL_TAG (mid)"
+
+QUADMIX_EVAL_LOG="$RESULT_DIR/eval_quadmix.log"
+
+pushd "$NANOCHAT_REPO" > /dev/null
+python3 -m torch.distributed.run --standalone --nproc_per_node="$NUM_NPU" -m scripts.base_eval -- \
+    --eval=core \
+    --device-batch-size=32 \
+    --model-tag="$QUADMIX_MODEL_TAG" \
+    --model-type="mid" \
+    2>&1 | tee "$QUADMIX_EVAL_LOG"
+popd > /dev/null
+
+echo ""
+echo "╚════════════════════════════════════╝"
+echo ""
+
+# ══════════════════════════════════════════════════════════════
+#  REPORT
+# ══════════════════════════════════════════════════════════════
+
+echo "╔══ Generating Report ══╗"
+echo ""
+
+QUADMIX_LOG="$QUADMIX_LOG" QUADMIX_EVAL_LOG="$QUADMIX_EVAL_LOG" \
+QUADMIX_MODEL_TAG="$QUADMIX_MODEL_TAG" BASE_MODEL_TAG="$BASE_MODEL_TAG" \
+RESULT_DIR="$RESULT_DIR" DATA_DIR="$DATA_DIR" \
+TARGET_PARAM_DATA_RATIO="$TARGET_PARAM_DATA_RATIO" \
+NUM_SCALING_PARAMS="$NUM_SCALING_PARAMS" \
+DEVICE_BATCH_SIZE="$DEVICE_BATCH_SIZE" NUM_NPU="$NUM_NPU" \
+MID_CHECKPOINTS_OUTPUT_DIR="$MID_CHECKPOINTS_OUTPUT_DIR" \
+python3 -c "
+import os, re, json
+from datetime import datetime
+
+def parse_train(path):
+    info = {'final_loss': None, 'total_time': None, 'peak_memory': None,
+            'final_tok_per_sec': None, 'final_mfu': None, 'num_steps': None,
+            'core_metrics': []}
+    if not path or not os.path.exists(path):
+        return info
+    step_pat = re.compile(r'step\s+(\d+)/(\d+)\s+\(.*?\)\s+\|\s+loss:\s+([\d.]+)\s+\|.*?\|\s+tok/sec:\s+([\d,]+)\s+\|\s+bf16_mfu:\s+([\d.]+)')
+    core_pat = re.compile(r'Step\s+(\d+)\s+\|\s+CORE metric:\s+([\d.]+)')
+    time_pat = re.compile(r'Total training time:\s+([\d.]+)m')
+    mem_pat  = re.compile(r'Peak memory usage:\s+([\d.]+)MiB')
+    for line in open(path):
+        m = step_pat.search(line)
+        if m:
+            info['num_steps'] = int(m.group(2))
+            info['final_loss'] = float(m.group(3))
+            info['final_tok_per_sec'] = int(m.group(4).replace(',', ''))
+            info['final_mfu'] = float(m.group(5))
+        m = core_pat.search(line)
+        if m:
+            info['core_metrics'].append((int(m.group(1)), float(m.group(2))))
+        m = time_pat.search(line)
+        if m: info['total_time'] = float(m.group(1))
+        m = mem_pat.search(line)
+        if m: info['peak_memory'] = float(m.group(1))
+    return info
+
+def parse_eval(path):
+    info = {'core_metric': None, 'tasks': {}}
+    if not path or not os.path.exists(path):
+        return info
+    task_pat = re.compile(r'Evaluating:\s+(.+?)\s+\(.*?\)\.\.\.\s+accuracy:\s+([\d.]+)\s+\|\s+centered:\s+([\d.-]+)\s+\|\s+time:\s+([\d.]+)s')
+    core_pat = re.compile(r'CORE metric:\s+([\d.]+)')
+    for line in open(path):
+        m = task_pat.search(line)
+        if m:
+            info['tasks'][m.group(1)] = {'accuracy': float(m.group(2)), 'centered': float(m.group(3)), 'time': float(m.group(4))}
+        m = core_pat.search(line)
+        if m: info['core_metric'] = float(m.group(1))
+    return info
+
+def fmt(v, spec='', suffix=''):
+    return f'{v:{spec}}{suffix}' if v is not None else 'N/A'
+
+train = parse_train(os.environ['QUADMIX_LOG'])
+evl   = parse_eval(os.environ['QUADMIX_EVAL_LOG'])
+result_dir = os.environ['RESULT_DIR']
+data_dir   = os.environ['DATA_DIR']
+
+stats_path = os.path.join(data_dir, 'dataset_stats.json')
+stats = json.load(open(stats_path)) if os.path.exists(stats_path) else {}
+q = stats.get('quadmix', {})
+
+lines = []
+lines.append('# QuadMix Quick Validation Report')
+lines.append('')
+lines.append(f'**Generated**: {datetime.now().strftime(\"%Y-%m-%d %H:%M:%S\")}')
+lines.append(f'**Base Model**: \`{os.environ[\"BASE_MODEL_TAG\"]}\`')
+lines.append(f'**Mid Model**: \`{os.environ[\"QUADMIX_MODEL_TAG\"]}\`')
+lines.append(f'**Result Dir**: \`{result_dir}\`')
+lines.append('')
+
+lines.append('## Result')
+lines.append('')
+lines.append(f'**CORE metric: {fmt(evl[\"core_metric\"], \".4f\")}**')
+lines.append('')
+
+lines.append('## Training')
+lines.append('')
+lines.append('| Metric | Value |')
+lines.append('|---|---|')
+lines.append(f'| Steps | {fmt(train[\"num_steps\"])} |')
+lines.append(f'| Final loss | {fmt(train[\"final_loss\"], \".6f\")} |')
+lines.append(f'| Total time | {fmt(train[\"total_time\"], \".1f\", \"m\")} |')
+lines.append(f'| Throughput | {fmt(train[\"final_tok_per_sec\"], \",\", \" tok/s\")} |')
+lines.append(f'| MFU | {fmt(train[\"final_mfu\"], \".2f\", \"%\")} |')
+lines.append(f'| Peak memory | {fmt(train[\"peak_memory\"], \".0f\", \" MiB\")} |')
+lines.append('')
+
+if train['core_metrics']:
+    lines.append('### CORE During Training')
+    lines.append('')
+    lines.append('| Step | CORE |')
+    lines.append('|---|---|')
+    for step, val in train['core_metrics']:
+        lines.append(f'| {step} | {val:.4f} |')
+    lines.append('')
+
+if evl['tasks']:
+    lines.append('## Per-Task Breakdown')
+    lines.append('')
+    lines.append('| Task | Accuracy | Centered | Time |')
+    lines.append('|---|---|---|---|')
+    for task in sorted(evl['tasks']):
+        t = evl['tasks'][task]
+        lines.append(f'| {task} | {t[\"accuracy\"]:.4f} | {t[\"centered\"]:.4f} | {t[\"time\"]:.1f}s |')
+    lines.append('')
+
+lines.append('## Data')
+lines.append('')
+lines.append('| Metric | Value |')
+lines.append('|---|---|')
+lines.append(f'| Train docs | {q.get(\"train_docs\", \"N/A\"):,} |' if isinstance(q.get('train_docs'), int) else f'| Train docs | N/A |')
+lines.append(f'| Tokens | {q.get(\"tokens\", \"N/A\"):,} |' if isinstance(q.get('tokens'), int) else f'| Tokens | N/A |')
+lines.append(f'| Shards | {q.get(\"shards\", \"N/A\")} |')
+lines.append('')
+
+lines.append('## Config')
+lines.append('')
+lines.append('| Parameter | Value |')
+lines.append('|---|---|')
+lines.append(f'| target-param-data-ratio | {os.environ[\"TARGET_PARAM_DATA_RATIO\"]} |')
+lines.append(f'| num-scaling-params | {int(os.environ[\"NUM_SCALING_PARAMS\"]):,} |')
+lines.append(f'| device-batch-size | {os.environ[\"DEVICE_BATCH_SIZE\"]} |')
+lines.append(f'| NPU cards | {os.environ[\"NUM_NPU\"]} |')
+lines.append('')
+
+report = '\n'.join(lines)
+report_path = os.path.join(result_dir, 'midtrain_validation_report.md')
+with open(report_path, 'w') as f:
+    f.write(report)
+print(f'Report written to: {report_path}')
+print()
+print(report)
+"
+
+echo ""
+echo "╚══════════════════════════════════════════╝"
+echo ""
+
+# ══════════════════════════════════════════════════════════════
+#  SUMMARY
+# ══════════════════════════════════════════════════════════════
+
+echo ""
+echo "════════════════════════════════════════════════════════════"
+echo "  QuadMix Quick Validation Complete!"
+echo "════════════════════════════════════════════════════════════"
+echo ""
+echo "  Output:          $RESULT_DIR"
+echo "  Report:          $RESULT_DIR/midtrain_validation_report.md"
+echo "  Training log:    $QUADMIX_LOG"
+echo "  Eval log:        $QUADMIX_EVAL_LOG"
+echo "  Checkpoint:      $MID_CHECKPOINTS_OUTPUT_DIR/$QUADMIX_MODEL_TAG/"
+echo ""
+echo "════════════════════════════════════════════════════════════"

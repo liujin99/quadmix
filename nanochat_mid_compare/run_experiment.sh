@@ -53,7 +53,7 @@ NANOCHAT_MODEL_DIR="${NANOCHAT_MODEL_DIR:-/home/ma-user/work/nanochat_model_dir}
 BASE_MODEL_TAG="${BASE_MODEL_TAG:-d24_0320}"
 
 # Nanochat repo root
-NANOCHAT_REPO="${NANOCHAT_REPO:-/home/ma-user/work/nanochat_midtrain_326}"
+NANOCHAT_REPO="${NANOCHAT_REPO:-/home/ma-user/work/nanochat-npu}"
 
 # Mid-training checkpoint output directory (where trained models are saved)
 # If set, $NANOCHAT_MODEL_DIR/mid_checkpoints will be symlinked here
