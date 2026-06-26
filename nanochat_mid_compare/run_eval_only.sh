@@ -42,6 +42,8 @@ if [ -z "$RESULT_DIR" ]; then
     RESULT_DIR="$SCRIPT_DIR/results/eval_${MODEL_TAG}_$(date +%Y%m%d_%H%M%S)"
 fi
 
+RESULT_DIR="$(cd "$(dirname "$RESULT_DIR")" && pwd)/$(basename "$RESULT_DIR")"
+
 # ══════════════════════════════════════════════════════════════
 #  CONFIGURATION
 # ══════════════════════════════════════════════════════════════
