@@ -42,7 +42,7 @@ export QUADMIX_TEMP_DIR="${QUADMIX_TEMP_DIR:-$HOME/.cache/QuaDMix/temp}"
 
 PREPROCESSED_DIR="$QUADMIX_TEMP_DIR/preprocessed"
 
-RESULT_DIR="$QUADMIX_DIR/result/revalidate_core_bmk_v5_20260618_094511"
+RESULT_DIR="$QUADMIX_DIR/result/revalidate_core_bmk_v6_20260627_000000"
 OUTPUT=""
 NUM_SEARCH="100000"
 TOP_K="10"
