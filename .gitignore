@@ -23,6 +23,7 @@ data/*.parquet
 *.npy
 *.npz
 *.pt
+*.pdf
 
 # OS
 .DS_Store
