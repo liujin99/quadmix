@@ -293,6 +293,77 @@ def plot_pairwise_correlation(dist_matrix, output_dir):
     _save_fig(fig, output_dir, "fig_pairwise_correlation.png")
 
 
+def print_pca_analysis(dist_matrix):
+    from sklearn.decomposition import PCA
+
+    print("\n=== PCA Analysis ===")
+    pca = PCA()
+    pca.fit(dist_matrix)
+
+    print("\nExplained Variance by Principal Component:")
+    cumvar = 0
+    for i, (var, ratio) in enumerate(zip(pca.explained_variance_, pca.explained_variance_ratio_)):
+        cumvar += ratio * 100
+        print(f"  PC{i+1}: {ratio*100:5.1f}% (cumulative: {cumvar:5.1f}%)")
+
+    print("\nTop 3 PC Loadings (which domains contribute most):")
+    for pc_idx in range(min(3, len(pca.components_))):
+        print(f"\n  PC{pc_idx+1}:")
+        loadings = pca.components_[pc_idx]
+        sorted_idx = np.argsort(np.abs(loadings))[::-1]
+        for d in sorted_idx[:5]:
+            name = DOMAIN_SHORT[d] if d < len(DOMAIN_SHORT) else f"D{d}"
+            direction = "+" if loadings[d] > 0 else "-"
+            print(f"    {direction} {name:<15} {loadings[d]:+.3f}")
+
+
+def print_correlation_summary(dist_matrix):
+    print("\n=== Pairwise Correlation Summary ===")
+    corr = np.corrcoef(dist_matrix.T)
+
+    print("\nStrongest negative correlations (domains that trade off):")
+    pairs = []
+    for i in range(corr.shape[0]):
+        for j in range(i+1, corr.shape[1]):
+            pairs.append((i, j, corr[i, j]))
+    pairs.sort(key=lambda x: x[2])
+
+    for i, j, c in pairs[:10]:
+        name_i = DOMAIN_SHORT[i] if i < len(DOMAIN_SHORT) else f"D{i}"
+        name_j = DOMAIN_SHORT[j] if j < len(DOMAIN_SHORT) else f"D{j}"
+        print(f"  {name_i:<15} vs {name_j:<15} : {c:+.3f}")
+
+    print("\nStrongest positive correlations (domains that move together):")
+    pairs.sort(key=lambda x: -x[2])
+    for i, j, c in pairs[:10]:
+        name_i = DOMAIN_SHORT[i] if i < len(DOMAIN_SHORT) else f"D{i}"
+        name_j = DOMAIN_SHORT[j] if j < len(DOMAIN_SHORT) else f"D{j}"
+        print(f"  {name_i:<15} vs {name_j:<15} : {c:+.3f}")
+
+
+def print_distribution_modes(dist_matrix, val_losses):
+    print("\n=== Distribution Mode Analysis ===")
+
+    sorted_idx = np.argsort(val_losses)
+    n = len(sorted_idx)
+
+    print("\nTop 10 best experiments (lowest val_loss):")
+    for rank, idx in enumerate(sorted_idx[:10]):
+        loss = val_losses[idx]
+        dist = dist_matrix[idx] * 100
+        top3 = np.argsort(dist)[::-1][:3]
+        top3_str = ", ".join([f"{DOMAIN_SHORT[d]}:{dist[d]:.1f}%" for d in top3])
+        print(f"  #{rank+1} loss={loss:.4f} | Top-3: {top3_str}")
+
+    print("\nBottom 10 worst experiments (highest val_loss):")
+    for rank, idx in enumerate(sorted_idx[-10:][::-1]):
+        loss = val_losses[idx]
+        dist = dist_matrix[idx] * 100
+        top3 = np.argsort(dist)[::-1][:3]
+        top3_str = ", ".join([f"{DOMAIN_SHORT[d]}:{dist[d]:.1f}%" for d in top3])
+        print(f"  #{rank+1} loss={loss:.4f} | Top-3: {top3_str}")
+
+
 def save_summary_json(dist_matrix, count_matrix, val_losses, doc_counts, output_dir):
     num_domains = dist_matrix.shape[1]
     summary = {
@@ -365,6 +436,10 @@ def main():
     print(f"\n  Doc count: {doc_counts.mean():,.0f} ± {doc_counts.std():,.0f}  "
           f"[{doc_counts.min():,}, {doc_counts.max():,}]")
     print(f"  Doc count CV: {doc_counts.std()/doc_counts.mean()*100:.1f}%")
+
+    print_pca_analysis(dist_matrix)
+    print_correlation_summary(dist_matrix)
+    print_distribution_modes(dist_matrix, val_losses)
 
     print("\n=== Generating Figures ===")
     plot_boxplot_domain_ratios(dist_matrix, args.output_dir)
