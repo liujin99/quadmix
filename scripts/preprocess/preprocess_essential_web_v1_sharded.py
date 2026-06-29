@@ -129,7 +129,7 @@ def main():
     p = argparse.ArgumentParser(
         description="Preprocess essential-web-v1 in multi-shard mode")
     p.add_argument("--input-dir",
-                   default=os.path.join(_QUADMIX_DIR, "data/essential-web-v1"),
+                   default="/home/ma-user/work/QuaDMix/data/essential-web",
                    help="Directory containing raw parquet shards")
     p.add_argument("--output-dir",
                    default=os.path.join(os.path.expanduser("~"), ".cache", "QuaDMix", "temp", "preprocessed"),

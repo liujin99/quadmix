@@ -13,7 +13,7 @@ import pandas as pd
 from scripts.preprocess.preprocess_essential_web_v1_sharded import extract_quality_signals
 from quadmix.constants import FASTTEXT_FIELDS
 
-DATA_DIR = "/home/liujin99/data/essential-web-v1"
+DATA_DIR = "/home/ma-user/work/QuaDMix/data/essential-web"
 NUM_SHARDS = 10
 
 print(f"Loading {NUM_SHARDS} shards from {DATA_DIR}...")

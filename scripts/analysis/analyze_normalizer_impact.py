@@ -125,7 +125,7 @@ def main():
     print("=" * 70)
 
     quality_matrix, domain_labels = load_data(
-        "/home/liujin99/data/essential-web-v1/train-00000-of-03291.parquet",
+        "/home/ma-user/work/QuaDMix/data/essential-web/train-00000-of-03291.parquet",
         N_DOCS
     )
 

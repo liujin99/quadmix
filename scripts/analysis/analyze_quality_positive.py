@@ -12,7 +12,7 @@ import pandas as pd
 from scipy import stats as scipy_stats
 from quadmix.constants import FASTTEXT_FIELDS
 
-DATA_DIR = "/home/liujin99/data/essential-web-v1"
+DATA_DIR = "/home/ma-user/work/QuaDMix/data/essential-web"
 NUM_SHARDS = 10
 
 

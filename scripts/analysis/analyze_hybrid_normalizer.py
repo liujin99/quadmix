@@ -31,7 +31,7 @@ from scripts.preprocess.preprocess_essential_web_v1_sharded import (
 from quadmix.constants import FASTTEXT_FIELDS, DOMAIN_MAP
 from quadmix.utils.normalization import zscore_normalize, rank_normalize
 
-DATA_PATH = "/home/liujin99/data/essential-web-v1/train-00000-of-03291.parquet"
+DATA_PATH = "/home/ma-user/work/QuaDMix/data/essential-web/train-00000-of-03291.parquet"
 N_DOCS = 20000
 N_EXPERIMENTS = 100
 SAMPLE_SIZE = 5000

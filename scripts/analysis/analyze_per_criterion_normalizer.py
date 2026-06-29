@@ -32,7 +32,7 @@ from scripts.preprocess.preprocess_essential_web_v1_sharded import (
 )
 from quadmix.constants import FASTTEXT_FIELDS
 
-DATA_DIR = "/home/liujin99/data/essential-web-v1"
+DATA_DIR = "/home/ma-user/work/QuaDMix/data/essential-web"
 NUM_SHARDS = 2
 SEED = 42
 
