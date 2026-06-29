@@ -173,7 +173,7 @@ def download_file(url: str, dest: str, index: int, total: int, size_mb: float,
             req.add_header("Range", f"bytes={existing_size}-")
 
         with open(dest, mode) as f:
-                with urllib.request.urlopen(req, timeout=300, context=SSL_CTX) as resp:
+            with urllib.request.urlopen(req, timeout=300, context=SSL_CTX) as resp:
                 # Read in chunks to avoid memory issues
                 chunk_size = 8 * 1024 * 1024  # 8MB chunks
                 while True:
