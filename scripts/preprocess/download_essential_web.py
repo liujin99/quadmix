@@ -28,10 +28,15 @@ Examples:
 
 import argparse
 import os
+import ssl
 import sys
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+SSL_CTX = ssl.create_default_context()
+SSL_CTX.check_hostname = False
+SSL_CTX.verify_mode = ssl.CERT_NONE
 
 # ---------------------------------------------------------------------------
 REPO_ID = "EssentialAI/essential-web-v1.0"
@@ -60,7 +65,7 @@ def list_crawl_files(repo: str, crawl: str) -> list[dict]:
         api_url = url + (f"?cursor={cursor}" if cursor else "")
         req = urllib.request.Request(api_url)
         try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
+            with urllib.request.urlopen(req, timeout=60, context=SSL_CTX) as resp:
                 data = json.loads(resp.read().decode())
         except (urllib.error.HTTPError, urllib.error.URLError) as e:
             print(f"[Error] Failed to list files: {e}")
@@ -93,7 +98,7 @@ def get_file_info(url: str) -> tuple[bool, int]:
 
     try:
         req = urllib.request.Request(url, method="HEAD")
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=30, context=SSL_CTX) as resp:
             accept_ranges = resp.headers.get("Accept-Ranges", "")
             content_length = resp.headers.get("Content-Length", "0")
             supports_range = "bytes" in accept_ranges.lower()
@@ -168,7 +173,7 @@ def download_file(url: str, dest: str, index: int, total: int, size_mb: float,
             req.add_header("Range", f"bytes={existing_size}-")
 
         with open(dest, mode) as f:
-            with urllib.request.urlopen(req, timeout=300) as resp:
+                with urllib.request.urlopen(req, timeout=300, context=SSL_CTX) as resp:
                 # Read in chunks to avoid memory issues
                 chunk_size = 8 * 1024 * 1024  # 8MB chunks
                 while True:
@@ -204,7 +209,7 @@ def download_file(url: str, dest: str, index: int, total: int, size_mb: float,
                 try:
                     req = urllib.request.Request(url)
                     with open(temp_dest, "wb") as f:
-                        with urllib.request.urlopen(req, timeout=300) as resp:
+                        with urllib.request.urlopen(req, timeout=300, context=SSL_CTX) as resp:
                             chunk_size = 8 * 1024 * 1024
                             while True:
                                 chunk = resp.read(chunk_size)
@@ -256,7 +261,7 @@ def download_file_hf_transfer(url: str, dest: str, index: int, total: int, size_
             print(f"  [{index + 1}/{total}] {basename} ({size_mb:.0f} MB) [hf_transfer] ... ", end="", flush=True)
 
         # Read the file
-        with urllib.request.urlopen(url) as response:
+        with urllib.request.urlopen(url, context=SSL_CTX) as response:
             data = response.read()
 
         with open(dest, "wb") as f:
@@ -340,13 +345,25 @@ def main():
         remote_to_local[f["path"]] = (local_name, f["size"])
 
     complete = set()
+    corrupted = []
     if os.path.isdir(output_dir):
         for remote_path, (local_name, expected_size) in remote_to_local.items():
             local_path = os.path.join(output_dir, local_name)
             if os.path.exists(local_path):
                 local_size = os.path.getsize(local_path)
                 if local_size >= expected_size * 0.99:
-                    complete.add(local_name)
+                    with open(local_path, "rb") as fh:
+                        fh.seek(-4, 2)
+                        magic = fh.read(4)
+                    if magic == b"PAR1":
+                        complete.add(local_name)
+                    else:
+                        corrupted.append(local_name)
+
+    if corrupted:
+        print(f"  Corrupted (bad magic bytes, will re-download): {len(corrupted)}")
+        for c in corrupted:
+            os.remove(os.path.join(output_dir, c))
 
     # Need to download: train-XXXXX-of-03291.parquet missing or incomplete
     need = []
