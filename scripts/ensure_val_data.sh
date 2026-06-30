@@ -13,10 +13,10 @@ _hf_remote_size() {
 
     local size=0
     if command -v curl &>/dev/null; then
-        size=$(curl -sIL --connect-timeout 5 --max-time 10 "$url" 2>/dev/null \
+        size=$(curl -ksIL --connect-timeout 5 --max-time 10 "$url" 2>/dev/null \
             | grep -i "^content-length:" | tail -1 | awk '{print $2}' | tr -d '\r')
     elif command -v wget &>/dev/null; then
-        size=$(wget --spider --timeout=10 -S "$url" 2>&1 \
+        size=$(wget --no-check-certificate --spider --timeout=10 -S "$url" 2>&1 \
             | grep -i "Content-Length:" | tail -1 | awk '{print $2}' | tr -d '\r')
     fi
 
@@ -104,10 +104,10 @@ ensure_val_data() {
 
     local dl_exit=0
     if command -v wget &>/dev/null; then
-        wget --progress=bar:force "$download_url" -O "$local_path" 2>&1
+        wget --no-check-certificate --progress=bar:force "$download_url" -O "$local_path" 2>&1
         dl_exit=$?
     else
-        curl -L --fail --progress-bar -o "$local_path" "$download_url" 2>&1
+        curl -L -k --fail --progress-bar -o "$local_path" "$download_url" 2>&1
         dl_exit=$?
     fi
 
