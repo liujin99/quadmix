@@ -53,7 +53,7 @@ PREPROCESSED_DIR="$QUADMIX_TEMP_DIR/preprocessed"
 
 VAL_FILE="$QUADMIX_DIR/data/core_bmk_21tasks_v6_tokenized.pt"
 source "$QUADMIX_DIR/scripts/ensure_val_data.sh"
-ensure_val_data "liujin99/quadmix-core-bmk-v6" "core_bmk_21tasks_v6_tokenized.pt" "$VAL_FILE"
+ensure_val_data "liujin99/quadmix-core-bmk-v6" "core_bmk_21tasks_v6_tokenized.pt" "$VAL_FILE" || exit 1
 
 RESULT_DIR="$QUADMIX_DIR/result/demo_full_20260612_214550"
 VAL_SET="core_bmk_v6"

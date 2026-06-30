@@ -102,18 +102,48 @@ ensure_val_data() {
 
     local download_url="$hf_endpoint/datasets/$repo_id/resolve/main/$filename?download=true"
 
+    local dl_exit=0
     if command -v wget &>/dev/null; then
-        wget -q --show-progress "$download_url" -O "$local_path"
+        wget --progress=bar:force "$download_url" -O "$local_path" 2>&1
+        dl_exit=$?
     else
-        curl -L -o "$local_path" "$download_url"
+        curl -L --fail --progress-bar -o "$local_path" "$download_url" 2>&1
+        dl_exit=$?
     fi
 
-    if [ -f "$local_path" ]; then
-        echo "  ✓ Downloaded: $local_path ($(du -h "$local_path" | cut -f1))"
+    if [ "$dl_exit" -ne 0 ]; then
+        rm -f "$local_path"
         echo ""
-        return 0
-    else
-        echo "  [Error] Download failed"
+        echo "  [Error] Download failed (exit code: $dl_exit)"
+        echo "          URL: $download_url"
+        echo "          You can manually download from:"
+        echo "            https://huggingface.co/datasets/$repo_id"
+        echo ""
         return 1
     fi
+
+    local downloaded_size
+    downloaded_size=$(_local_size "$local_path")
+    if [ "$downloaded_size" -eq 0 ]; then
+        rm -f "$local_path"
+        echo ""
+        echo "  [Error] Downloaded file is empty (0 bytes)"
+        echo "          URL: $download_url"
+        echo ""
+        return 1
+    fi
+
+    if [ "$remote_size" -gt 0 ] && [ "$downloaded_size" -ne "$remote_size" ]; then
+        rm -f "$local_path"
+        echo ""
+        echo "  [Error] Downloaded file size mismatch"
+        echo "          Expected: $(( remote_size / 1024 / 1024 )) MB"
+        echo "          Got:      $(( downloaded_size / 1024 / 1024 )) MB"
+        echo ""
+        return 1
+    fi
+
+    echo "  ✓ Downloaded: $local_path ($(du -h "$local_path" | cut -f1))"
+    echo ""
+    return 0
 }

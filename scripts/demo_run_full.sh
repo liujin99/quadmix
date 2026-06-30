@@ -51,7 +51,7 @@ VAL_FILE="$QUADMIX_DIR/data/core_bmk_21tasks_v6_tokenized.pt"
 
 # ── 驗證集下載（帶版本檢查）──────────────────────────────────
 source "$QUADMIX_DIR/scripts/ensure_val_data.sh"
-ensure_val_data "liujin99/quadmix-core-bmk-v6" "core_bmk_21tasks_v6_tokenized.pt" "$VAL_FILE"
+ensure_val_data "liujin99/quadmix-core-bmk-v6" "core_bmk_21tasks_v6_tokenized.pt" "$VAL_FILE" || exit 1
 
 # ── 下载规模控制 ──────────────────────────────────
 # 每 shard ≈ 79M tokens (char//4) / 246 MB 原始 parquet
