@@ -1,27 +1,27 @@
-# FDC Domain Mapping 设计：从 100 类到 22 类
+# FDC Domain Mapping 设计：从 10 类到 22 类
 
-> 2026-06-29 | 基于 Essential-Web v1.0 FDC 分类体系的领域映射方案
+> 2026-06-30 | 基于 Essential-Web v1.0 FDC 分类体系的领域映射方案（L2 实现完成）
 
 ## 1. 背景
 
-### 1.1 当前状态
+### 1.1 原 L1 方案
 
-QuaDMix 当前使用 Essential-Web v1.0 的 FDC (Free Decimal Correspondence) L1 分类，共 **10 个领域**（Dewey Decimal 体系）：
+QuaDMix 最初使用 Essential-Web v1.0 的 FDC (Free Decimal Correspondence) L1 分类，共 **10 个领域**（Dewey Decimal 体系）：
 
-| ID | L1 Domain | FDC Code |
-|----|-----------|----------|
-| 0 | Industrial arts, Technology, and Engineering | 6xx |
-| 1 | Social sciences | 3xx |
-| 2 | Science and Natural history | 5xx |
-| 3 | Religion | 2xx |
-| 4 | Philology; or, Language and languages | 4xx |
-| 5 | Literature | 8xx |
-| 6 | History and Geography | 9xx |
-| 7 | General works, books and libraries, information sciences | 0xx |
-| 8 | Philosophy and psychology | 1xx |
-| 9 | Arts | 7xx |
+| ID | L1 Domain | FDC Code | 占比 |
+|----|-----------|----------|------|
+| 0 | Industrial arts, Technology, and Engineering | 6xx | 41.1% |
+| 1 | Social sciences | 3xx | 22.0% |
+| 2 | Science and Natural history | 5xx | 18.4% |
+| 3 | Religion | 2xx | 1.8% |
+| 4 | Philology; or, Language and languages | 4xx | 0.5% |
+| 5 | Literature | 8xx | 1.3% |
+| 6 | History and Geography | 9xx | 2.5% |
+| 7 | General works, books and libraries, information sciences | 0xx | 8.7% |
+| 8 | Philosophy and psychology | 1xx | 1.0% |
+| 9 | Arts | 7xx | 2.7% |
 
-**问题**：10 类粒度太粗。例如 "Science" (5xx) 将数学、物理、生物、医学合为一类，但这些领域对下游任务的影响差异极大。
+**问题**：10 类粒度太粗。例如 "Industrial" (6xx) 占 41.1%，内部混杂工程、医学、商业、农业等异质内容，DCLM 质量分在异质域内区分度低。
 
 ### 1.2 FDC 层级结构
 
@@ -38,9 +38,17 @@ L2 标签存在于 `eai_taxonomy.free_decimal_correspondence.primary.labels.leve
 
 ### 1.3 目标
 
-将 ~100 个 FDC L2 映射到 **~22 个领域**，对齐业界经验证的分类粒度。
+将 ~100 个 FDC L2 映射到 **22 个领域**，对齐业界经验证的分类粒度。
 
-**设计动机**（2026-06-29 更新）：L2 映射的核心价值不是改变域比例，而是**提高域内同质性**。当前 FDC L1 的 10 域太粗（如 Industrial 41% 内部混杂工程、医学、商业），DCLM 质量分在异质域内区分度低。拆分后每个 L2 子域更同质，质量筛选更精准。
+**设计动机**：L2 映射的核心价值不是改变域比例，而是**提高域内同质性**。当前 FDC L1 的 10 域太粗（如 Industrial 41% 内部混杂工程、医学、商业），DCLM 质量分在异质域内区分度低。拆分后每个 L2 子域更同质，质量筛选更精准。
+
+### 1.4 实现状态
+
+**已完成**（2026-06-30）：
+- 映射代码实现：`src/quadmix/constants.py` 中的 `FDC_PREFIX_TO_DOMAIN`
+- 预处理脚本更新：`scripts/preprocess/preprocess_essential_web_v1_sharded.py`
+- 直接替换 L1 方案（不做双模式兼容）
+- 500 shards 数据预处理完成，22 域分布验证通过
 
 ---
 
@@ -119,7 +127,7 @@ L2 标签存在于 `eai_taxonomy.free_decimal_correspondence.primary.labels.leve
 
 ---
 
-## 3. FDC-23 映射方案
+## 3. FDC-22 映射方案
 
 ### 3.1 设计原则
 
@@ -168,18 +176,18 @@ L2 标签存在于 `eai_taxonomy.free_decimal_correspondence.primary.labels.leve
 
 | 决策 | 理由 |
 |------|------|
-| Science 拆 4 类 (10-13) | NVIDIA 合1 太粗；ClimbMix 拆成 C6-C9 四个 cluster，验证了拆分的合理性 |
+| Science 拆 4 类 (9-12) | NVIDIA 合1 太粗；ClimbMix 拆成 C6-C9 四个 cluster，验证了拆分的合理性 |
 | Philosophy + Psychology 合1 (ID 2) | Web 上哲学数据极少，单独成类会近乎空；NVIDIA 无对应独立类 |
 | Religion 独立 (ID 3) | 与 Philosophy 分离，web 上宗教数据量尚可 |
 | People_and_Society 吸收 Biography (92x) | 对齐 NVIDIA 的 People_and_Society 范畴 |
 | Business 拆 Management (65x) + Engineering (60x/62x/66-69x) | NVIDIA 合为 Business_and_Industrial 太粗，工程 vs 管理词汇差异大 |
-| Arts 合 9 个 L2 (ID 17) | 对齐 NVIDIA 的 Arts_and_Entertainment，web 上艺术类同质性高 |
-| English vs Other Languages 分离 (8, 9) | Web 数据以英语为主，非英语语言对 multilingual 能力有独立贡献 |
-| History 从 Geography 分离 (20, 21) | 对齐 NVIDIA 的 Travel_and_Transportation 独立 |
+| Arts 合 9 个 L2 (ID 16) | 对齐 NVIDIA 的 Arts_and_Entertainment，web 上艺术类同质性高 |
+| English vs Other Languages 分离 (8, 丢弃) | Web 数据以英语为主，非英语语言对 multilingual 能力有独立贡献 |
+| History 从 Geography 分离 (19, 20) | 对齐 NVIDIA 的 Travel_and_Transportation 独立 |
 | **Other 类直接丢弃** | FDC code=-1 的文档仅 8,462 条（0.02%），且 avg tok/doc=14,447（异常高），数据质量差 |
 | **Other_Languages 直接丢弃** | 43x-49x 非英语语言仅 64K 条（0.16%），benchmark 全英语无贡献，减少 9 个无效搜索参数 |
-| **Home_Economics 独立成域 (ID 23)** | 64x（家政学/消费者科学）占 11.6%，与 People_and_Society 内容风格差异大（食谱 vs 社会学）。独立成域提高同质性，使 DCLM 质量分更有区分度 |
-| **60x/66x-69x 归入 Engineering (ID 15)** | 化工、制造、建筑等工业技术与工程设计语义一致，合并后 Engineering 从 8.4% 升至 13.3%，可接受 |
+| **Home_Economics 独立成域 (ID 21)** | 64x（家政学/消费者科学）占 11.6%，与 People_and_Society 内容风格差异大（食谱 vs 社会学）。独立成域提高同质性，使 DCLM 质量分更有区分度 |
+| **60x/66x-69x 归入 Engineering (ID 14)** | 化工、制造、建筑等工业技术与工程设计语义一致，合并后 Engineering 从 8.4% 升至 13.4%，可接受 |
 
 ### 3.4 FDC 无法覆盖的 NVIDIA 类别
 
@@ -213,10 +221,11 @@ L2 标签存在于 `eai_taxonomy.free_decimal_correspondence.primary.labels.leve
 
 ```python
 # 示例
-# FDC code "746.92" → 取前缀 "74" → category 17 (Arts_and_Entertainment)
-# FDC code "510"    → 取前缀 "51" → category 10 (Mathematics)
-# FDC code ""       → category 22 (Other)
-# 解析失败          → category 22 (Other)
+# FDC code "746.92" → 取前缀 "74" → category 16 (Arts_and_Entertainment)
+# FDC code "510"    → 取前缀 "51" → category 9 (Mathematics)
+# FDC code "640"    → 取前缀 "64" → category 21 (Home_Economics)
+# FDC code "45"     → 取前缀 "45" → -1 (Other_Languages, 丢弃)
+# 解析失败          → -1 (丢弃)
 ```
 
 ### 4.2 前缀映射表
@@ -286,63 +295,232 @@ def extract_domain_level_2(eai_taxonomy) -> int:
     Returns:
         int: domain ID (0-21), 其中 21=Home_Economics; -1 表示丢弃
     """
-    # 1. 解析 eai_taxonomy
+    # 1. 解析 eai_taxonomy (JSON string → dict)
     # 2. 获取 primary FDC code
     # 3. 取前 2 位字符作为前缀
     # 4. 查表 FDC_PREFIX_TO_DOMAIN
-    # 5. 未找到 / L2 缺失 / L1 为空 / 解析失败 → 22 (Other)
+    # 5. 未找到 / 解析失败 → -1 (丢弃)
 ```
+
+**丢弃规则**：
+- FDC code=-1 或解析失败 → 丢弃（8,462 条，0.02%）
+- 43x-49x (Other_Languages) → 丢弃（64K 条，0.16%）
+- 未映射前缀 → 丢弃（实际无，所有有效前缀已覆盖）
 
 ---
 
 ## 5. 与 L1 方案的对比
 
-| 维度 | L1 (当前) | L2 映射 (本方案) |
+| 维度 | L1 (原方案) | L2 映射 (本方案) |
 |------|-----------|-----------------|
 | 类别数 | 10 | 22 (全部有效) |
 | Science 粒度 | 合1 | 拆4 (Math/Phys/Bio/Med) |
 | Business 粒度 | 合1 | 拆3 (Mgmt/Eng/Agri) |
 | Social Sciences 粒度 | 合1 | 拆4 (Law/Econ/Edu/People) |
+| Industrial 粒度 | 合1 (41.1%) | 拆4 (Eng 13.4%, Business 7.2%, Medicine 6.5%, Agriculture 2.4%) |
 | 实现复杂度 | 低 | 中（需解析 FDC code） |
 | 依赖 | level_1 文本标签 | FDC code 前缀 |
 | 核心价值 | — | **提高域内同质性**，使 DCLM 质量筛选更精准 |
 
 ---
 
-## 6. 风险与注意事项
+## 6. L2 分布实测结果
 
-### 6.1 数据量分布
+基于 500 shards 预处理数据（2026-06-30 完成）：
 
-从 10 类扩展到 24 类后，部分类别数据量可能过小：
-- Mathematics (51x)：web 上纯数学内容占比极低
-- Physics_and_Chemistry (53x-54x)：可能数据量不足
-- Other_Languages (43x-49x)：非英语语言在 web 上分布不均
+### 6.1 总体统计
 
-**建议**：实现后先扫描 Essential-Web 各 L2 的实际数据量分布，确认无空类。
+| 指标 | 数值 |
+|------|------|
+| 总文档数 | 40,343,674 |
+| 总 token 数（估计） | 38,489,683,203 |
+| 丢弃文档数 | 72,190 (0.18%) |
+| 有效域数 | 22 |
+| Max/Min 比例 | 50.5x |
+| Top-5 域占比 | 52.5% |
+| Top-10 域占比 | 84.3% |
+| Bottom-5 域占比 | 2.91% |
 
-### 6.2 FDC Code 解析
+### 6.2 各域分布
 
-- 部分文档的 FDC code 可能为空或格式异常
-- `level_2` 标签为空字符串时，FDC code 可能只有百位（如 `508`），需处理 3 位 code 的情况
-- 以下文档直接**丢弃**（domain=-1），不参与预处理：
-  - L2 缺失但 L1 存在 → 丢弃
-  - L1 也为空 → 丢弃
-  - 解析失败 → 丢弃
-  - FDC code=-1 → 丢弃（8,462 条，0.02%，avg tok/doc=14,447 异常）
-  - Other_Languages (43x-49x) → 丢弃（64K 条，0.16%，非英语无贡献）
+| ID | Domain | Docs | % | Tokens (est) | % | Avg tok/doc |
+|----|--------|------|---|--------------|---|-------------|
+| 14 | Engineering | 5,406,635 | 13.40% | 4,302,206,226 | 11.18% | 796 |
+| 21 | Home_Economics | 4,702,323 | 11.66% | 2,720,186,097 | 7.07% | 578 |
+| 17 | Sports_and_Recreation | 4,209,970 | 10.44% | 3,561,650,280 | 9.25% | 846 |
+| 7 | People_and_Society | 3,635,406 | 9.01% | 3,480,102,840 | 9.04% | 957 |
+| 16 | Arts_and_Entertainment | 3,228,105 | 8.00% | 2,085,796,757 | 5.42% | 646 |
+| 0 | Computers_and_Electronics | 3,032,580 | 7.52% | 3,792,599,502 | 9.85% | 1251 |
+| 13 | Business_and_Management | 2,908,173 | 7.21% | 3,192,910,562 | 8.30% | 1098 |
+| 5 | Economics_and_Finance | 2,656,396 | 6.58% | 3,095,893,993 | 8.04% | 1165 |
+| 12 | Medicine_and_Health | 2,637,260 | 6.54% | 3,097,592,638 | 8.05% | 1175 |
+| 4 | Law_and_Government | 1,609,379 | 3.99% | 2,186,360,604 | 5.68% | 1359 |
+| 6 | Education | 1,095,972 | 2.72% | 1,067,907,316 | 2.77% | 974 |
+| 15 | Agriculture | 969,577 | 2.40% | 890,467,942 | 2.31% | 918 |
+| 3 | Religion | 741,405 | 1.84% | 837,913,532 | 2.18% | 1130 |
+| 20 | Geography_and_Travel | 694,088 | 1.72% | 880,583,022 | 2.29% | 1269 |
+| 11 | Earth_and_Life_Sciences | 649,420 | 1.61% | 848,175,111 | 2.20% | 1306 |
+| 18 | Books_and_Literature | 510,058 | 1.26% | 637,912,890 | 1.66% | 1251 |
+| 1 | News_and_General_Works | 481,019 | 1.19% | 357,534,481 | 0.93% | 743 |
+| 2 | Philosophy_and_Psychology | 416,673 | 1.03% | 549,875,245 | 1.43% | 1320 |
+| 19 | History | 328,646 | 0.81% | 427,350,136 | 1.11% | 1300 |
+| 10 | Physics_and_Chemistry | 179,220 | 0.44% | 197,004,411 | 0.51% | 1099 |
+| 8 | English_Language | 144,223 | 0.36% | 141,481,558 | 0.37% | 981 |
+| 9 | Mathematics | 107,146 | 0.27% | 138,178,060 | 0.36% | 1290 |
 
-### 6.3 向后兼容
+### 6.3 分布特征分析
 
-- 新方案与现有 L1 方案并存，通过 `--domain-level` 参数切换
-- 现有 `DOMAIN_MAP` 和 `DOMAIN_NAMES` 保留，新增 `FDC_PREFIX_TO_DOMAIN_L2` 和 `DOMAIN_NAMES_L2`
-- `QuaDMixConfig.num_domains` 根据选择的 level 自动适配（10 或 22）
+**大域主导**（>5%）：9 个域占 80.2%
+- Engineering (13.4%), Home_Economics (11.7%), Sports (10.4%), People (9.0%), Arts (8.0%), Computers (7.5%), Business (7.2%), Economics (6.6%), Medicine (6.5%)
+
+**中域**（1-5%）：10 个域占 16.9%
+- Law (4.0%), Education (2.7%), Agriculture (2.4%), Religion (1.8%), Geography (1.7%), Earth_and_Life (1.6%), Books (1.3%), News (1.2%), Philosophy (1.0%), History (0.8%)
+
+**微域**（<1%）：3 个域占 1.1%
+- Physics (0.4%), English (0.4%), Mathematics (0.3%)
+
+**与 L1 对比**：
+- L1 Industrial (41.1%) → L2 Engineering(13.4) + Business(7.2) + Medicine(6.5) + Agriculture(2.4) = 29.5%
+- L1 Social (22.0%) → L2 People(9.0) + Economics(6.6) + Law(4.0) + Education(2.7) = 22.3%（吻合）
+- L1 Arts (2.7%) → L2 Arts(8.0) + Sports(10.4) = 18.4%（原 L1 Arts 实际是 7xx，包含 Sports）
+- **中间层更均匀**：L2 有 9 个域在 6.5%-10.4%，L1 只有 1 个域 <20%
+- **Max/Min 改善**：50.5x vs 82x（L1），因为去除了 Other_Languages 和无效数据
+
+### 6.4 丢弃数据统计
+
+| 类别 | FDC 前缀 | 文档数 | 占比 | 原因 |
+|------|----------|--------|------|------|
+| Other_Languages | 43x-49x | 64,000 | 0.16% | 非英语，benchmark 全英语无贡献 |
+| Invalid FDC | -1 | 8,462 | 0.02% | 数据质量差（avg tok/doc=14,447） |
+| **总计** | — | 72,190 | 0.18% | — |
+
+**丢弃前缀分布**（Top-5）：
+- 49 (Other_Languages): 39,869 docs (55.2%)
+- 46 (Other_Languages): 8,439 docs (11.7%)
+- -1 (Invalid): 8,423 docs (11.7%)
+- 44 (Other_Languages): 6,675 docs (9.2%)
+- 43 (Other_Languages): 4,315 docs (6.0%)
 
 ---
 
-## 7. 后续步骤
+## 7. 分析与设计过程
 
-1. **扫描 Essential-Web 数据**：统计各 FDC 前缀的实际文档数和 token 数，确认 22 个有效类无空类
-2. **实现映射代码**：在 `constants.py` 新增 `FDC_PREFIX_TO_DOMAIN_L2`、`DOMAIN_NAMES_L2`，在 `preprocess_essential_web_v1_sharded.py` 新增 `extract_domain_level_2`
-3. **验证映射正确性**：抽样检查映射结果，确认 Other 类占比和组成
-4. **重新运行 proxy 实验**：使用 22 类 domain 配置，对比 R² 和方向准确率
-5. **对比中训效果**：L1-10 vs L2-22 的 CORE metric 对比
+### 7.1 L1 域配比约束分析
+
+通过 874 组 proxy 实验分析发现，当前采样机制下域配比变化受限：
+
+**结构性约束**：
+- 采样公式：S(r̄) = (2/(1+e^{-λ(ω-r̄)}))^η + ε → S_max ≤ 2.001（单文档最多重复 2 次）
+- ω 硬约束：ω ∈ [0, 0.1]，只有前 10% 质量文档参与采样
+- 实测域采样率：2.42%-6.48%，最大/最小比仅 2.7x
+
+**PCA 分析**：
+- PC1+PC2+PC3 解释 97.4% 方差
+- 本质上只在 3 个大域之间做 tradeoff
+- 7 个小域始终边缘化（每个 <5%）
+- **有效搜索空间是 3 维而非 10 维**
+
+**结论**：域配比约束是核心问题，不是加实验数或换回归模型能解决的。
+
+### 7.2 L2 映射策略转变
+
+**初期思路**：通过 L2 映射改变域比例
+- 问题：L1 的 10 域太粗，搜索空间退化
+- 期望：L2 的 22 域能扩大有效搜索空间
+
+**转变后的思路**：通过 L2 映射提高域内同质性
+- 核心价值：让 DCLM 质量分在更同质的域内更有区分度
+- 例：L1 Industrial (41%) 内部混杂工程、医学、商业，DCLM 高分文档可能集中在某个子主题
+- L2 拆分后，Engineering (13.4%)、Medicine (6.5%)、Business (7.2%) 各自更同质
+
+### 7.3 Fallback 策略讨论
+
+**问题**：L2 缺失率 11.2%（4.5M docs），其中 General works 占 86.3%
+
+**方案对比**：
+- 方案 A：每 L1 一个 Other → 34 类（用户认为太多）
+- 方案 B：单一 Other 类 → 23 类（22 有效 + 1 Other）
+- **最终方案**：直接丢弃未映射数据 → 22 类（全部有效）
+
+**决策理由**：
+- Other 类（FDC code=-1）仅 8,462 条（0.02%），数据质量差
+- Other_Languages（43x-49x）仅 64K 条（0.16%），非英语无贡献
+- 丢弃后所有 22 域都是有效域，无需处理 Other 类的同质性问题
+
+### 7.4 域权重参数讨论
+
+**问题**：大域主导（9 个域占 80.2%），搜索本质上只在这 9 域间做 ±2-3% 微调
+
+**方案**：引入显式域权重参数 `domain_weight[m]`，让搜索直接控制域比例
+
+**用户决策**：先不引入，用当前 22 域方案实验验证 L2 同质性改善是否足够
+- 理由：增加参数会扩大搜索空间，需要更多实验
+- 优先级：先验证 L2 映射本身的价值
+
+---
+
+## 8. 风险与注意事项
+
+### 8.1 微域冗余问题
+
+7 个微域（<1%）占 2.7%，但增加 63 个无效搜索参数（29%）：
+- Physics (0.4%), English (0.4%), Mathematics (0.3%)
+- History (0.8%), Books (1.3%), News (1.2%), Philosophy (1.0%)
+
+**当前策略**：保留微域
+- 理由：Physics/Math/English 对科学推理和语言理解有独立贡献
+- 风险：搜索效率降低，但可接受
+
+**备选方案**（待实验验证后决定）：
+- 合并微域到相近的大域（如 Physics → Earth_and_Life_Sciences）
+- 引入域权重参数，让搜索自动调整
+
+### 8.2 FDC Code 解析
+
+- 部分文档的 FDC code 可能为空或格式异常
+- `level_2` 标签为空字符串时，FDC code 可能只有百位（如 `508`），需处理 3 位 code 的情况
+- 已实现：解析失败 → -1（丢弃），实测仅 39 条（0.0001%）
+
+### 8.3 实现方式
+
+**直接替换 L1**（用户选择方案 B）：
+- 不做双模式兼容（无 `--domain-level` 参数）
+- 预处理输出直接覆盖 L1 数据
+- `constants.py` 中 `DOMAIN_NAMES` 和 `FDC_PREFIX_TO_DOMAIN` 已是 L2 版本
+- `NUM_DOMAINS = 22`
+
+**兼容性处理**：
+- `report.py` 动态检测域数量（`_get_domain_short(num_domains)`）
+- 支持 L1 (10 域) 和 L2 (22 域) 的历史数据可视化
+
+---
+
+## 9. 后续步骤
+
+### 9.1 当前状态（2026-06-30）
+
+- [x] FDC 映射设计完成
+- [x] 映射代码实现（`constants.py`, `preprocess_essential_web_v1_sharded.py`）
+- [x] 500 shards 数据预处理完成
+- [x] L2 分布验证通过（22 域，无空类）
+- [ ] L2 proxy 实验（500 次）
+- [ ] 对比 L1 vs L2 的 R² 和方向准确率
+- [ ] 中训验证（L2 配比的 CORE metric）
+
+### 9.2 下一步
+
+**L2 proxy 实验**：
+1. 运行 500 次 proxy 实验（使用 22 域预处理数据）
+2. 训练 21 个 per-task LightGBM 模型
+3. 对比 R² 和方向准确率是否提升
+4. 重点关注：winogrande, piqa, commonsense_qa 等高 R² 但方向错的任务
+
+**中训验证**：
+1. 使用 L2 proxy 搜索结果生成训练数据
+2. 运行中训实验（842M tokens，与 r2_sigma_weighted 同配置）
+3. 对比 CORE metric（目标：>0.2746）
+
+**可选优化**（待实验验证后决定）：
+- 引入域权重参数（如果 L2 同质性改善不足）
+- 合并微域（如果搜索效率严重下降）
+- 放宽 ω 约束（从 [0, 0.1] 扩到 [0, 0.3]）
