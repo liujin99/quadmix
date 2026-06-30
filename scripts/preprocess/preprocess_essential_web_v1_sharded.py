@@ -120,7 +120,7 @@ def process_shard(shard_path: str, shard_idx: int, output_dir: str) -> dict:
         "file": out_name,
         "path": out_path,
         "num_docs": n,
-        "valid_domains": int(valid_domains),
+        "num_discarded": n_discarded,
         "elapsed_seconds": elapsed,
     }
 
@@ -214,13 +214,12 @@ def main():
                 df = pd.read_parquet(out_path, columns=["domain"])
                 skipped += 1
                 n = len(df)
-                valid_domains = (df["domain"] >= 0).sum()
                 shard_index.append({
                     "shard_idx": shard_idx,
                     "file": out_name,
                     "path": out_path,
                     "num_docs": n,
-                    "valid_domains": int(valid_domains),
+                    "num_discarded": 0,
                     "elapsed_seconds": 0.0,
                 })
                 continue
@@ -280,11 +279,11 @@ def main():
     # Save shard index
     index_path = os.path.join(args.output_dir, "shard_index.json")
     total_docs = sum(s["num_docs"] for s in shard_index)
-    total_valid = sum(s["valid_domains"] for s in shard_index)
+    total_discarded = sum(s["num_discarded"] for s in shard_index)
     index_data = {
         "num_shards": len(shard_index),
         "total_docs": total_docs,
-        "total_valid_domains": total_valid,
+        "total_discarded": total_discarded,
         "shards": shard_index,
     }
     with open(index_path, "w") as f:
