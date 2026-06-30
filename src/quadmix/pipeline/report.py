@@ -17,13 +17,26 @@ import matplotlib.pyplot as plt
 
 from quadmix.core.types import ParameterSet
 
-DOMAIN_SHORT = [
+DOMAIN_SHORT_L1 = [
+    "Industrial", "Social", "Science", "Religion", "Philology",
+    "Literature", "History", "General", "Philosophy", "Arts",
+]
+
+DOMAIN_SHORT_L2 = [
     "Computers", "News", "Philosophy", "Religion", "Law",
     "Economics", "Education", "People", "English", "OtherLang",
     "Math", "Physics", "EarthLife", "Medicine", "Business",
     "Engineering", "Agriculture", "Arts", "Sports", "Books",
     "History", "Geography", "Other",
 ]
+
+def _get_domain_short(num_domains):
+    if num_domains == 10:
+        return DOMAIN_SHORT_L1
+    elif num_domains == 23:
+        return DOMAIN_SHORT_L2
+    else:
+        return [f"D{i}" for i in range(num_domains)]
 
 QUALITY_NAMES = ["DCLM", "FineWeb-Edu", "English", "Math (Gen)", "Math (OpenWeb)"]
 QUALITY_SHORT = ["DCLM", "Edu", "Eng", "MathG", "MathO"]
@@ -56,8 +69,9 @@ def _save_fig(fig, output_dir, filename):
 
 # ── Figure 1 ──
 
-def _make_fig1(orig_dist, opt_dist, output_dir):
+def _make_fig1(orig_dist, opt_dist, output_dir, num_domains=23):
     _setup_style()
+    domain_short = _get_domain_short(num_domains)
     fig, ax = plt.subplots(figsize=(8, 4.5))
     m = len(orig_dist)
     x = np.arange(m)
@@ -70,7 +84,7 @@ def _make_fig1(orig_dist, opt_dist, output_dir):
     ax.set_ylabel("Percentage (%)")
     ax.set_title("Domain Distribution: Original vs Optimal Sampling")
     ax.set_xticks(x)
-    ax.set_xticklabels(DOMAIN_SHORT, rotation=30, ha="right", fontsize=9)
+    ax.set_xticklabels(domain_short, rotation=30, ha="right", fontsize=9)
     ax.legend(fontsize=9)
     ax.grid(axis="y", alpha=0.3, linestyle="--")
     ax.set_axisbelow(True)
@@ -88,11 +102,12 @@ def _make_fig1(orig_dist, opt_dist, output_dir):
 
 def _make_fig2(domain_weights, num_domains, num_criteria, output_dir):
     _setup_style()
+    domain_short = _get_domain_short(num_domains)
     data = np.zeros((num_domains, num_criteria))
     for m in range(num_domains):
         start = m * num_criteria
         data[m] = domain_weights[start:start + num_criteria]
-    labels = DOMAIN_SHORT
+    labels = domain_short
 
     fig, ax = plt.subplots(figsize=(9, 4.5))
     x = np.arange(len(labels))
@@ -145,6 +160,7 @@ def _experiment_table(exp_outputs_dir, data_path, num_domains=23, top_k=50,
         return "*(no experiment data)*"
 
     rows = []
+    domain_short = _get_domain_short(num_domains)
     for exp_dir_name in exp_dirs[:top_k]:
         exp_dir = os.path.join(exp_outputs_dir, exp_dir_name)
         meta_path = os.path.join(exp_dir, "meta.json")
@@ -158,7 +174,7 @@ def _experiment_table(exp_outputs_dir, data_path, num_domains=23, top_k=50,
         dist /= max(1, dist.sum())
         top5 = sorted(range(num_domains), key=lambda m: dist[m], reverse=True)[:5]
         top5_cells = " ".join(
-            f"**{DOMAIN_SHORT[m]}** {dist[m]*100:.0f}%"
+            f"**{domain_short[m]}** {dist[m]*100:.0f}%"
             for m in top5 if dist[m] > 0.01
         )
         val_loss = "?"
@@ -212,7 +228,7 @@ def generate_report(
     domain_w = optimal_params.merge_config.domain_weights
 
     # Save figures
-    fig1_file = _make_fig1(orig_dist, opt_dist, output_dir)
+    fig1_file = _make_fig1(orig_dist, opt_dist, output_dir, num_domains)
     fig2_file = _make_fig2(domain_w, num_domains, num_criteria, output_dir)
 
     sel_tokens = token_counts[optimal_selected_indices].sum()
