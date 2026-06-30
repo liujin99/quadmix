@@ -18,8 +18,11 @@ import matplotlib.pyplot as plt
 from quadmix.core.types import ParameterSet
 
 DOMAIN_SHORT = [
-    "Industrial", "Social", "Science", "Religion", "Philology",
-    "Literature", "History", "General", "Philosophy", "Arts",
+    "Computers", "News", "Philosophy", "Religion", "Law",
+    "Economics", "Education", "People", "English", "OtherLang",
+    "Math", "Physics", "EarthLife", "Medicine", "Business",
+    "Engineering", "Agriculture", "Arts", "Sports", "Books",
+    "History", "Geography", "Other",
 ]
 
 QUALITY_NAMES = ["DCLM", "FineWeb-Edu", "English", "Math (Gen)", "Math (OpenWeb)"]
@@ -123,7 +126,7 @@ def _make_fig2(domain_weights, num_domains, num_criteria, output_dir):
 
 # ── Table ──
 
-def _experiment_table(exp_outputs_dir, data_path, num_domains=10, top_k=50,
+def _experiment_table(exp_outputs_dir, data_path, num_domains=23, top_k=50,
                        domain_labels_override=None):
     """Generate experiment table. If domain_labels_override is provided, use it
     instead of loading from data_path (supports sharded mode)."""
@@ -194,7 +197,7 @@ def _experiment_table(exp_outputs_dir, data_path, num_domains=10, top_k=50,
 
 def generate_report(
     output_dir, data_path, optimal_params, optimal_selected_indices,
-    domain_labels, token_counts, num_domains=10, num_criteria=5,
+    domain_labels, token_counts, num_domains=23, num_criteria=5,
     config=None, metrics=None, elapsed=None,
     use_sharded=False, reliability=None, proxy_loss_stats=None,
     per_task_analysis=None,
