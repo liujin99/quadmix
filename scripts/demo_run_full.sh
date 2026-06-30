@@ -59,7 +59,7 @@ ensure_val_data "liujin99/quadmix-core-bmk-v6" "core_bmk_21tasks_v6_tokenized.pt
 # 500 shards ≈ 39.5B tokens / 123 GB
 # 如果通过环境变量 $NUM_SHARDS 控制下载量：
 NUM_SHARDS="${NUM_SHARDS:-500}"
-NUM_EXPERIMENTS="${NUM_EXPERIMENTS:-200}"
+NUM_EXPERIMENTS="${NUM_EXPERIMENTS:-500}"
 TOKEN_ESTIMATE=$(( NUM_SHARDS * 79000000 ))
 TOKEN_ESTIMATE_B=$(echo "scale=1; $TOKEN_ESTIMATE / 1000000000" | bc 2>/dev/null || echo "~$(( TOKEN_ESTIMATE / 1000000000 ))")
 echo "  [配置] 将使用 ~$NUM_SHARDS shards（~$TOKEN_ESTIMATE_B B tokens）"
