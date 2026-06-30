@@ -147,8 +147,8 @@ def main():
                    help="Limit number of shards to process (for testing)")
     p.add_argument("--force", action="store_true",
                    help="Force reprocess even if output already exists")
-    p.add_argument("--workers", type=int, default=64,
-                   help="Number of parallel workers (default: 32)")
+    p.add_argument("--workers", type=int, default=128,
+                   help="Number of parallel workers (default: 128)")
     args = p.parse_args()
 
     # --force: clean output dir first to avoid stale/corrupted files
