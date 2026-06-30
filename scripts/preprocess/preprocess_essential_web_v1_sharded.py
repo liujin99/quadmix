@@ -294,7 +294,7 @@ def main():
     print(f"  Preprocessing complete!")
     print(f"  Shards:     {len(shard_index)}")
     print(f"  Total docs: {total_docs:,}")
-    print(f"  Valid dom:  {total_valid:,} ({total_valid/total_docs*100:.1f}%)")
+    print(f"  Discarded:  {total_discarded:,} ({total_discarded/total_docs*100:.1f}%)")
     print(f"  Index:      {index_path}")
     print(f"  Duration:   {elapsed:.1f}s")
     print(f"  Output:     {args.output_dir}/")
