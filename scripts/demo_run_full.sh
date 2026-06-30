@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────────
-# Demo: QuaDMix Full — 中等规模验证，适合 NPU 集群
+# Demo: QuaDMix Full — 大规模验证，适合 NPU 集群
 # ──────────────────────────────────────────────────────────────
-# 目标：20 shards (~1.6B tokens)，50 实验，5000 步
+# 目标：500 shards (~39.5B tokens)，200 实验，5000 步
+# 基于 FDC L2 标签（23 域），使用 v6 验证集
 # 数据不存在则自动下载 + 预处理
 #
 # 需要 GPU/NPU（CPU 不可行）
@@ -14,7 +15,7 @@
 #   bash scripts/demo_run_full.sh --device-type npu --npu-devices 8
 #
 # 自定义规模：
-#   NUM_SHARDS=200 bash scripts/demo_run_full.sh
+#   NUM_SHARDS=100 bash scripts/demo_run_full.sh
 #   NUM_EXPERIMENTS=100 bash scripts/demo_run_full.sh
 #
 # 最终输出数据集大小（target_tokens，单位 B）：
@@ -55,13 +56,14 @@ ensure_val_data "liujin99/quadmix-core-bmk-v6" "core_bmk_21tasks_v6_tokenized.pt
 # ── 下载规模控制 ──────────────────────────────────
 # 每 shard ≈ 79M tokens (char//4) / 246 MB 原始 parquet
 # 完整 3291 shards ≈ 260B tokens / 791 GB
+# 500 shards ≈ 39.5B tokens / 123 GB
 # 如果通过环境变量 $NUM_SHARDS 控制下载量：
-NUM_SHARDS="${NUM_SHARDS:-200}"
+NUM_SHARDS="${NUM_SHARDS:-500}"
 NUM_EXPERIMENTS="${NUM_EXPERIMENTS:-200}"
 TOKEN_ESTIMATE=$(( NUM_SHARDS * 79000000 ))
 TOKEN_ESTIMATE_B=$(echo "scale=1; $TOKEN_ESTIMATE / 1000000000" | bc 2>/dev/null || echo "~$(( TOKEN_ESTIMATE / 1000000000 ))")
 echo "  [配置] 将使用 ~$NUM_SHARDS shards（~$TOKEN_ESTIMATE_B B tokens）"
-echo "  [提示] 设 NUM_SHARDS=3291 用满全部数据，NUM_SHARDS=2 快速测试"
+echo "  [提示] 设 NUM_SHARDS=3291 用满全部数据，NUM_SHARDS=20 快速测试"
 
 # ── 数据就绪检查（逐个 shard 检查，补充下载）──────────────────
 NEED_DOWNLOAD=0
@@ -175,8 +177,9 @@ fi
 OUTPUT_DIR="${OUTPUT_DIR:-$QUADMIX_DIR/result/demo_full_$(date +%Y%m%d_%H%M%S)}"
 
 echo "═══════════════════════════════════════════"
-echo "  QuaDMix Demo — Full (中等规模)"
+echo "  QuaDMix Demo — Full (大规模, FDC L2)"
 echo "  $NUM_SHARDS shards, $NUM_EXPERIMENTS 实验, 5000 步"
+echo "  23 域 (FDC L2), v6 验证集"
 echo "═══════════════════════════════════════════"
 cat << PARAMS
 
@@ -214,7 +217,7 @@ else
     echo "  ⚠ 当前为 CPU 模式，预计耗时 >4 小时！"
     echo "     建议: CUDA_VISIBLE_DEVICES=0 bash scripts/demo_run_full.sh"
     echo ""
-    echo "     CPU 试跑: bash scripts/demo_run_cpu.sh  # 快速验证流程"
+    echo "     快速测试: bash scripts/demo_run_quick.sh  # 小规模验证流程"
     echo ""
 fi
 
