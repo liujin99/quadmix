@@ -116,12 +116,12 @@ def process_shard(shard_path: str, shard_idx: int, output_dir: str) -> dict:
           f" ({n_discarded} discarded), {elapsed:.1f}s")
 
     return {
-        "shard_idx": shard_idx,
+        "shard_idx": int(shard_idx),
         "file": out_name,
         "path": out_path,
-        "num_docs": n,
-        "num_discarded": n_discarded,
-        "elapsed_seconds": elapsed,
+        "num_docs": int(n),
+        "num_discarded": int(n_discarded),
+        "elapsed_seconds": float(elapsed),
     }
 
 
@@ -215,10 +215,10 @@ def main():
                 skipped += 1
                 n = len(df)
                 shard_index.append({
-                    "shard_idx": shard_idx,
+                    "shard_idx": int(shard_idx),
                     "file": out_name,
                     "path": out_path,
-                    "num_docs": n,
+                    "num_docs": int(n),
                     "num_discarded": 0,
                     "elapsed_seconds": 0.0,
                 })
