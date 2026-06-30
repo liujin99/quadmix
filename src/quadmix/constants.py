@@ -30,7 +30,6 @@ DOMAIN_NAMES = [
     "Books_and_Literature",
     "History",
     "Geography_and_Travel",
-    "Other",
     "Home_Economics",
 ]
 
@@ -63,17 +62,17 @@ FDC_PREFIX_TO_DOMAIN = {
     "90": 20, "93": 20, "94": 20, "95": 20, "96": 20,
     "97": 20, "98": 20, "99": 20,
     "91": 21,
-    "64": 23,
+    "64": 22,
 }
 
-NUM_DOMAINS = 24
+NUM_DOMAINS = 23
 
 DOMAIN_SHORT_NAMES = [
     "Computers", "News", "Philosophy", "Religion", "Law",
     "Economics", "Education", "People", "English", "OtherLang",
     "Math", "Physics", "EarthLife", "Medicine", "Business",
     "Engineering", "Agriculture", "Arts", "Sports", "Books",
-    "History", "Geography", "Other", "HomeEcon",
+    "History", "Geography", "HomeEcon",
 ]
 
 QUALITY_NAMES = ["dclm", "fineweb_edu", "english", "math_general", "math_openweb"]

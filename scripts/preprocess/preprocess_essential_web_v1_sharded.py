@@ -25,28 +25,28 @@ _QUADMIX_DIR = PROJECT_DIR
 
 
 def extract_domain_level_2(eai_taxonomy):
-    """Extract FDC code prefix and map to 24 L2 domains.
+    """Extract FDC code prefix and map to 23 L2 domains.
 
-    Returns domain ID (0-23), where 22=Other, 23=Home_Economics.
+    Returns domain ID (0-22) or -1 to discard (unmapped/invalid FDC code).
     """
     if isinstance(eai_taxonomy, str):
         try:
             eai_taxonomy = json.loads(eai_taxonomy)
         except (json.JSONDecodeError, ValueError):
-            return 22
+            return -1
     if not isinstance(eai_taxonomy, dict):
-        return 22
+        return -1
     fdc = eai_taxonomy.get("free_decimal_correspondence", {})
     if not isinstance(fdc, dict):
-        return 22
+        return -1
     primary = fdc.get("primary", {})
     if not isinstance(primary, dict):
-        return 22
+        return -1
     code = primary.get("code", "")
     if not isinstance(code, str) or len(code) < 2:
-        return 22
+        return -1
     prefix = code[:2]
-    return FDC_PREFIX_TO_DOMAIN.get(prefix, 22)
+    return FDC_PREFIX_TO_DOMAIN.get(prefix, -1)
 
 
 def extract_quality_signals(quality_signals):
@@ -84,7 +84,14 @@ def process_shard(shard_path: str, shard_idx: int, output_dir: str) -> dict:
     quality = df["quality_signals"].apply(extract_quality_signals)
     quality_matrix = np.stack(quality.to_numpy())
 
-    # Build output
+    valid_mask = domains.values >= 0
+    n_discarded = n - valid_mask.sum()
+    if n_discarded > 0:
+        df = df[valid_mask]
+        domains = domains[valid_mask]
+        quality_matrix = quality_matrix[valid_mask]
+        n = len(df)
+
     output = pd.DataFrame({
         "text": df["text"],
         "doc_char_count": df["text"].str.len().to_numpy(dtype=np.int64),
@@ -103,10 +110,9 @@ def process_shard(shard_path: str, shard_idx: int, output_dir: str) -> dict:
     out_path = os.path.join(output_dir, out_name)
     output.to_parquet(out_path, index=False, row_group_size=1000)
 
-    valid_domains = (domains >= 0).sum()
     elapsed = time.time() - t0
-    print(f"  [{shard_idx:05d}] {out_name}: {n:,} docs, "
-          f"{valid_domains}/{n} valid domains, {elapsed:.1f}s")
+    print(f"  [{shard_idx:05d}] {out_name}: {n:,} docs"
+          f" ({n_discarded} discarded), {elapsed:.1f}s")
 
     return {
         "shard_idx": shard_idx,

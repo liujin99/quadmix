@@ -1,4 +1,4 @@
-# FDC Domain Mapping 设计：从 100 类到 24 类
+# FDC Domain Mapping 设计：从 100 类到 23 类
 
 > 2026-06-29 | 基于 Essential-Web v1.0 FDC 分类体系的领域映射方案
 
@@ -38,7 +38,7 @@ L2 标签存在于 `eai_taxonomy.free_decimal_correspondence.primary.labels.leve
 
 ### 1.3 目标
 
-将 ~100 个 FDC L2 映射到 **~24 个领域**，对齐业界经验证的分类粒度。
+将 ~100 个 FDC L2 映射到 **~23 个领域**，对齐业界经验证的分类粒度。
 
 **设计动机**（2026-06-29 更新）：L2 映射的核心价值不是改变域比例，而是**提高域内同质性**。当前 FDC L1 的 10 域太粗（如 Industrial 41% 内部混杂工程、医学、商业），DCLM 质量分在异质域内区分度低。拆分后每个 L2 子域更同质，质量筛选更精准。
 
@@ -157,10 +157,11 @@ L2 标签存在于 `eai_taxonomy.free_decimal_correspondence.primary.labels.leve
 | 19 | **Books_and_Literature** | 8xx | 10 | Books_and_Literature | C13(部分) |
 | 20 | **History** | 90x, 93x-99x | 8 | People_and_Society(部分) | C14, C19 |
 | 21 | **Geography_and_Travel** | 91x | 1 | Travel_and_Transportation | C14(部分) |
-| 22 | **Other** | L2 缺失 / L1 为空 / 解析失败 | — | — | — |
-| 23 | **Home_Economics** | 64x | 1 | Home_and_Garden(部分) | — |
+| 22 | **Home_Economics** | 64x | 1 | Home_and_Garden(部分) | — |
 
-**总计：24 类**（23 个有效领域 + 1 个 Other）
+**总计：23 类**（全部有效领域，无 Other 类）
+
+> **决策**：原 Other 类（FDC code=-1，8,462 docs，0.02%）数据质量差（avg tok/doc=14,447），直接丢弃。
 
 ### 3.3 关键决策说明
 
@@ -174,7 +175,7 @@ L2 标签存在于 `eai_taxonomy.free_decimal_correspondence.primary.labels.leve
 | Arts 合 9 个 L2 (ID 17) | 对齐 NVIDIA 的 Arts_and_Entertainment，web 上艺术类同质性高 |
 | English vs Other Languages 分离 (8, 9) | Web 数据以英语为主，非英语语言对 multilingual 能力有独立贡献 |
 | History 从 Geography 分离 (20, 21) | 对齐 NVIDIA 的 Travel_and_Transportation 独立 |
-| **Unclassified/Unknown/Other 合并为单一 Other (ID 22)** | 三类本质都是"无法精确分类"，分开会增加无效维度。实测 L2 缺失 86.3% 来自 General works，Other 内部同质性尚可。不做 L1 fallback，避免硬塞引入噪声 |
+| **Other 类直接丢弃** | FDC code=-1 的文档仅 8,462 条（0.02%），且 avg tok/doc=14,447（异常高），数据质量差。直接丢弃而非归入 Other 类，避免引入噪声和无效搜索维度 |
 | **Home_Economics 独立成域 (ID 23)** | 64x（家政学/消费者科学）占 11.6%，与 People_and_Society 内容风格差异大（食谱 vs 社会学）。独立成域提高同质性，使 DCLM 质量分更有区分度 |
 | **60x/66x-69x 归入 Engineering (ID 15)** | 化工、制造、建筑等工业技术与工程设计语义一致，合并后 Engineering 从 8.4% 升至 13.3%，可接受 |
 
@@ -270,8 +271,8 @@ FDC_PREFIX_TO_DOMAIN = {
     "97": 20, "98": 20, "99": 20,
     # 21: Geography_and_Travel
     "91": 21,
-    # 23: Home_Economics
-    "64": 23,
+    # 22: Home_Economics
+    "64": 22,
 }
 ```
 
@@ -280,10 +281,10 @@ FDC_PREFIX_TO_DOMAIN = {
 ```python
 def extract_domain_level_2(eai_taxonomy) -> int:
     """
-    从 eai_taxonomy 提取 FDC code 前缀，映射到 24 类 domain。
+    从 eai_taxonomy 提取 FDC code 前缀，映射到 23 类 domain。
 
     Returns:
-        int: domain ID (0-23), 其中 22=Other, 23=Home_Economics
+        int: domain ID (0-22), 其中 22=Home_Economics; -1 表示丢弃
     """
     # 1. 解析 eai_taxonomy
     # 2. 获取 primary FDC code
@@ -298,7 +299,7 @@ def extract_domain_level_2(eai_taxonomy) -> int:
 
 | 维度 | L1 (当前) | L2 映射 (本方案) |
 |------|-----------|-----------------|
-| 类别数 | 10 | 24 (23 有效 + 1 Other) |
+| 类别数 | 10 | 23 (全部有效) |
 | Science 粒度 | 合1 | 拆4 (Math/Phys/Bio/Med) |
 | Business 粒度 | 合1 | 拆3 (Mgmt/Eng/Agri) |
 | Social Sciences 粒度 | 合1 | 拆4 (Law/Econ/Edu/People) |
@@ -323,17 +324,17 @@ def extract_domain_level_2(eai_taxonomy) -> int:
 
 - 部分文档的 FDC code 可能为空或格式异常
 - `level_2` 标签为空字符串时，FDC code 可能只有百位（如 `508`），需处理 3 位 code 的情况
-- 所有无法精确映射到 L2 的文档统一归入 **Other (ID 22)**，不做 L1 fallback
-  - L2 缺失但 L1 存在 → Other
-  - L1 也为空 → Other
-  - 解析失败 → Other
-  - **理由**：硬塞进某个 L2 类会引入噪声，Other 类内部以 General works 为主（实测 86.3%），同质性尚可
+- 所有无法精确映射到 L2 的文档直接**丢弃**（domain=-1）
+  - L2 缺失但 L1 存在 → 丢弃
+  - L1 也为空 → 丢弃
+  - 解析失败 → 丢弃
+  - **理由**：实测仅 8,462 条（0.02%），且数据质量差（avg tok/doc=14,447）。硬塞进某个 L2 类会引入噪声，保留 Other 类会增加无效搜索维度
 
 ### 6.3 向后兼容
 
 - 新方案与现有 L1 方案并存，通过 `--domain-level` 参数切换
 - 现有 `DOMAIN_MAP` 和 `DOMAIN_NAMES` 保留，新增 `FDC_PREFIX_TO_DOMAIN_L2` 和 `DOMAIN_NAMES_L2`
-- `QuaDMixConfig.num_domains` 根据选择的 level 自动适配（10 或 24）
+- `QuaDMixConfig.num_domains` 根据选择的 level 自动适配（10 或 23）
 
 ---
 
@@ -342,5 +343,5 @@ def extract_domain_level_2(eai_taxonomy) -> int:
 1. **扫描 Essential-Web 数据**：统计各 FDC 前缀的实际文档数和 token 数，确认 22 个有效类无空类
 2. **实现映射代码**：在 `constants.py` 新增 `FDC_PREFIX_TO_DOMAIN_L2`、`DOMAIN_NAMES_L2`，在 `preprocess_essential_web_v1_sharded.py` 新增 `extract_domain_level_2`
 3. **验证映射正确性**：抽样检查映射结果，确认 Other 类占比和组成
-4. **重新运行 proxy 实验**：使用 24 类 domain 配置，对比 R² 和方向准确率
-5. **对比中训效果**：L1-10 vs L2-24 的 CORE metric 对比
+4. **重新运行 proxy 实验**：使用 23 类 domain 配置，对比 R² 和方向准确率
+5. **对比中训效果**：L1-10 vs L2-23 的 CORE metric 对比
