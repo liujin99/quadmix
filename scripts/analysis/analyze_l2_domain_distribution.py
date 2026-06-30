@@ -27,7 +27,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
-from quadmix.constants import DOMAIN_NAMES, NUM_DOMAINS
+from quadmix.constants import DOMAIN_NAMES, NUM_DOMAINS, FDC_PREFIX_TO_DOMAIN
 
 
 def _setup_style():
@@ -57,6 +57,47 @@ def _scan_shard(path: str) -> dict:
     return {"counts": counts.tolist(), "char_sums": char_sums.tolist(), "total_docs": len(df)}
 
 
+def _scan_raw_for_other(path: str) -> dict:
+    try:
+        df = pd.read_parquet(path, columns=["eai_taxonomy"])
+    except Exception as e:
+        return {"error": str(e), "path": path}
+    prefix_counter = {}
+    no_code = 0
+    parse_error = 0
+    total = len(df)
+    for raw in df["eai_taxonomy"]:
+        try:
+            t = json.loads(raw) if isinstance(raw, str) else raw
+            if not isinstance(t, dict):
+                parse_error += 1
+                continue
+            fdc = t.get("free_decimal_correspondence", {})
+            if not isinstance(fdc, dict):
+                parse_error += 1
+                continue
+            primary = fdc.get("primary", {})
+            if not isinstance(primary, dict):
+                parse_error += 1
+                continue
+            code = primary.get("code", "")
+            if not isinstance(code, str) or len(code) < 2:
+                no_code += 1
+                continue
+            prefix = code[:2]
+            domain_id = FDC_PREFIX_TO_DOMAIN.get(prefix, 22)
+            if domain_id == 22:
+                prefix_counter[prefix] = prefix_counter.get(prefix, 0) + 1
+        except (json.JSONDecodeError, ValueError):
+            parse_error += 1
+    return {
+        "prefix_counter": prefix_counter,
+        "no_code": no_code,
+        "parse_error": parse_error,
+        "total": total,
+    }
+
+
 def main():
     p = argparse.ArgumentParser(description="Analyze L2 domain distribution from preprocessed shards")
     p.add_argument("--preprocessed-dir",
@@ -64,6 +105,8 @@ def main():
                    help="Directory containing preprocessed parquet shards")
     p.add_argument("--output-dir", default=None,
                    help="Output directory (default: same as preprocessed-dir/l2_analysis)")
+    p.add_argument("--raw-dir", default=None,
+                   help="Raw Essential-Web parquet dir (for Other prefix analysis)")
     p.add_argument("--workers", type=int, default=32)
     args = p.parse_args()
 
@@ -201,6 +244,67 @@ def main():
     with open(report_path, "w") as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
     print(f"  [Report] Saved: {report_path}")
+
+    if args.raw_dir:
+        raw_paths = sorted(glob.glob(os.path.join(args.raw_dir, "*.parquet")))
+        if raw_paths:
+            print(f"\n{'=' * 90}")
+            print(f"  Other Class (ID=22) FDC Prefix Analysis")
+            print(f"  Scanning {len(raw_paths)} raw shards from {args.raw_dir}")
+            print(f"{'=' * 90}")
+            t1 = time.time()
+            other_prefix = Counter()
+            other_no_code = 0
+            other_parse_error = 0
+            other_total = 0
+            workers_raw = min(args.workers, len(raw_paths))
+            if len(raw_paths) > 1:
+                with ProcessPoolExecutor(max_workers=workers_raw) as executor:
+                    futures = {executor.submit(_scan_raw_for_other, p): p for p in raw_paths}
+                    done = 0
+                    for future in as_completed(futures):
+                        r = future.result()
+                        done += 1
+                        if "error" in r:
+                            continue
+                        for k, v in r["prefix_counter"].items():
+                            other_prefix[k] += v
+                        other_no_code += r["no_code"]
+                        other_parse_error += r["parse_error"]
+                        other_total += r["total"]
+                        if done % 50 == 0 or done == len(raw_paths):
+                            print(f"  [{done}/{len(raw_paths)}] raw shards scanned...")
+            else:
+                r = _scan_raw_for_other(raw_paths[0])
+                if "error" not in r:
+                    for k, v in r["prefix_counter"].items():
+                        other_prefix[k] += v
+                    other_no_code = r["no_code"]
+                    other_parse_error = r["parse_error"]
+                    other_total = r["total"]
+            elapsed_raw = time.time() - t1
+            print(f"  Done in {elapsed_raw:.1f}s")
+            other_docs = sum(other_prefix.values()) + other_no_code + other_parse_error
+            print(f"\n  Total Other docs: {other_docs:,} ({other_docs/max(other_total,1)*100:.2f}% of {other_total:,})")
+            print(f"  No/invalid code: {other_no_code:,} ({other_no_code/max(other_docs,1)*100:.1f}%)")
+            print(f"  Parse errors:    {other_parse_error:,} ({other_parse_error/max(other_docs,1)*100:.1f}%)")
+            print(f"  Unmapped prefixes: {sum(other_prefix.values()):,} ({sum(other_prefix.values())/max(other_docs,1)*100:.1f}%)")
+            print(f"\n  Top 30 unmapped FDC prefixes:")
+            print(f"  {'Prefix':>6}  {'Docs':>12}  {'% of Other':>10}  {'% of Total':>10}")
+            print(f"  {'─'*6}  {'─'*12}  {'─'*10}  {'─'*10}")
+            for prefix, cnt in other_prefix.most_common(30):
+                print(f"  {prefix:>6}  {cnt:>12,}  {cnt/max(other_docs,1)*100:>9.1f}%  {cnt/max(other_total,1)*100:>9.2f}%")
+            report["other_analysis"] = {
+                "total_other": other_docs,
+                "no_code": other_no_code,
+                "parse_error": other_parse_error,
+                "unmapped_prefixes": dict(other_prefix.most_common()),
+            }
+            with open(report_path, "w") as f:
+                json.dump(report, f, indent=2, ensure_ascii=False)
+            print(f"\n  [Report] Updated: {report_path}")
+        else:
+            print(f"\n  Warning: --raw-dir specified but no parquet files found in {args.raw_dir}")
 
     print(f"\n{'=' * 90}")
     print(f"  All outputs saved to: {args.output_dir}")
