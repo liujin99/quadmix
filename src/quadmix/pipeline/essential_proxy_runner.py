@@ -1146,13 +1146,6 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         print(f"  [Exp {experiment_id:04d}] Done. train_loss={avg_train:.4f}, "
               f"val_loss={val_loss:.4f} (ppl={np.exp(val_loss):.1f})")
-        if per_task_losses:
-            task_vals = sorted(per_task_losses.items(), key=lambda x: -x[1])
-            loss_values = [v for _, v in task_vals]
-            print(f"    Per-task loss: mean={np.mean(loss_values):.4f}, std={np.std(loss_values):.4f}, "
-                  f"min={np.min(loss_values):.4f}, max={np.max(loss_values):.4f}")
-            for task, loss in task_vals:
-                print(f"      {task:<30} {loss:.4f}")
         with PerfTimer.section("free_npu", _timer_prefix):
             del model
             if device.type == "npu":
