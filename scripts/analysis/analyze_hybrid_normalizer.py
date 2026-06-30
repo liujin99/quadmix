@@ -26,9 +26,9 @@ import numpy as np
 import pandas as pd
 from scipy import stats as scipy_stats
 from scripts.preprocess.preprocess_essential_web_v1_sharded import (
-    extract_domain_level_1, extract_quality_signals,
+    extract_domain_level_2, extract_quality_signals,
 )
-from quadmix.constants import FASTTEXT_FIELDS, DOMAIN_MAP
+from quadmix.constants import FASTTEXT_FIELDS, NUM_DOMAINS
 from quadmix.utils.normalization import zscore_normalize, rank_normalize
 
 DATA_PATH = "/home/ma-user/work/QuaDMix/data/essential-web/train-00000-of-03291.parquet"
@@ -36,7 +36,7 @@ N_DOCS = 20000
 N_EXPERIMENTS = 100
 SAMPLE_SIZE = 5000
 N_CRITERIA = 5
-N_DOMAINS = 10
+N_DOMAINS = NUM_DOMAINS
 SEED = 42
 
 
@@ -67,7 +67,7 @@ def load_data():
     df = pd.read_parquet(DATA_PATH, columns=["eai_taxonomy", "quality_signals"])
     df = df.head(N_DOCS)
 
-    domain_labels = df["eai_taxonomy"].apply(extract_domain_level_1).to_numpy(dtype=np.int64)
+    domain_labels = df["eai_taxonomy"].apply(extract_domain_level_2).to_numpy(dtype=np.int64)
     quality_list = df["quality_signals"].apply(extract_quality_signals)
     quality_matrix = np.stack(quality_list.to_numpy()).astype(np.float64)
 

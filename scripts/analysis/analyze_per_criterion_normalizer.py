@@ -28,7 +28,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats as scipy_stats
 from scripts.preprocess.preprocess_essential_web_v1_sharded import (
-    extract_domain_level_1,
+    extract_domain_level_2,
 )
 from quadmix.constants import FASTTEXT_FIELDS
 

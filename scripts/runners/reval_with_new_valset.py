@@ -39,7 +39,7 @@ from quadmix.core.types import ParameterSet, ProxyResult
 from quadmix.data.metadata_manager import ShardMetadataManager
 from quadmix.pipeline.real_pipeline import QuaDMixPipeline
 from quadmix.constants import (
-    DOMAIN_NAMES, QUALITY_NAMES, PROJECT_DIR, DEFAULT_TEMP_DIR,
+    DOMAIN_NAMES, QUALITY_NAMES, NUM_DOMAINS, PROJECT_DIR, DEFAULT_TEMP_DIR,
     DEFAULT_VAL_DIR, HF_ENDPOINT, HF_RESOLVE,
     HF_OPENHERMES_DATASET, HF_OPENHERMES_FILENAME,
     HF_CORE_DATASET, HF_CORE_FILENAME,
@@ -249,7 +249,7 @@ def main():
               f"{len(pending_experiments)} pending")
 
     config = QuaDMixConfig(
-        num_domains=10, num_quality_criteria=5,
+        num_domains=NUM_DOMAINS, num_quality_criteria=5,
         num_proxy_experiments=len(experiments),
         num_search_points=args.num_search,
         top_k_average=args.top_k,

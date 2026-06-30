@@ -14,16 +14,16 @@ import numpy as np
 import pandas as pd
 
 from quadmix.utils.normalization import zscore_normalize, rank_normalize
-from quadmix.constants import FASTTEXT_FIELDS, DOMAIN_MAP, QUALITY_COLUMNS
+from quadmix.constants import FASTTEXT_FIELDS, NUM_DOMAINS, QUALITY_COLUMNS
 from scripts.preprocess.preprocess_essential_web_v1_sharded import (
-    extract_domain_level_1, extract_quality_signals,
+    extract_domain_level_2, extract_quality_signals,
 )
 
 N_DOCS = 20000
 N_EXPERIMENTS = 50
 SAMPLE_SIZE = 5000
 N_CRITERIA = 5
-N_DOMAINS = 10
+N_DOMAINS = NUM_DOMAINS
 SEED = 42
 
 
@@ -32,7 +32,7 @@ def load_data(path, n_docs):
     n = min(n_docs, len(df))
     df = df.head(n)
 
-    domain_labels = df["eai_taxonomy"].apply(extract_domain_level_1).to_numpy(dtype=np.int64)
+    domain_labels = df["eai_taxonomy"].apply(extract_domain_level_2).to_numpy(dtype=np.int64)
     quality_list = df["quality_signals"].apply(extract_quality_signals)
     quality_matrix = np.stack(quality_list.to_numpy()).astype(np.float64)
 

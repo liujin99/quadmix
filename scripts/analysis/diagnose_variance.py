@@ -179,7 +179,7 @@ def main():
     print(f"  有效变化参数（CV >= 0.01）: {n_effective}/{n_params}")
 
     # 按参数类型分组
-    M = 10  # num_domains
+    M = 23  # num_domains
     N = 5   # num_quality_criteria
     alpha_stds = []
     for m in range(M):

@@ -720,7 +720,7 @@ def ensure_core_bmk_v6_data(val_path: str, eval_bundle: str) -> str:
     return val_path
 
 
-from quadmix.constants import DOMAIN_NAMES, QUALITY_NAMES, QUALITY_COLUMNS
+from quadmix.constants import DOMAIN_NAMES, QUALITY_NAMES, QUALITY_COLUMNS, NUM_DOMAINS
 
 
 def build_parser():
@@ -902,7 +902,7 @@ def main():
     print(f"════════════════════════════════════════════════════════")
 
     config = QuaDMixConfig(
-        num_domains=10, num_quality_criteria=5,
+        num_domains=NUM_DOMAINS, num_quality_criteria=5,
         num_proxy_experiments=n_exp, num_search_points=n_search,
         top_k_average=top_k,
         target_tokens=int(args.target_tokens * 1e9) if args.target_tokens > 0 else 0,

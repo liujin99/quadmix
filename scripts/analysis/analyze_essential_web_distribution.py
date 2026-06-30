@@ -30,22 +30,11 @@ try:
 except ImportError:
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'src'))
 
-from quadmix.constants import DOMAIN_MAP, DOMAIN_NAMES, FASTTEXT_FIELDS
+from quadmix.constants import FDC_PREFIX_TO_DOMAIN, DOMAIN_NAMES, FASTTEXT_FIELDS, NUM_DOMAINS
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-L1_SHORT = {
-    "Industrial arts, Technology, and Engineering": "Industrial",
-    "Social sciences": "Social Sci",
-    "Science and Natural history": "Science",
-    "Religion": "Religion",
-    "Philology; or, Language and languages": "Philology",
-    "Literature": "Literature",
-    "History and Geography": "History",
-    "General works, books and libraries, information sciences": "General",
-    "Philosophy and psychology": "Philosophy",
-    "Arts": "Arts",
-}
+L2_SHORT = {name: name.replace("_and_", " & ")[:12] for name in DOMAIN_NAMES}
 
 QUALITY_SHORT = ["DCLM", "Edu", "Eng", "MathG", "MathO"]
 QUALITY_COLORS = ["#4472C4", "#ED7D31", "#A5A5A5", "#FFC000", "#5B9BD5"]
@@ -288,7 +277,7 @@ def print_l1_l2_tree(l1_counter, l1_l2_pairs):
 def make_fig1_l1_distribution(l1_counter, total_valid, output_dir):
     _setup_style()
     items = l1_counter.most_common()
-    labels = [L1_SHORT.get(l1, l1[:20]) for l1, _ in items]
+    labels = [L2_SHORT.get(l1, l1[:20]) for l1, _ in items]
     counts = [c for _, c in items]
     pcts = [c / max(total_valid, 1) * 100 for c in counts]
 
@@ -378,7 +367,7 @@ def make_fig3_prefix_by_l1(prefix_counter, l1_counter, l1_l2_pairs, output_dir):
 
     for idx, l1_name in enumerate(l1_order[:10]):
         ax = axes[idx]
-        short = L1_SHORT.get(l1_name, l1_name[:15])
+        short = L2_SHORT.get(l1_name, l1_name[:15])
 
         prefixes_for_l1 = sorted(set(
             pfx for pfx in all_prefixes
@@ -412,7 +401,7 @@ def make_fig3_prefix_by_l1(prefix_counter, l1_counter, l1_l2_pairs, output_dir):
 def make_fig4_l2_coverage(l1_counter, l2_has_by_l1, l2_empty_by_l1, output_dir):
     _setup_style()
     items = l1_counter.most_common()
-    labels = [L1_SHORT.get(l1, l1[:15]) for l1, _ in items]
+    labels = [L2_SHORT.get(l1, l1[:15]) for l1, _ in items]
     has_l2 = [l2_has_by_l1.get(l1, 0) / max(cnt, 1) * 100 for l1, cnt in items]
     no_l2 = [l2_empty_by_l1.get(l1, 0) / max(cnt, 1) * 100 for l1, cnt in items]
 
@@ -501,7 +490,7 @@ def make_fig6_quality_by_domain(quality_by_l1_hists, l1_counter, output_dir):
     ax.set_xticks(range(n_q))
     ax.set_xticklabels(QUALITY_SHORT, fontsize=9)
     ax.set_yticks(range(n_l1))
-    ax.set_yticklabels([L1_SHORT.get(l1, l1[:20]) for l1 in l1_order], fontsize=9)
+    ax.set_yticklabels([L2_SHORT.get(l1, l1[:20]) for l1 in l1_order], fontsize=9)
     ax.set_title("Mean Quality Score by L1 Domain")
 
     for i in range(n_l1):
@@ -532,7 +521,7 @@ def make_fig7_l1_l2_heatmap(l1_counter, l1_l2_pairs, l2_counter, output_dir, top
     ax.set_xticklabels([l2[:25] + "..." if len(l2) > 25 else l2 for l2 in l2_top],
                        rotation=45, ha="right", fontsize=7)
     ax.set_yticks(range(len(l1_order)))
-    ax.set_yticklabels([L1_SHORT.get(l1, l1[:20]) for l1 in l1_order], fontsize=9)
+    ax.set_yticklabels([L2_SHORT.get(l1, l1[:20]) for l1 in l1_order], fontsize=9)
     ax.set_title(f"L1 x L2 Co-occurrence Heatmap (Top {top_l2} L2 labels)")
 
     max_val = matrix.max() if matrix.max() > 0 else 1

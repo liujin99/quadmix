@@ -18,33 +18,35 @@ try:
 except ImportError:
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'src'))
 
-from quadmix.constants import DOMAIN_MAP, FASTTEXT_FIELDS, QUALITY_COLUMNS, PROJECT_DIR
+from quadmix.constants import FDC_PREFIX_TO_DOMAIN, FASTTEXT_FIELDS, QUALITY_COLUMNS, PROJECT_DIR
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _QUADMIX_DIR = PROJECT_DIR
 
 
-def extract_domain_level_1(eai_taxonomy):
+def extract_domain_level_2(eai_taxonomy):
+    """Extract FDC code prefix and map to 23 L2 domains.
+
+    Returns domain ID (0-21) or 22 (Other) for unclassified/parse failures.
+    """
     if isinstance(eai_taxonomy, str):
         try:
             eai_taxonomy = json.loads(eai_taxonomy)
         except (json.JSONDecodeError, ValueError):
-            return -1
+            return 22
     if not isinstance(eai_taxonomy, dict):
-        return -1
+        return 22
     fdc = eai_taxonomy.get("free_decimal_correspondence", {})
     if not isinstance(fdc, dict):
-        return -1
+        return 22
     primary = fdc.get("primary", {})
     if not isinstance(primary, dict):
-        return -1
-    labels = primary.get("labels", {})
-    if not isinstance(labels, dict):
-        return -1
-    level_1 = labels.get("level_1")
-    if isinstance(level_1, str) and level_1 in DOMAIN_MAP:
-        return DOMAIN_MAP[level_1]
-    return -1
+        return 22
+    code = primary.get("code", "")
+    if not isinstance(code, str) or len(code) < 2:
+        return 22
+    prefix = code[:2]
+    return FDC_PREFIX_TO_DOMAIN.get(prefix, 22)
 
 
 def extract_quality_signals(quality_signals):
@@ -76,7 +78,7 @@ def process_shard(shard_path: str, shard_idx: int, output_dir: str) -> dict:
     n = len(df)
 
     # Extract domain labels
-    domains = df["eai_taxonomy"].apply(extract_domain_level_1)
+    domains = df["eai_taxonomy"].apply(extract_domain_level_2)
 
     # Extract quality signals
     quality = df["quality_signals"].apply(extract_quality_signals)

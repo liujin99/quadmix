@@ -39,7 +39,7 @@ from quadmix.core.quality_merger import compute_merged_quality_scores
 from quadmix.core.quality_rank import compute_quality_ranks
 from quadmix.core.sampler import compute_sampling_values
 from quadmix.pipeline.proxy_runner import BaseProxyRunner
-from quadmix.constants import DOMAIN_MAP, FASTTEXT_FIELDS
+from quadmix.constants import DOMAIN_NAMES, FASTTEXT_FIELDS
 from quadmix.utils.perf_timer import PerfTimer
 from quadmix.pipeline.loss_utils import chunked_loss_from_hidden, chunked_loss_per_token_from_hidden
 from quadmix.pipeline.shared_memory import SharedArrayInfo, ndarray_to_shared, shared_to_ndarray
@@ -1069,7 +1069,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         with PerfTimer.section("save_metadata", _timer_prefix):
             avg_train = (loss_accum / step_ct).item() if step_ct > 0 else 0
 
-            domain_names = list(DOMAIN_MAP.keys())
+            domain_names = DOMAIN_NAMES
             quality_names = FASTTEXT_FIELDS
             M = params.num_domains
             N = params.num_criteria

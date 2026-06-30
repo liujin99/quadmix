@@ -31,7 +31,7 @@ from quadmix import QuaDMixConfig
 from quadmix.core.types import ParameterSet, ProxyResult
 from quadmix.data.metadata_manager import ShardMetadataManager
 from quadmix.pipeline.real_pipeline import QuaDMixPipeline
-from quadmix.constants import DOMAIN_NAMES, QUALITY_NAMES
+from quadmix.constants import DOMAIN_NAMES, QUALITY_NAMES, NUM_DOMAINS
 
 
 def _build_domain_dist_change(domain_labels, selected_indices, num_domains):
@@ -188,7 +188,7 @@ def main():
     top_k = args.top_k
 
     config = QuaDMixConfig(
-        num_domains=10, num_quality_criteria=5,
+        num_domains=NUM_DOMAINS, num_quality_criteria=5,
         num_proxy_experiments=n_exp, num_search_points=n_search,
         top_k_average=top_k,
         target_tokens=int(args.target_tokens * 1e9) if args.target_tokens > 0 else 0,
