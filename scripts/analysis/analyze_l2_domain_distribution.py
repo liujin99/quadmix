@@ -1,7 +1,7 @@
 """
 Analyze L2 domain distribution from preprocessed parquet shards.
 
-Reads the 'domain' (int 0-22) and 'doc_char_count' columns from
+Reads the 'domain' (int 0-21) and 'doc_char_count' columns from
 preprocessed output, computes per-domain statistics, and produces
 a bar chart + JSON report.
 
@@ -85,8 +85,7 @@ def _scan_raw_for_other(path: str) -> dict:
                 no_code += 1
                 continue
             prefix = code[:2]
-            domain_id = FDC_PREFIX_TO_DOMAIN.get(prefix, 22)
-            if domain_id == 22:
+            if prefix not in FDC_PREFIX_TO_DOMAIN:
                 prefix_counter[prefix] = prefix_counter.get(prefix, 0) + 1
         except (json.JSONDecodeError, ValueError):
             parse_error += 1
@@ -249,7 +248,7 @@ def main():
         raw_paths = sorted(glob.glob(os.path.join(args.raw_dir, "*.parquet")))
         if raw_paths:
             print(f"\n{'=' * 90}")
-            print(f"  Other Class (ID=22) FDC Prefix Analysis")
+            print(f"  Discarded FDC Prefix Analysis")
             print(f"  Scanning {len(raw_paths)} raw shards from {args.raw_dir}")
             print(f"{'=' * 90}")
             t1 = time.time()
@@ -284,18 +283,18 @@ def main():
                     other_total = r["total"]
             elapsed_raw = time.time() - t1
             print(f"  Done in {elapsed_raw:.1f}s")
-            other_docs = sum(other_prefix.values()) + other_no_code + other_parse_error
-            print(f"\n  Total Other docs: {other_docs:,} ({other_docs/max(other_total,1)*100:.2f}% of {other_total:,})")
-            print(f"  No/invalid code: {other_no_code:,} ({other_no_code/max(other_docs,1)*100:.1f}%)")
-            print(f"  Parse errors:    {other_parse_error:,} ({other_parse_error/max(other_docs,1)*100:.1f}%)")
-            print(f"  Unmapped prefixes: {sum(other_prefix.values()):,} ({sum(other_prefix.values())/max(other_docs,1)*100:.1f}%)")
-            print(f"\n  Top 30 unmapped FDC prefixes:")
-            print(f"  {'Prefix':>6}  {'Docs':>12}  {'% of Other':>10}  {'% of Total':>10}")
-            print(f"  {'─'*6}  {'─'*12}  {'─'*10}  {'─'*10}")
+            discarded_docs = sum(other_prefix.values()) + other_no_code + other_parse_error
+            print(f"\n  Total discarded docs: {discarded_docs:,} ({discarded_docs/max(other_total,1)*100:.2f}% of {other_total:,})")
+            print(f"  No/invalid code: {other_no_code:,} ({other_no_code/max(discarded_docs,1)*100:.1f}%)")
+            print(f"  Parse errors:    {other_parse_error:,} ({other_parse_error/max(discarded_docs,1)*100:.1f}%)")
+            print(f"  Unmapped prefixes: {sum(other_prefix.values()):,} ({sum(other_prefix.values())/max(discarded_docs,1)*100:.1f}%)")
+            print(f"\n  Top 30 unmapped FDC prefixes (will be discarded):")
+            print(f"  {'Prefix':>6}  {'Docs':>12}  {'% of discarded':>14}  {'% of Total':>10}")
+            print(f"  {'─'*6}  {'─'*12}  {'─'*14}  {'─'*10}")
             for prefix, cnt in other_prefix.most_common(30):
-                print(f"  {prefix:>6}  {cnt:>12,}  {cnt/max(other_docs,1)*100:>9.1f}%  {cnt/max(other_total,1)*100:>9.2f}%")
-            report["other_analysis"] = {
-                "total_other": other_docs,
+                print(f"  {prefix:>6}  {cnt:>12,}  {cnt/max(discarded_docs,1)*100:>13.1f}%  {cnt/max(other_total,1)*100:>9.2f}%")
+            report["discarded_analysis"] = {
+                "total_discarded": discarded_docs,
                 "no_code": other_no_code,
                 "parse_error": other_parse_error,
                 "unmapped_prefixes": dict(other_prefix.most_common()),

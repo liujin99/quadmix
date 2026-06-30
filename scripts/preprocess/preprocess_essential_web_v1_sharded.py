@@ -25,9 +25,10 @@ _QUADMIX_DIR = PROJECT_DIR
 
 
 def extract_domain_level_2(eai_taxonomy):
-    """Extract FDC code prefix and map to 23 L2 domains.
+    """Extract FDC code prefix and map to 22 L2 domains.
 
-    Returns domain ID (0-22) or -1 to discard (unmapped/invalid FDC code).
+    Returns domain ID (0-21) or -1 to discard (unmapped/invalid FDC code).
+    Discards: Other_Languages (43x-49x), FDC code=-1, parse failures.
     """
     if isinstance(eai_taxonomy, str):
         try:

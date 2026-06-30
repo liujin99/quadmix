@@ -1,4 +1,4 @@
-# FDC Domain Mapping 设计：从 100 类到 23 类
+# FDC Domain Mapping 设计：从 100 类到 22 类
 
 > 2026-06-29 | 基于 Essential-Web v1.0 FDC 分类体系的领域映射方案
 
@@ -38,7 +38,7 @@ L2 标签存在于 `eai_taxonomy.free_decimal_correspondence.primary.labels.leve
 
 ### 1.3 目标
 
-将 ~100 个 FDC L2 映射到 **~23 个领域**，对齐业界经验证的分类粒度。
+将 ~100 个 FDC L2 映射到 **~22 个领域**，对齐业界经验证的分类粒度。
 
 **设计动机**（2026-06-29 更新）：L2 映射的核心价值不是改变域比例，而是**提高域内同质性**。当前 FDC L1 的 10 域太粗（如 Industrial 41% 内部混杂工程、医学、商业），DCLM 质量分在异质域内区分度低。拆分后每个 L2 子域更同质，质量筛选更精准。
 
@@ -144,24 +144,25 @@ L2 标签存在于 `eai_taxonomy.free_decimal_correspondence.primary.labels.leve
 | 6 | **Education** | 37x | 1 | Jobs_and_Education | C15(部分) |
 | 7 | **People_and_Society** | 30x-31x, 35x-36x, 38x-39x, 92x | 7 | People_and_Society | C11, C12 |
 | 8 | **English_Language** | 40x-42x | 3 | Books_and_Literature(部分) | — |
-| 9 | **Other_Languages** | 43x-49x | 7 | Books_and_Literature(部分) | — |
-| 10 | **Mathematics** | 51x | 1 | Science(部分) | C17 |
-| 11 | **Physics_and_Chemistry** | 53x-54x | 2 | Science(部分) | C6, C7 |
-| 12 | **Earth_and_Life_Sciences** | 50x, 52x, 55x-59x | 7 | Science(部分) | C8, C9 |
-| 13 | **Medicine_and_Health** | 61x | 1 | Health | C1, C4, C10 |
-| 14 | **Business_and_Management** | 65x | 1 | Business_and_Industrial(部分) | — |
-| 15 | **Engineering** | 60x, 62x, 66x-69x | 6 | Business_and_Industrial(部分) | C15 |
-| 16 | **Agriculture** | 63x | 1 | Food_and_Drink(部分) | C3, C5(部分) |
-| 17 | **Arts_and_Entertainment** | 70x-78x | 9 | Arts_and_Entertainment | C13, C21 |
-| 18 | **Sports_and_Recreation** | 79x | 1 | Sports | — |
-| 19 | **Books_and_Literature** | 8xx | 10 | Books_and_Literature | C13(部分) |
-| 20 | **History** | 90x, 93x-99x | 8 | People_and_Society(部分) | C14, C19 |
-| 21 | **Geography_and_Travel** | 91x | 1 | Travel_and_Transportation | C14(部分) |
-| 22 | **Home_Economics** | 64x | 1 | Home_and_Garden(部分) | — |
+| 9 | **Mathematics** | 51x | 1 | Science(部分) | C17 |
+| 10 | **Physics_and_Chemistry** | 53x-54x | 2 | Science(部分) | C6, C7 |
+| 11 | **Earth_and_Life_Sciences** | 50x, 52x, 55x-59x | 7 | Science(部分) | C8, C9 |
+| 12 | **Medicine_and_Health** | 61x | 1 | Health | C1, C4, C10 |
+| 13 | **Business_and_Management** | 65x | 1 | Business_and_Industrial(部分) | — |
+| 14 | **Engineering** | 60x, 62x, 66x-69x | 6 | Business_and_Industrial(部分) | C15 |
+| 15 | **Agriculture** | 63x | 1 | Food_and_Drink(部分) | C3, C5(部分) |
+| 16 | **Arts_and_Entertainment** | 70x-78x | 9 | Arts_and_Entertainment | C13, C21 |
+| 17 | **Sports_and_Recreation** | 79x | 1 | Sports | — |
+| 18 | **Books_and_Literature** | 8xx | 10 | Books_and_Literature | C13(部分) |
+| 19 | **History** | 90x, 93x-99x | 8 | People_and_Society(部分) | C14, C19 |
+| 20 | **Geography_and_Travel** | 91x | 1 | Travel_and_Transportation | C14(部分) |
+| 21 | **Home_Economics** | 64x | 1 | Home_and_Garden(部分) | — |
 
-**总计：23 类**（全部有效领域，无 Other 类）
+**总计：22 类**（全部有效领域）
 
-> **决策**：原 Other 类（FDC code=-1，8,462 docs，0.02%）数据质量差（avg tok/doc=14,447），直接丢弃。
+> **丢弃决策**：
+> - Other 类（FDC code=-1，8,462 docs，0.02%）：数据质量差（avg tok/doc=14,447）
+> - Other_Languages（43x-49x，64K docs，0.16%）：非英语内容，benchmark 全英语，无贡献
 
 ### 3.3 关键决策说明
 
@@ -175,7 +176,8 @@ L2 标签存在于 `eai_taxonomy.free_decimal_correspondence.primary.labels.leve
 | Arts 合 9 个 L2 (ID 17) | 对齐 NVIDIA 的 Arts_and_Entertainment，web 上艺术类同质性高 |
 | English vs Other Languages 分离 (8, 9) | Web 数据以英语为主，非英语语言对 multilingual 能力有独立贡献 |
 | History 从 Geography 分离 (20, 21) | 对齐 NVIDIA 的 Travel_and_Transportation 独立 |
-| **Other 类直接丢弃** | FDC code=-1 的文档仅 8,462 条（0.02%），且 avg tok/doc=14,447（异常高），数据质量差。直接丢弃而非归入 Other 类，避免引入噪声和无效搜索维度 |
+| **Other 类直接丢弃** | FDC code=-1 的文档仅 8,462 条（0.02%），且 avg tok/doc=14,447（异常高），数据质量差 |
+| **Other_Languages 直接丢弃** | 43x-49x 非英语语言仅 64K 条（0.16%），benchmark 全英语无贡献，减少 9 个无效搜索参数 |
 | **Home_Economics 独立成域 (ID 23)** | 64x（家政学/消费者科学）占 11.6%，与 People_and_Society 内容风格差异大（食谱 vs 社会学）。独立成域提高同质性，使 DCLM 质量分更有区分度 |
 | **60x/66x-69x 归入 Engineering (ID 15)** | 化工、制造、建筑等工业技术与工程设计语义一致，合并后 Engineering 从 8.4% 升至 13.3%，可接受 |
 
@@ -242,37 +244,35 @@ FDC_PREFIX_TO_DOMAIN = {
     "30": 7, "31": 7, "35": 7, "36": 7, "38": 7, "39": 7, "92": 7,
     # 8: English_Language
     "40": 8, "41": 8, "42": 8,
-    # 9: Other_Languages
-    "43": 9, "44": 9, "45": 9, "46": 9, "47": 9, "48": 9, "49": 9,
-    # 10: Mathematics
-    "51": 10,
-    # 11: Physics_and_Chemistry
-    "53": 11, "54": 11,
-    # 12: Earth_and_Life_Sciences
-    "50": 12, "52": 12, "55": 12, "56": 12, "57": 12, "58": 12, "59": 12,
-    # 13: Medicine_and_Health
-    "61": 13,
-    # 14: Business_and_Management
-    "65": 14,
-    # 15: Engineering
-    "60": 15, "62": 15, "66": 15, "67": 15, "68": 15, "69": 15,
-    # 16: Agriculture
-    "63": 16,
-    # 17: Arts_and_Entertainment
-    "70": 17, "71": 17, "72": 17, "73": 17, "74": 17,
-    "75": 17, "76": 17, "77": 17, "78": 17,
-    # 18: Sports_and_Recreation
-    "79": 18,
-    # 19: Books_and_Literature
-    "80": 19, "81": 19, "82": 19, "83": 19, "84": 19,
-    "85": 19, "86": 19, "87": 19, "88": 19, "89": 19,
-    # 20: History
-    "90": 20, "93": 20, "94": 20, "95": 20, "96": 20,
-    "97": 20, "98": 20, "99": 20,
-    # 21: Geography_and_Travel
-    "91": 21,
-    # 22: Home_Economics
-    "64": 22,
+    # 9: Mathematics
+    "51": 9,
+    # 10: Physics_and_Chemistry
+    "53": 10, "54": 10,
+    # 11: Earth_and_Life_Sciences
+    "50": 11, "52": 11, "55": 11, "56": 11, "57": 11, "58": 11, "59": 11,
+    # 12: Medicine_and_Health
+    "61": 12,
+    # 13: Business_and_Management
+    "65": 13,
+    # 14: Engineering
+    "60": 14, "62": 14, "66": 14, "67": 14, "68": 14, "69": 14,
+    # 15: Agriculture
+    "63": 15,
+    # 16: Arts_and_Entertainment
+    "70": 16, "71": 16, "72": 16, "73": 16, "74": 16,
+    "75": 16, "76": 16, "77": 16, "78": 16,
+    # 17: Sports_and_Recreation
+    "79": 17,
+    # 18: Books_and_Literature
+    "80": 18, "81": 18, "82": 18, "83": 18, "84": 18,
+    "85": 18, "86": 18, "87": 18, "88": 18, "89": 18,
+    # 19: History
+    "90": 19, "93": 19, "94": 19, "95": 19, "96": 19,
+    "97": 19, "98": 19, "99": 19,
+    # 20: Geography_and_Travel
+    "91": 20,
+    # 21: Home_Economics
+    "64": 21,
 }
 ```
 
@@ -281,10 +281,10 @@ FDC_PREFIX_TO_DOMAIN = {
 ```python
 def extract_domain_level_2(eai_taxonomy) -> int:
     """
-    从 eai_taxonomy 提取 FDC code 前缀，映射到 23 类 domain。
+    从 eai_taxonomy 提取 FDC code 前缀，映射到 22 类 domain。
 
     Returns:
-        int: domain ID (0-22), 其中 22=Home_Economics; -1 表示丢弃
+        int: domain ID (0-21), 其中 21=Home_Economics; -1 表示丢弃
     """
     # 1. 解析 eai_taxonomy
     # 2. 获取 primary FDC code
@@ -299,7 +299,7 @@ def extract_domain_level_2(eai_taxonomy) -> int:
 
 | 维度 | L1 (当前) | L2 映射 (本方案) |
 |------|-----------|-----------------|
-| 类别数 | 10 | 23 (全部有效) |
+| 类别数 | 10 | 22 (全部有效) |
 | Science 粒度 | 合1 | 拆4 (Math/Phys/Bio/Med) |
 | Business 粒度 | 合1 | 拆3 (Mgmt/Eng/Agri) |
 | Social Sciences 粒度 | 合1 | 拆4 (Law/Econ/Edu/People) |
@@ -324,17 +324,18 @@ def extract_domain_level_2(eai_taxonomy) -> int:
 
 - 部分文档的 FDC code 可能为空或格式异常
 - `level_2` 标签为空字符串时，FDC code 可能只有百位（如 `508`），需处理 3 位 code 的情况
-- 所有无法精确映射到 L2 的文档直接**丢弃**（domain=-1）
+- 以下文档直接**丢弃**（domain=-1），不参与预处理：
   - L2 缺失但 L1 存在 → 丢弃
   - L1 也为空 → 丢弃
   - 解析失败 → 丢弃
-  - **理由**：实测仅 8,462 条（0.02%），且数据质量差（avg tok/doc=14,447）。硬塞进某个 L2 类会引入噪声，保留 Other 类会增加无效搜索维度
+  - FDC code=-1 → 丢弃（8,462 条，0.02%，avg tok/doc=14,447 异常）
+  - Other_Languages (43x-49x) → 丢弃（64K 条，0.16%，非英语无贡献）
 
 ### 6.3 向后兼容
 
 - 新方案与现有 L1 方案并存，通过 `--domain-level` 参数切换
 - 现有 `DOMAIN_MAP` 和 `DOMAIN_NAMES` 保留，新增 `FDC_PREFIX_TO_DOMAIN_L2` 和 `DOMAIN_NAMES_L2`
-- `QuaDMixConfig.num_domains` 根据选择的 level 自动适配（10 或 23）
+- `QuaDMixConfig.num_domains` 根据选择的 level 自动适配（10 或 22）
 
 ---
 
@@ -343,5 +344,5 @@ def extract_domain_level_2(eai_taxonomy) -> int:
 1. **扫描 Essential-Web 数据**：统计各 FDC 前缀的实际文档数和 token 数，确认 22 个有效类无空类
 2. **实现映射代码**：在 `constants.py` 新增 `FDC_PREFIX_TO_DOMAIN_L2`、`DOMAIN_NAMES_L2`，在 `preprocess_essential_web_v1_sharded.py` 新增 `extract_domain_level_2`
 3. **验证映射正确性**：抽样检查映射结果，确认 Other 类占比和组成
-4. **重新运行 proxy 实验**：使用 23 类 domain 配置，对比 R² 和方向准确率
-5. **对比中训效果**：L1-10 vs L2-23 的 CORE metric 对比
+4. **重新运行 proxy 实验**：使用 22 类 domain 配置，对比 R² 和方向准确率
+5. **对比中训效果**：L1-10 vs L2-22 的 CORE metric 对比

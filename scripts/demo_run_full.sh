@@ -3,7 +3,7 @@
 # Demo: QuaDMix Full — 大规模验证，适合 NPU 集群
 # ──────────────────────────────────────────────────────────────
 # 目标：500 shards (~39.5B tokens)，200 实验，5000 步
-# 基于 FDC L2 标签（23 域），使用 v6 验证集
+# 基于 FDC L2 标签（22 域），使用 v6 验证集
 # 数据不存在则自动下载 + 预处理
 #
 # 需要 GPU/NPU（CPU 不可行）
@@ -179,7 +179,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-$QUADMIX_DIR/result/demo_full_$(date +%Y%m%d_%H%M%S)}"
 echo "═══════════════════════════════════════════"
 echo "  QuaDMix Demo — Full (大规模, FDC L2)"
 echo "  $NUM_SHARDS shards, $NUM_EXPERIMENTS 实验, 5000 步"
-echo "  23 域 (FDC L2), v6 验证集"
+echo "  22 域 (FDC L2), v6 验证集"
 echo "═══════════════════════════════════════════"
 cat << PARAMS
 

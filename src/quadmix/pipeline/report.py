@@ -56,7 +56,7 @@ def _save_fig(fig, output_dir, filename):
 
 # ── Figure 1 ──
 
-def _make_fig1(orig_dist, opt_dist, output_dir, num_domains=23):
+def _make_fig1(orig_dist, opt_dist, output_dir, num_domains=22):
     _setup_style()
     domain_short = _get_domain_short(num_domains)
     fig, ax = plt.subplots(figsize=(8, 4.5))
@@ -128,7 +128,7 @@ def _make_fig2(domain_weights, num_domains, num_criteria, output_dir):
 
 # ── Table ──
 
-def _experiment_table(exp_outputs_dir, data_path, num_domains=23, top_k=50,
+def _experiment_table(exp_outputs_dir, data_path, num_domains=22, top_k=50,
                        domain_labels_override=None):
     """Generate experiment table. If domain_labels_override is provided, use it
     instead of loading from data_path (supports sharded mode)."""
@@ -200,7 +200,7 @@ def _experiment_table(exp_outputs_dir, data_path, num_domains=23, top_k=50,
 
 def generate_report(
     output_dir, data_path, optimal_params, optimal_selected_indices,
-    domain_labels, token_counts, num_domains=23, num_criteria=5,
+    domain_labels, token_counts, num_domains=22, num_criteria=5,
     config=None, metrics=None, elapsed=None,
     use_sharded=False, reliability=None, proxy_loss_stats=None,
     per_task_analysis=None,
