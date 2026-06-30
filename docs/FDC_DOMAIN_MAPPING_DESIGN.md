@@ -1,4 +1,4 @@
-# FDC Domain Mapping 设计：从 100 类到 23 类
+# FDC Domain Mapping 设计：从 100 类到 24 类
 
 > 2026-06-29 | 基于 Essential-Web v1.0 FDC 分类体系的领域映射方案
 
@@ -38,7 +38,7 @@ L2 标签存在于 `eai_taxonomy.free_decimal_correspondence.primary.labels.leve
 
 ### 1.3 目标
 
-将 ~100 个 FDC L2 映射到 **~23 个领域**，对齐业界经验证的分类粒度。
+将 ~100 个 FDC L2 映射到 **~24 个领域**，对齐业界经验证的分类粒度。
 
 **设计动机**（2026-06-29 更新）：L2 映射的核心价值不是改变域比例，而是**提高域内同质性**。当前 FDC L1 的 10 域太粗（如 Industrial 41% 内部混杂工程、医学、商业），DCLM 质量分在异质域内区分度低。拆分后每个 L2 子域更同质，质量筛选更精准。
 
@@ -150,16 +150,17 @@ L2 标签存在于 `eai_taxonomy.free_decimal_correspondence.primary.labels.leve
 | 12 | **Earth_and_Life_Sciences** | 50x, 52x, 55x-59x | 7 | Science(部分) | C8, C9 |
 | 13 | **Medicine_and_Health** | 61x | 1 | Health | C1, C4, C10 |
 | 14 | **Business_and_Management** | 65x | 1 | Business_and_Industrial(部分) | — |
-| 15 | **Engineering_and_Technology** | 60x, 62x, 66x-69x | 6 | Business_and_Industrial(部分) | C15 |
-| 16 | **Agriculture_and_Home_Economics** | 63x-64x | 2 | Food_and_Drink(部分) | C3, C5(部分) |
+| 15 | **Engineering** | 60x, 62x, 66x-69x | 6 | Business_and_Industrial(部分) | C15 |
+| 16 | **Agriculture** | 63x | 1 | Food_and_Drink(部分) | C3, C5(部分) |
 | 17 | **Arts_and_Entertainment** | 70x-78x | 9 | Arts_and_Entertainment | C13, C21 |
 | 18 | **Sports_and_Recreation** | 79x | 1 | Sports | — |
 | 19 | **Books_and_Literature** | 8xx | 10 | Books_and_Literature | C13(部分) |
 | 20 | **History** | 90x, 93x-99x | 8 | People_and_Society(部分) | C14, C19 |
 | 21 | **Geography_and_Travel** | 91x | 1 | Travel_and_Transportation | C14(部分) |
 | 22 | **Other** | L2 缺失 / L1 为空 / 解析失败 | — | — | — |
+| 23 | **Home_Economics** | 64x | 1 | Home_and_Garden(部分) | — |
 
-**总计：23 类**（22 个有效领域 + 1 个 Other）
+**总计：24 类**（23 个有效领域 + 1 个 Other）
 
 ### 3.3 关键决策说明
 
@@ -174,6 +175,8 @@ L2 标签存在于 `eai_taxonomy.free_decimal_correspondence.primary.labels.leve
 | English vs Other Languages 分离 (8, 9) | Web 数据以英语为主，非英语语言对 multilingual 能力有独立贡献 |
 | History 从 Geography 分离 (20, 21) | 对齐 NVIDIA 的 Travel_and_Transportation 独立 |
 | **Unclassified/Unknown/Other 合并为单一 Other (ID 22)** | 三类本质都是"无法精确分类"，分开会增加无效维度。实测 L2 缺失 86.3% 来自 General works，Other 内部同质性尚可。不做 L1 fallback，避免硬塞引入噪声 |
+| **Home_Economics 独立成域 (ID 23)** | 64x（家政学/消费者科学）占 11.6%，与 People_and_Society 内容风格差异大（食谱 vs 社会学）。独立成域提高同质性，使 DCLM 质量分更有区分度 |
+| **60x/66x-69x 归入 Engineering (ID 15)** | 化工、制造、建筑等工业技术与工程设计语义一致，合并后 Engineering 从 8.4% 升至 13.3%，可接受 |
 
 ### 3.4 FDC 无法覆盖的 NVIDIA 类别
 
@@ -250,10 +253,10 @@ FDC_PREFIX_TO_DOMAIN = {
     "61": 13,
     # 14: Business_and_Management
     "65": 14,
-    # 15: Engineering_and_Technology
+    # 15: Engineering
     "60": 15, "62": 15, "66": 15, "67": 15, "68": 15, "69": 15,
-    # 16: Agriculture_and_Home_Economics
-    "63": 16, "64": 16,
+    # 16: Agriculture
+    "63": 16,
     # 17: Arts_and_Entertainment
     "70": 17, "71": 17, "72": 17, "73": 17, "74": 17,
     "75": 17, "76": 17, "77": 17, "78": 17,
@@ -267,6 +270,8 @@ FDC_PREFIX_TO_DOMAIN = {
     "97": 20, "98": 20, "99": 20,
     # 21: Geography_and_Travel
     "91": 21,
+    # 23: Home_Economics
+    "64": 23,
 }
 ```
 
@@ -275,10 +280,10 @@ FDC_PREFIX_TO_DOMAIN = {
 ```python
 def extract_domain_level_2(eai_taxonomy) -> int:
     """
-    从 eai_taxonomy 提取 FDC code 前缀，映射到 23 类 domain。
+    从 eai_taxonomy 提取 FDC code 前缀，映射到 24 类 domain。
 
     Returns:
-        int: domain ID (0-21) or 22 (Other)
+        int: domain ID (0-23), 其中 22=Other, 23=Home_Economics
     """
     # 1. 解析 eai_taxonomy
     # 2. 获取 primary FDC code
@@ -293,7 +298,7 @@ def extract_domain_level_2(eai_taxonomy) -> int:
 
 | 维度 | L1 (当前) | L2 映射 (本方案) |
 |------|-----------|-----------------|
-| 类别数 | 10 | 23 (22 有效 + 1 Other) |
+| 类别数 | 10 | 24 (23 有效 + 1 Other) |
 | Science 粒度 | 合1 | 拆4 (Math/Phys/Bio/Med) |
 | Business 粒度 | 合1 | 拆3 (Mgmt/Eng/Agri) |
 | Social Sciences 粒度 | 合1 | 拆4 (Law/Econ/Edu/People) |
@@ -328,7 +333,7 @@ def extract_domain_level_2(eai_taxonomy) -> int:
 
 - 新方案与现有 L1 方案并存，通过 `--domain-level` 参数切换
 - 现有 `DOMAIN_MAP` 和 `DOMAIN_NAMES` 保留，新增 `FDC_PREFIX_TO_DOMAIN_L2` 和 `DOMAIN_NAMES_L2`
-- `QuaDMixConfig.num_domains` 根据选择的 level 自动适配（10 或 23）
+- `QuaDMixConfig.num_domains` 根据选择的 level 自动适配（10 或 24）
 
 ---
 
@@ -337,5 +342,5 @@ def extract_domain_level_2(eai_taxonomy) -> int:
 1. **扫描 Essential-Web 数据**：统计各 FDC 前缀的实际文档数和 token 数，确认 22 个有效类无空类
 2. **实现映射代码**：在 `constants.py` 新增 `FDC_PREFIX_TO_DOMAIN_L2`、`DOMAIN_NAMES_L2`，在 `preprocess_essential_web_v1_sharded.py` 新增 `extract_domain_level_2`
 3. **验证映射正确性**：抽样检查映射结果，确认 Other 类占比和组成
-4. **重新运行 proxy 实验**：使用 23 类 domain 配置，对比 R² 和方向准确率
-5. **对比中训效果**：L1-10 vs L2-23 的 CORE metric 对比
+4. **重新运行 proxy 实验**：使用 24 类 domain 配置，对比 R² 和方向准确率
+5. **对比中训效果**：L1-10 vs L2-24 的 CORE metric 对比

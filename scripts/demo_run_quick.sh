@@ -3,7 +3,7 @@
 # Demo: QuaDMix 8x NPU — 小规模快速测试，适合 NPU 集群验证
 # ──────────────────────────────────────────────────────────────
 # 目标：20 shards (~1.6B tokens)，8 NPU 并行，5000 步快速验证
-# 基于 FDC L2 标签（23 域），使用 v6 验证集
+# 基于 FDC L2 标签（24 域），使用 v6 验证集
 # 数据不存在则自动下载 + 预处理
 #
 # Usage:
@@ -183,7 +183,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-$QUADMIX_DIR/result/demo_8xnpu_$(date +%Y%m%d_%H%M%S)}
 echo "═══════════════════════════════════════════"
 echo "  QuaDMix Demo — 8x NPU (FDC L2)"
 echo "  快速测试 (20 shards, 5000 steps)"
-echo "  23 域 (FDC L2), v6 验证集"
+echo "  24 域 (FDC L2), v6 验证集"
 echo "═══════════════════════════════════════════"
 cat << PARAMS
 
