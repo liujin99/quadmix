@@ -66,6 +66,14 @@ FDC_PREFIX_TO_DOMAIN = {
 
 NUM_DOMAINS = 23
 
+DOMAIN_SHORT_NAMES = [
+    "Computers", "News", "Philosophy", "Religion", "Law",
+    "Economics", "Education", "People", "English", "OtherLang",
+    "Math", "Physics", "EarthLife", "Medicine", "Business",
+    "Engineering", "Agriculture", "Arts", "Sports", "Books",
+    "History", "Geography", "Other",
+]
+
 QUALITY_NAMES = ["dclm", "fineweb_edu", "english", "math_general", "math_openweb"]
 
 QUALITY_COLUMNS = [

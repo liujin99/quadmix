@@ -25,12 +25,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
-from quadmix.constants import DOMAIN_NAMES
+from quadmix.constants import DOMAIN_NAMES, DOMAIN_SHORT_NAMES
 
-DOMAIN_SHORT = [
-    "Industrial", "Social", "Science", "Religion", "Philology",
-    "Literature", "History", "General", "Philosophy", "Arts",
-]
+DOMAIN_SHORT = DOMAIN_SHORT_NAMES
 
 COLOR_ORIG = "#5B9BD5"
 COLOR_OPT = "#ED7D31"

@@ -17,26 +17,13 @@ import matplotlib.pyplot as plt
 
 from quadmix.core.types import ParameterSet
 
-DOMAIN_SHORT_L1 = [
-    "Industrial", "Social", "Science", "Religion", "Philology",
-    "Literature", "History", "General", "Philosophy", "Arts",
-]
+from quadmix.constants import DOMAIN_NAMES, DOMAIN_SHORT_NAMES
 
-DOMAIN_SHORT_L2 = [
-    "Computers", "News", "Philosophy", "Religion", "Law",
-    "Economics", "Education", "People", "English", "OtherLang",
-    "Math", "Physics", "EarthLife", "Medicine", "Business",
-    "Engineering", "Agriculture", "Arts", "Sports", "Books",
-    "History", "Geography", "Other",
-]
 
 def _get_domain_short(num_domains):
-    if num_domains == 10:
-        return DOMAIN_SHORT_L1
-    elif num_domains == 23:
-        return DOMAIN_SHORT_L2
-    else:
-        return [f"D{i}" for i in range(num_domains)]
+    if num_domains <= len(DOMAIN_SHORT_NAMES):
+        return DOMAIN_SHORT_NAMES[:num_domains]
+    return DOMAIN_SHORT_NAMES + [f"D{i}" for i in range(len(DOMAIN_SHORT_NAMES), num_domains)]
 
 QUALITY_NAMES = ["DCLM", "FineWeb-Edu", "English", "Math (Gen)", "Math (OpenWeb)"]
 QUALITY_SHORT = ["DCLM", "Edu", "Eng", "MathG", "MathO"]
