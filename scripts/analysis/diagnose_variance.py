@@ -157,7 +157,7 @@ def main():
 
     # ── 3. 参数空间覆盖度 ────────────────────────────────────
     print(f"\n{'='*80}")
-    print("3. 参数空间覆盖度（90维参数变化分析）")
+    print("  3. 参数空间覆盖度（参数变化分析）")
     print("=" * 80)
 
     param_matrix = np.array([flatten_params(r) for r in results])
@@ -178,9 +178,9 @@ def main():
     print(f"  低变异参数（CV < 0.01）:  {n_low_cv}/{n_params}")
     print(f"  有效变化参数（CV >= 0.01）: {n_effective}/{n_params}")
 
-    # 按参数类型分组
-    M = 23  # num_domains
-    N = 5   # num_quality_criteria
+    # 按参数类型分组（动态检测域数和质量标准数）
+    M = len(results[0]["quality_weights"])
+    N = len(next(iter(results[0]["quality_weights"].values())))
     alpha_stds = []
     for m in range(M):
         for nn in range(N):
@@ -195,9 +195,9 @@ def main():
     print(f"\n  参数类型统计:")
     print(f"    {'Type':<15} {'Mean Std':>10} {'Min Std':>10} {'Max Std':>10} {'Zero':>6}")
     print(f"    {'-'*55}")
-    for name, stds in [("alpha(50)", alpha_stds), ("lambda(10)", lambda_stds),
-                        ("omega(10)", omega_stds), ("eta(10)", eta_stds),
-                        ("epsilon(10)", epsilon_stds)]:
+    for name, stds in [(f"alpha({M*N})", alpha_stds), (f"lambda({M})", lambda_stds),
+                        (f"omega({M})", omega_stds), (f"eta({M})", eta_stds),
+                        (f"epsilon({M})", epsilon_stds)]:
         stds = np.array(stds)
         zero = (stds < 1e-6).sum()
         print(f"    {name:<15} {stds.mean():>10.4f} {stds.min():>10.4f} "
