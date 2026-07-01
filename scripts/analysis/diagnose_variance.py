@@ -4,19 +4,22 @@
 
 分析内容：
   1. Aggregate loss vs per-task loss 分布对比
-  2. 参数空间覆盖度（90维中有多少有效变化）
+  2. 参数空间覆盖度（参数变化分析）
   3. 等权平均 vs 其他聚合方式的方差对比
   4. 参数-损失相关性（哪些参数真正影响 loss）
+  5. 信号强度：Train R² / Adjusted R² / Cross-validated R²
 
 用法：
-  python diagnose_variance.py /path/to/proxy_experiments/
+  python diagnose_variance.py /path/to/proxy_experiments/ [--k 5]
 """
 
+import argparse
 import json
 import os
 import sys
 import numpy as np
 from collections import defaultdict
+from numpy.linalg import lstsq
 
 
 def load_experiments(proxy_dir):
@@ -50,13 +53,43 @@ def flatten_params(meta):
     return flat
 
 
-def main():
-    if len(sys.argv) < 2:
-        print("Usage: python diagnose_variance.py /path/to/proxy_experiments/")
-        sys.exit(1)
+def compute_cv_r2(X, y, k=5, seed=42):
+    """Compute k-fold cross-validated R²."""
+    n = len(y)
+    rng = np.random.default_rng(seed)
+    indices = rng.permutation(n)
+    fold_size = n // k
+    r2_scores = []
 
-    proxy_dir = sys.argv[1]
-    results = load_experiments(proxy_dir)
+    for fold in range(k):
+        test_idx = indices[fold * fold_size : (fold + 1) * fold_size]
+        train_idx = np.concatenate([indices[: fold * fold_size], indices[(fold + 1) * fold_size :]])
+
+        X_train, X_test = X[train_idx], X[test_idx]
+        y_train, y_test = y[train_idx], y[test_idx]
+
+        X_train_b = np.column_stack([X_train, np.ones(len(X_train))])
+        y_train_c = y_train - y_train.mean()
+        coef, _, _, _ = lstsq(X_train_b, y_train_c, rcond=None)
+
+        X_test_b = np.column_stack([X_test, np.ones(len(X_test))])
+        y_pred = X_test_b @ coef + y_train.mean()
+
+        ss_res = np.sum((y_test - y_pred) ** 2)
+        ss_tot = np.sum((y_test - y_test.mean()) ** 2)
+        r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0
+        r2_scores.append(r2)
+
+    return np.mean(r2_scores), np.std(r2_scores)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="诊断 aggregate loss 方差塌缩根因")
+    parser.add_argument("proxy_dir", help="Path to proxy_experiments directory")
+    parser.add_argument("--k", type=int, default=5, help="Number of CV folds (default: 5)")
+    args = parser.parse_args()
+
+    results = load_experiments(args.proxy_dir)
     n = len(results)
     print(f"Loaded {n} experiments\n")
 
@@ -274,42 +307,69 @@ def main():
     print("5. 信号强度：参数变化能解释多少 loss 变化？")
     print("=" * 80)
 
-    # 对每个 task，计算参数能解释的最大 R²（用线性模型上界）
-    from numpy.linalg import lstsq
     X = param_matrix - param_matrix.mean(axis=0)
-    # 加 bias
     X_b = np.column_stack([X, np.ones(n)])
+    p = X.shape[1]
 
-    print(f"\n  线性模型 R² 上界（per-task）:")
-    print(f"    {'Task':<30} {'R²_linear':>10} {'Std':>8}")
-    print(f"    {'-'*52}")
+    print(f"\n  Config: n={n}, p={p}, n/p ratio={n/p:.2f}, k={args.k}")
+    print(f"\n  {'Task':<30} {'Train R²':>10} {'Adj R²':>10} {'CV R²':>10} {'CV std':>10}")
+    print(f"  {'-'*74}")
+
+    cv_results = {}
     for i, task in enumerate(tasks):
         y = per_task[:, i]
         y_c = y - y.mean()
         coef, _, _, _ = lstsq(X_b, y_c, rcond=None)
         y_pred = X_b @ coef
-        ss_res = np.sum((y_c - y_pred)**2)
-        ss_tot = np.sum(y_c**2)
-        r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0
-        print(f"    {task:<30} {r2:>10.4f} {y.std():>8.4f}")
+        ss_res = np.sum((y_c - y_pred) ** 2)
+        ss_tot = np.sum(y_c ** 2)
+        train_r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0
+        adj_r2 = 1 - (1 - train_r2) * (n - 1) / (n - p - 1) if n > p + 1 else float("nan")
+        cv_r2, cv_std = compute_cv_r2(X, y, k=args.k)
+        cv_results[task] = {"train_r2": train_r2, "adj_r2": adj_r2, "cv_r2": cv_r2, "cv_std": cv_std}
+        print(f"  {task:<30} {train_r2:>10.4f} {adj_r2:>10.4f} {cv_r2:>10.4f} {cv_std:>10.4f}")
 
     # aggregate
     y_agg = agg_losses - agg_losses.mean()
     coef_agg, _, _, _ = lstsq(X_b, y_agg, rcond=None)
     y_pred_agg = X_b @ coef_agg
-    ss_res_agg = np.sum((y_agg - y_pred_agg)**2)
-    ss_tot_agg = np.sum(y_agg**2)
+    ss_res_agg = np.sum((y_agg - y_pred_agg) ** 2)
+    ss_tot_agg = np.sum(y_agg ** 2)
     r2_agg = 1 - ss_res_agg / ss_tot_agg if ss_tot_agg > 0 else 0
-    print(f"\n    {'Aggregate (val_loss)':<30} {r2_agg:>10.4f} {agg_losses.std():>8.4f}")
+    adj_r2_agg = 1 - (1 - r2_agg) * (n - 1) / (n - p - 1) if n > p + 1 else float("nan")
+    cv_r2_agg, cv_std_agg = compute_cv_r2(X, agg_losses, k=args.k)
+    cv_results["__aggregate__"] = {"train_r2": r2_agg, "adj_r2": adj_r2_agg, "cv_r2": cv_r2_agg, "cv_std": cv_std_agg}
+
+    print(f"  {'-'*74}")
+    print(f"  {'Aggregate (val_loss)':<30} {r2_agg:>10.4f} {adj_r2_agg:>10.4f} {cv_r2_agg:>10.4f} {cv_std_agg:>10.4f}")
 
     # equal-weight mean
     y_eq = eq_mean - eq_mean.mean()
     coef_eq, _, _, _ = lstsq(X_b, y_eq, rcond=None)
     y_pred_eq = X_b @ coef_eq
-    ss_res_eq = np.sum((y_eq - y_pred_eq)**2)
-    ss_tot_eq = np.sum(y_eq**2)
+    ss_res_eq = np.sum((y_eq - y_pred_eq) ** 2)
+    ss_tot_eq = np.sum(y_eq ** 2)
     r2_eq = 1 - ss_res_eq / ss_tot_eq if ss_tot_eq > 0 else 0
-    print(f"    {'Equal-weight mean':<30} {r2_eq:>10.4f} {eq_mean.std():>8.4f}")
+    adj_r2_eq = 1 - (1 - r2_eq) * (n - 1) / (n - p - 1) if n > p + 1 else float("nan")
+    cv_r2_eq, cv_std_eq = compute_cv_r2(X, eq_mean, k=args.k)
+    cv_results["__equal_weight_mean__"] = {"train_r2": r2_eq, "adj_r2": adj_r2_eq, "cv_r2": cv_r2_eq, "cv_std": cv_std_eq}
+
+    print(f"  {'Equal-weight mean':<30} {r2_eq:>10.4f} {adj_r2_eq:>10.4f} {cv_r2_eq:>10.4f} {cv_std_eq:>10.4f}")
+
+    # Summary
+    train_r2s = [cv_results[t]["train_r2"] for t in tasks]
+    adj_r2s = [cv_results[t]["adj_r2"] for t in tasks]
+    cv_r2s = [cv_results[t]["cv_r2"] for t in tasks]
+
+    print(f"\n  {'Summary':<30} {'Train R²':>10} {'Adj R²':>10} {'CV R²':>10}")
+    print(f"    {'Per-task mean':<30} {np.mean(train_r2s):>10.4f} {np.mean(adj_r2s):>10.4f} {np.mean(cv_r2s):>10.4f}")
+    print(f"    {'Per-task median':<30} {np.median(train_r2s):>10.4f} {np.median(adj_r2s):>10.4f} {np.median(cv_r2s):>10.4f}")
+    print(f"    {'Aggregate':<30} {r2_agg:>10.4f} {adj_r2_agg:>10.4f} {cv_r2_agg:>10.4f}")
+
+    print(f"\n  Overfitting gap:")
+    print(f"    Train R² - Adj R² (aggregate): {r2_agg - adj_r2_agg:.4f}")
+    print(f"    Train R² - CV R² (aggregate):  {r2_agg - cv_r2_agg:.4f}")
+    print(f"    Train R² - CV R² (per-task mean): {np.mean(train_r2s) - np.mean(cv_r2s):.4f}")
 
     # ── 6. 关键结论 ──────────────────────────────────────────
     print(f"\n{'='*80}")
@@ -328,10 +388,11 @@ def main():
      |corr(参数, agg_loss)| > 0.1: {n_sig_corr}/{n_params}
      → {'参数空间覆盖充分' if n_effective > n_params * 0.8 else '部分参数未有效变化'}
 
-  D. 线性模型 R² 上界:
-     Aggregate: {r2_agg:.4f}
-     Equal-wt mean: {r2_eq:.4f}
-     → {'参数变化能解释 loss 变化' if r2_agg > 0.3 else '即使线性模型也无法解释 loss 变化，信号极弱'}
+   D. 信号强度 (n={n}, p={p}):
+     Aggregate: Train R²={r2_agg:.4f}, Adj R²={adj_r2_agg:.4f}, CV R²={cv_r2_agg:.4f}
+     Per-task mean: Train R²={np.mean(train_r2s):.4f}, Adj R²={np.mean(adj_r2s):.4f}, CV R²={np.mean(cv_r2s):.4f}
+     → {'CV R² > 0.3: 参数变化能有效预测 loss' if cv_r2_agg > 0.3 else 'CV R² < 0.3: 信号弱，参数变化难以预测 loss'}
+     → {'过拟合风险: Train-CV gap > 0.2' if r2_agg - cv_r2_agg > 0.2 else '过拟合可控'}
 """)
 
 
