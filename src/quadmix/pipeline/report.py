@@ -406,7 +406,7 @@ def generate_report(
         parts.append("| Metric | Mean | Std | Min | Max |")
         parts.append("|:-------|:-----|:----|:----|:----|")
         for name, stats in proxy_loss_stats.items():
-            if isinstance(stats, dict):
+            if isinstance(stats, dict) and "mean" in stats:
                 parts.append(f"| {name} | {stats['mean']:.4f} | {stats['std']:.4f} | {stats['min']:.4f} | {stats['max']:.4f} |")
             elif isinstance(stats, float):
                 parts.append(f"| {name} | {stats:.4f} | — | — | — |")
