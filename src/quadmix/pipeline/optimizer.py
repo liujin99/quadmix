@@ -45,6 +45,7 @@ def _train_single_task_cv_fold(
         num_criteria=num_quality_criteria,
         eval_params_list=cv_val_params,
         eval_losses=cv_val_losses,
+        verbose=False,
     )
     
     return float(cv_model.score(cv_val_params, cv_val_losses))
@@ -104,6 +105,7 @@ def _train_single_task(
             num_criteria=num_quality_criteria,
             eval_params_list=val_params,
             eval_losses=task_val_losses,
+            verbose=False,
         )
         
         if len(val_idx) > 0:
@@ -125,6 +127,7 @@ def _train_single_task(
         num_criteria=num_quality_criteria,
         eval_params_list=val_params,
         eval_losses=task_val_losses,
+        verbose=False,
     )
     
     result["model"] = model
@@ -172,6 +175,7 @@ def _bootstrap_one(
             num_criteria=num_criteria,
             eval_params_list=oob_params,
             eval_losses=oob_losses,
+            verbose=False,
         )
         r2 = float(model.score(oob_params, oob_losses))
         return (r2, model)
@@ -200,7 +204,7 @@ class RegressionModel:
         self._model = None
         self._is_fitted = False
 
-    def _build_model(self, n_train: int = 0, n_features: int = 0):
+    def _build_model(self, n_train: int = 0, n_features: int = 0, verbose: bool = True):
         """Build the underlying regressor model."""
         if self.model_type == "lightgbm":
             try:
@@ -211,8 +215,9 @@ class RegressionModel:
                 )
 
             ratio = n_train / max(1, n_features) if n_features > 0 else float("inf")
-            regime = "conservative" if ratio < 3 else ("moderate" if ratio < 8 else "aggressive")
-            print(f"[LightGBM] n/p ratio={ratio:.1f} → {regime} regime (n={n_train}, p={n_features})")
+            if verbose:
+                regime = "conservative" if ratio < 3 else ("moderate" if ratio < 8 else "aggressive")
+                print(f"[LightGBM] n/p ratio={ratio:.1f} → {regime} regime (n={n_train}, p={n_features})")
 
             if ratio < 3:
                 max_depth = min(4, max(2, int(np.log2(max(2, n_train)))))
@@ -295,6 +300,7 @@ class RegressionModel:
         eval_params_list: Optional[List[ParameterSet]] = None,
         eval_losses: Optional[npt.NDArray[np.float64]] = None,
         early_stopping_rounds: int = 50,
+        verbose: bool = True,
     ) -> "RegressionModel":
         """
         Train the regression model on proxy experiment results.
@@ -307,6 +313,7 @@ class RegressionModel:
             eval_params_list: Optional validation parameter configurations.
             eval_losses: Optional validation losses.
             early_stopping_rounds: Early stopping patience (LightGBM only).
+            verbose: Whether to print regime info.
 
         Returns:
             Self (fitted model).
@@ -322,7 +329,7 @@ class RegressionModel:
         self._num_criteria = num_criteria
 
         n_features = X.shape[1]
-        self._build_model(n_train=len(params_list), n_features=n_features)
+        self._build_model(n_train=len(params_list), n_features=n_features, verbose=verbose)
 
         if (self.model_type == "lightgbm" and eval_params_list is not None
                 and eval_losses is not None and len(eval_params_list) > 0):
