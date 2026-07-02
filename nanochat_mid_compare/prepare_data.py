@@ -381,7 +381,11 @@ def main():
     print(f"\n[1/6] Reading QuadMix selected dataset...")
     quadmix_df = pd.read_parquet(args.quadmix_sampled_data)
     texts = quadmix_df["text"].tolist()
-    valid_texts = [t for t in texts if t and len(t) >= 100]
+    max_chars = args.max_chars
+    valid_texts = [t for t in texts if t and 100 <= len(t) <= max_chars]
+    n_filtered = len(texts) - len(valid_texts)
+    if n_filtered > 0:
+        print(f"  Filtered {n_filtered:,} docs (too short or > {max_chars:,} chars)")
     print(f"  Counting tokens for {len(valid_texts):,} docs...")
     if enc and args.tokenizer_pkl:
         token_counts = count_tokens_mp(valid_texts, args.tokenizer_pkl, num_workers=args.num_workers)
