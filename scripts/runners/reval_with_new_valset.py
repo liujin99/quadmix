@@ -547,7 +547,10 @@ def main():
         elapsed=elapsed,
         use_sharded=True,
         reliability=summary.get("reliability"),
+        proxy_loss_stats=summary.get("proxy_loss_stats"),
         per_task_analysis=summary.get("per_task_analysis"),
+        dataset_size_prediction=summary.get("dataset_size_prediction"),
+        stage_times={k: v for k, v in stage_times.items() if k != "stage9_report"},
     )
 
     reval_header = (
@@ -600,6 +603,8 @@ def main():
     print(f"    ├── pipeline_summary.json")
     print(f"    ├── sampled_dataset.parquet")
     print(f"    ├── quadmix_report.md")
+    print(f"    ├── fig1_domain_distribution.png")
+    print(f"    ├── fig2_quality_weights.png")
     print(f"    └── proxy_experiments/")
     print("=" * 70)
     return 0

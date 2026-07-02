@@ -412,7 +412,9 @@ class QuaDMixPipeline:
         print(f"    ├── optimal_parameters.json")
         print(f"    ├── pipeline_summary.json")
         print(f"    ├── sampled_dataset.parquet")
-        print(f"    └── quadmix_report.md")
+        print(f"    ├── quadmix_report.md")
+        print(f"    ├── fig1_domain_distribution.png")
+        print(f"    └── fig2_quality_weights.png")
         print("=" * 70)
 
         return PipelineOutput(
@@ -741,6 +743,8 @@ class QuaDMixPipeline:
             reliability=summary.get("reliability"),
             proxy_loss_stats=summary.get("proxy_loss_stats"),
             per_task_analysis=summary.get("per_task_analysis"),
+            dataset_size_prediction=summary.get("dataset_size_prediction"),
+            stage_times={k: v for k, v in stage_times.items() if k != "stage9_report"},
         )
         save_report(report, output_dir)
         stage_times["stage9_report"] = time.time() - _t

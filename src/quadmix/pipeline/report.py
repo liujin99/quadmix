@@ -203,7 +203,7 @@ def generate_report(
     domain_labels, token_counts, num_domains=22, num_criteria=5,
     config=None, metrics=None, elapsed=None,
     use_sharded=False, reliability=None, proxy_loss_stats=None,
-    per_task_analysis=None,
+    per_task_analysis=None, dataset_size_prediction=None, stage_times=None,
 ):
     """Generate MD report with separate PNG figures."""
     # Compute distributions
@@ -244,10 +244,13 @@ def generate_report(
     if reliability:
         parts.append("## Model Reliability\n")
         parts.append("**Aggregate model** (single LightGBM on total loss, diagnostic only — not used for search):\n")
-        bootstrap_mean = reliability.get("val_r2_bootstrap_mean")
-        ci_lower = reliability.get("val_r2_ci_lower")
-        ci_upper = reliability.get("val_r2_ci_upper")
-        ci_width = reliability.get("val_r2_ci_width")
+        bootstrap = reliability.get("bootstrap") or {}
+        bootstrap_mean = bootstrap.get("mean")
+        ci_lower = bootstrap.get("ci_lower")
+        ci_upper = bootstrap.get("ci_upper")
+        ci_std = bootstrap.get("ci_std")
+        n_ensemble = bootstrap.get("n_ensemble_models")
+        ci_width = (ci_upper - ci_lower) if (ci_lower is not None and ci_upper is not None) else None
         sample_sufficient = reliability.get("sample_sufficient")
         overfit_gap = reliability.get("overfit_gap")
         n_features = reliability.get("n_features")
@@ -267,6 +270,12 @@ def generate_report(
         if ci_lower is not None and ci_upper is not None:
             ci_status = "✓ Stable" if ci_width is not None and ci_width < 0.3 else "⚠️ Wide CI"
             parts.append(f"| 95% CI | [{ci_lower:.3f}, {ci_upper:.3f}] | width={ci_width:.3f} {ci_status} |")
+
+        if ci_std is not None:
+            parts.append(f"| CI Std | {ci_std:.4f} | — |")
+
+        if n_ensemble is not None:
+            parts.append(f"| Ensemble Models | {n_ensemble} | — |")
 
         if overfit_gap is not None:
             gap_status = "✓ OK" if overfit_gap < 0.3 else "⚠️ Overfitting"
@@ -416,9 +425,16 @@ def generate_report(
         parts.append("## Per-Task Analysis (R²-Adaptive Weighting)\n")
         n_active = per_task_analysis.get("n_active", 0)
         n_filtered = per_task_analysis.get("n_filtered", 0)
-        parts.append(f"**Active tasks:** {n_active} | **Filtered (R²≤0):** {n_filtered}\n")
-        parts.append("| Task | R² | Weight | Std | Status |")
-        parts.append("|:-----|---:|-------:|----:|:-------|")
+        r2_method = per_task_analysis.get("r2_method", "unknown")
+        search_mode = per_task_analysis.get("search_weight_mode", config.get("search_weight_mode", "") if config else "")
+        parts.append(f"**Active tasks:** {n_active} | **Filtered (R²≤0):** {n_filtered} | **R² method:** {r2_method} | **Search mode:** {search_mode}\n")
+        has_train_r2 = any(t.get("train_r2") is not None for t in per_task_analysis.get("tasks", []))
+        if has_train_r2:
+            parts.append("| Task | Train R² | Val R² | Gap | Weight | Std | Status |")
+            parts.append("|:-----|--------:|-------:|----:|-------:|----:|:-------|")
+        else:
+            parts.append("| Task | R² | Weight | Std | Status |")
+            parts.append("|:-----|---:|-------:|----:|:-------|")
         for task in per_task_analysis.get("tasks", []):
             name = task["name"]
             r2 = task["r2"]
@@ -433,7 +449,14 @@ def generate_report(
                 status = "✓ Good"
             else:
                 status = "⚠️ Weak"
-            parts.append(f"| {name} | {r2:.4f} | {weight:.4f} | {std_str} | {status} |")
+            if has_train_r2:
+                train_r2 = task.get("train_r2")
+                gap = task.get("gap")
+                train_str = f"{train_r2:.4f}" if train_r2 is not None else "—"
+                gap_str = f"{gap:.4f}" if gap is not None else "—"
+                parts.append(f"| {name} | {train_str} | {r2:.4f} | {gap_str} | {weight:.4f} | {std_str} | {status} |")
+            else:
+                parts.append(f"| {name} | {r2:.4f} | {weight:.4f} | {std_str} | {status} |")
         
         tasks = per_task_analysis.get("tasks", [])
         all_r2s = [t["r2"] for t in tasks]
@@ -442,8 +465,42 @@ def generate_report(
             n_good = sum(1 for r in all_r2s if r > 0.3)
             parts.append("")
             parts.append(f"**Per-task R²:** mean {mean_r2:.4f} ({len(all_r2s)} tasks, {n_good} with R² > 0.3)")
+            if has_train_r2:
+                all_gaps = [t["gap"] for t in tasks if t.get("gap") is not None]
+                if all_gaps:
+                    mean_gap = sum(all_gaps) / len(all_gaps)
+                    n_overfit = sum(1 for g in all_gaps if g > 0.3)
+                    parts.append(f"**Overfit gap:** mean {mean_gap:.4f} ({n_overfit} tasks with gap > 0.3)")
             parts.append("")
             parts.append("Note: Per-task R² measures individual task prediction quality. Aggregate R² is lower due to correlated errors when averaging (mathematical property, not model failure).")
+        parts.append("")
+
+    if dataset_size_prediction:
+        parts.append("## Dataset Size Prediction\n")
+        dsp = dataset_size_prediction
+        parts.append("| Parameter | Value |")
+        parts.append("|:----------|:------|")
+        if dsp.get("total_tokens_est_B") is not None:
+            parts.append(f"| Dataset Total Size | {dsp['total_tokens_est_B']:.1f}B tokens |")
+        if dsp.get("omega_min") is not None:
+            parts.append(f"| ω Range | [{dsp['omega_min']:.6f}, {dsp['omega_max']:.6f}] (avg {dsp['omega_avg']:.6f}) |")
+        if dsp.get("estimated_tokens_B") is not None:
+            parts.append(f"| Estimated Output | {dsp['estimated_tokens_B']:.2f}B tokens |")
+        if dsp.get("target_tokens") is not None:
+            parts.append(f"| Target | {dsp['target_tokens']/1e9:.1f}B tokens |")
+        if dsp.get("note"):
+            parts.append(f"| Note | {dsp['note']} |")
+        parts.append("")
+
+    if stage_times:
+        parts.append("## Stage Timing\n")
+        parts.append("| Stage | Time (s) | Percentage |")
+        parts.append("|:------|--------:|----------:|")
+        total_time = sum(stage_times.values()) or 1
+        for name, secs in sorted(stage_times.items(), key=lambda x: -x[1]):
+            pct = secs / total_time * 100
+            parts.append(f"| {name} | {secs:.1f} | {pct:.1f}% |")
+        parts.append(f"| **Total** | **{total_time:.1f}** | **100%** |")
         parts.append("")
 
     parts += [
