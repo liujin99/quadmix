@@ -141,19 +141,19 @@ def _has_char_repetition(text, max_ratio=0.3):
 def _filter_docs_chunk(args):
     chunk, max_chars, max_char_repeat_ratio = args
     valid = []
-    n_too_short = 0
+    n_empty = 0
     n_too_long = 0
     n_repeat = 0
     for t in chunk:
         if not t:
-            n_too_short += 1
+            n_empty += 1
         elif len(t) > max_chars:
             n_too_long += 1
         elif _has_char_repetition(t, max_char_repeat_ratio):
             n_repeat += 1
         else:
             valid.append(t)
-    return valid, n_too_short, n_too_long, n_repeat
+    return valid, n_empty, n_too_long, n_repeat
 
 
 def _read_docs_from_shard_tagged(args):
@@ -407,22 +407,22 @@ def main():
     chunks = [texts[i:i + chunk_size] for i in range(0, len(texts), chunk_size)]
     filter_tasks = [(c, max_chars, max_char_repeat_ratio) for c in chunks]
     valid_texts = []
-    n_too_short = 0
+    n_empty = 0
     n_too_long = 0
     n_repeat = 0
     with _SPAWN_CTX.Pool(num_workers) as pool:
-        for valid, ts, tl, tr in tqdm(
+        for valid, ne, tl, tr in tqdm(
             pool.imap_unordered(_filter_docs_chunk, filter_tasks, chunksize=1),
             total=len(filter_tasks),
             desc=f"  Filtering QuadMix docs ({num_workers} processes)",
         ):
             valid_texts.extend(valid)
-            n_too_short += ts
+            n_empty += ne
             n_too_long += tl
             n_repeat += tr
-    n_filtered = n_too_short + n_too_long + n_repeat
+    n_filtered = n_empty + n_too_long + n_repeat
     if n_filtered > 0:
-        print(f"  Filtered {n_filtered:,} docs: {n_too_short:,} too short, "
+        print(f"  Filtered {n_filtered:,} docs: {n_empty:,} empty, "
               f"{n_too_long:,} > {max_chars:,} chars, {n_repeat:,} repetitive")
     print(f"  Counting tokens for {len(valid_texts):,} docs...")
     if enc and args.tokenizer_pkl:
