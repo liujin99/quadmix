@@ -200,7 +200,7 @@ class RegressionModel:
         self._model = None
         self._is_fitted = False
 
-    def _build_model(self, n_train: int = 0):
+    def _build_model(self, n_train: int = 0, n_features: int = 0):
         """Build the underlying regressor model."""
         if self.model_type == "lightgbm":
             try:
@@ -210,8 +210,27 @@ class RegressionModel:
                     "LightGBM is required. Install with: pip install lightgbm"
                 )
 
-            if n_train > 0 and n_train < 500:
-                max_depth = min(5, max(3, int(np.log2(n_train))))
+            ratio = n_train / max(1, n_features) if n_features > 0 else float("inf")
+            regime = "conservative" if ratio < 3 else ("moderate" if ratio < 8 else "aggressive")
+            print(f"[LightGBM] n/p ratio={ratio:.1f} → {regime} regime (n={n_train}, p={n_features})")
+
+            if ratio < 3:
+                max_depth = min(4, max(2, int(np.log2(max(2, n_train)))))
+                default_params = {
+                    "n_estimators": 300,
+                    "learning_rate": 0.01,
+                    "max_depth": max_depth,
+                    "num_leaves": min(7, 2 ** max_depth - 1),
+                    "min_child_samples": max(50, n_train // 4),
+                    "subsample": 0.7,
+                    "colsample_bytree": 0.4,
+                    "reg_alpha": 5.0,
+                    "reg_lambda": 5.0,
+                    "random_state": 42,
+                    "verbose": -1,
+                }
+            elif ratio < 8:
+                max_depth = min(5, max(3, int(np.log2(max(2, n_train)))))
                 default_params = {
                     "n_estimators": 500,
                     "learning_rate": 0.02,
@@ -302,7 +321,8 @@ class RegressionModel:
         self._num_domains = num_domains
         self._num_criteria = num_criteria
 
-        self._build_model(n_train=len(params_list))
+        n_features = X.shape[1]
+        self._build_model(n_train=len(params_list), n_features=n_features)
 
         if (self.model_type == "lightgbm" and eval_params_list is not None
                 and eval_losses is not None and len(eval_params_list) > 0):
