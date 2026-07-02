@@ -422,8 +422,9 @@ def main():
             n_repeat += tr
     n_filtered = n_empty + n_too_long + n_repeat
     if n_filtered > 0:
-        print(f"  Filtered {n_filtered:,} docs: {n_empty:,} empty, "
-              f"{n_too_long:,} > {max_chars:,} chars, {n_repeat:,} repetitive")
+        print(f"  Filtered {n_empty:,} docs (empty), "
+              f"{n_too_long:,} docs (>{max_chars:,} chars), "
+              f"{n_repeat:,} docs (single char >{max_char_repeat_ratio*100:.0f}% repetition)")
     print(f"  Counting tokens for {len(valid_texts):,} docs...")
     if enc and args.tokenizer_pkl:
         token_counts = count_tokens_mp(valid_texts, args.tokenizer_pkl, num_workers=args.num_workers)
