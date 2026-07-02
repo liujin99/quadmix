@@ -292,6 +292,8 @@ def main():
             new_meta["reval_val_set"] = val_set_name
             if per_task_losses is not None:
                 new_meta["per_task_losses"] = per_task_losses
+            else:
+                new_meta.pop("per_task_losses", None)
             exp_out_dir = os.path.join(output_proxy_dir, exp_name)
             os.makedirs(exp_out_dir, exist_ok=True)
             with open(os.path.join(exp_out_dir, "meta.json"), "w") as f:
