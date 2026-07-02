@@ -145,7 +145,7 @@ def _filter_docs_chunk(args):
     n_too_long = 0
     n_repeat = 0
     for t in chunk:
-        if not t or len(t) < 100:
+        if not t:
             n_too_short += 1
         elif len(t) > max_chars:
             n_too_long += 1
