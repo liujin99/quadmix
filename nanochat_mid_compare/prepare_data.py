@@ -138,6 +138,24 @@ def _has_char_repetition(text, max_ratio=0.3):
     return most_common_count / len(non_ws) > max_ratio
 
 
+def _filter_docs_chunk(args):
+    chunk, max_chars, max_char_repeat_ratio = args
+    valid = []
+    n_too_short = 0
+    n_too_long = 0
+    n_repeat = 0
+    for t in chunk:
+        if not t or len(t) < 100:
+            n_too_short += 1
+        elif len(t) > max_chars:
+            n_too_long += 1
+        elif _has_char_repetition(t, max_char_repeat_ratio):
+            n_repeat += 1
+        else:
+            valid.append(t)
+    return valid, n_too_short, n_too_long, n_repeat
+
+
 def _read_docs_from_shard_tagged(args):
     shard_id, shard_path, doc_indices = args
     table = pq.read_table(shard_path, columns=["text"])
@@ -384,19 +402,24 @@ def main():
     del quadmix_table
     max_chars = args.max_chars
     max_char_repeat_ratio = args.max_char_repeat_ratio
+    num_workers = args.num_workers or min(mp.cpu_count(), 128) or 1
+    chunk_size = max(1, len(texts) // (num_workers * 4))
+    chunks = [texts[i:i + chunk_size] for i in range(0, len(texts), chunk_size)]
+    filter_tasks = [(c, max_chars, max_char_repeat_ratio) for c in chunks]
     valid_texts = []
     n_too_short = 0
     n_too_long = 0
     n_repeat = 0
-    for t in tqdm(texts, desc="  Filtering QuadMix docs"):
-        if not t or len(t) < 100:
-            n_too_short += 1
-        elif len(t) > max_chars:
-            n_too_long += 1
-        elif _has_char_repetition(t, max_char_repeat_ratio):
-            n_repeat += 1
-        else:
-            valid_texts.append(t)
+    with _SPAWN_CTX.Pool(num_workers) as pool:
+        for valid, ts, tl, tr in tqdm(
+            pool.imap_unordered(_filter_docs_chunk, filter_tasks, chunksize=1),
+            total=len(filter_tasks),
+            desc=f"  Filtering QuadMix docs ({num_workers} processes)",
+        ):
+            valid_texts.extend(valid)
+            n_too_short += ts
+            n_too_long += tl
+            n_repeat += tr
     n_filtered = n_too_short + n_too_long + n_repeat
     if n_filtered > 0:
         print(f"  Filtered {n_filtered:,} docs: {n_too_short:,} too short, "
