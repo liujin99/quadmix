@@ -51,10 +51,6 @@ export QUADMIX_TEMP_DIR="${QUADMIX_TEMP_DIR:-$HOME/.cache/QuaDMix/temp}"
 
 PREPROCESSED_DIR="$QUADMIX_TEMP_DIR/preprocessed"
 
-VAL_FILE="$QUADMIX_DIR/data/core_bmk_21tasks_v6_tokenized.pt"
-source "$QUADMIX_DIR/scripts/ensure_val_data.sh"
-ensure_val_data "liujin99/quadmix-core-bmk-v6" "core_bmk_21tasks_v6_tokenized.pt" "$VAL_FILE" || exit 1
-
 RESULT_DIR="$QUADMIX_DIR/result/demo_full_20260630_170836"
 VAL_SET="core_bmk_v6"
 VAL_PATH=""
@@ -116,6 +112,11 @@ fi
 if [[ ! -d "$RESULT_DIR/proxy_experiments" ]]; then
     echo "[Error] proxy_experiments not found in: $RESULT_DIR"
     exit 1
+fi
+
+if [[ -z "$VAL_PATH" ]]; then
+    source "$QUADMIX_DIR/scripts/ensure_val_data.sh"
+    ensure_val_set "$VAL_SET" "$QUADMIX_DIR/data" || exit 1
 fi
 
 if [[ ! -d "$PREPROCESSED_DIR" ]]; then

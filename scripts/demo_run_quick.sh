@@ -42,11 +42,20 @@ export QUADMIX_TEMP_DIR="${QUADMIX_TEMP_DIR:-$HOME/.cache/QuaDMix/temp}"
 
 PREPROCESSED_DIR="$QUADMIX_TEMP_DIR/preprocessed"
 RAW_DATA_DIR="${RAW_DATA_DIR:-/home/ma-user/work/QuaDMix/data/essential-web}"
-VAL_FILE="$QUADMIX_DIR/data/core_bmk_21tasks_v6_tokenized.pt"
 
-# ── 驗證集下載（帶版本檢查）──────────────────────────────────
+# ── 扫描 --val-set 参数（默认 core_bmk_v6）──────────────────
+VAL_SET="core_bmk_v6"
+for arg in "$@"; do
+    if [[ "$prev_arg" == "--val-set" ]]; then
+        VAL_SET="$arg"
+        break
+    fi
+    prev_arg="$arg"
+done
+
+# ── 验证集下载（条件化）──────────────────────────────────
 source "$QUADMIX_DIR/scripts/ensure_val_data.sh"
-ensure_val_data "liujin99/quadmix-core-bmk-v6" "core_bmk_21tasks_v6_tokenized.pt" "$VAL_FILE" || exit 1
+ensure_val_set "$VAL_SET" "$QUADMIX_DIR/data" || exit 1
 
 # ── 下载规模控制 ──────────────────────────────────
 # 每 shard ≈ 79M tokens (char//4) / 246 MB 原始 parquet
@@ -183,7 +192,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-$QUADMIX_DIR/result/demo_8xnpu_$(date +%Y%m%d_%H%M%S)}
 echo "═══════════════════════════════════════════"
 echo "  QuaDMix Demo — 8x NPU (FDC L2)"
 echo "  快速测试 (20 shards, 5000 steps)"
-echo "  22 域 (FDC L2), v6 验证集"
+echo "  22 域 (FDC L2), $VAL_SET 验证集"
 echo "═══════════════════════════════════════════"
 cat << PARAMS
 
@@ -202,7 +211,7 @@ cat << PARAMS
   │ 全局 batch size            │          64  │
   │ 微批大小                   │          32  │ (ga=2)
   │ warmup                     │         4%   │
-  │ 验证集                     │  CORE BMK v6  │
+  │ 验证集                     │  $VAL_SET  │
   │ 排名参考集大小             │      10,000  │
   │ 代理模型                   │  tinyllama_1M│
   └────────────────────────────┴──────────────┘
@@ -242,7 +251,7 @@ python3 "$QUADMIX_DIR/scripts/runners/run_essential_web_v1.py" \
     --global-batch-size 64 \
     --rank-ref-size 10000 \
     --checkpoint-interval 0 \
-    --val-set core_bmk_v6 \
+    --val-set "$VAL_SET" \
     --search-mode r2_sigma_weighted \
     --output "$OUTPUT_DIR" \
     $DEVICE_ARG \

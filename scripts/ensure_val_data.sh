@@ -147,3 +147,64 @@ ensure_val_data() {
     echo ""
     return 0
 }
+
+# Ensure validation set based on --val-set argument.
+# Args:
+#   $1 = val_set (e.g., "openhermes", "core", "core_bmk_v6")
+#   $2 = data_dir (e.g., "/path/to/data")
+#
+# Behavior:
+#   - Downloads the appropriate validation set based on val_set name
+#   - Supports: openhermes, core, core_bmk_v3/v4/v4.2/v4.3/v5/v6
+ensure_val_set() {
+    local val_set="$1"
+    local data_dir="$2"
+    
+    case "$val_set" in
+        openhermes)
+            ensure_val_data "liujin99/quadmix-openhermes-10k" \
+                "openhermes_10k_assistant_tokenized.pt" \
+                "$data_dir/openhermes_10k_assistant_tokenized.pt"
+            ;;
+        core)
+            ensure_val_data "liujin99/quadmix-core-22tasks" \
+                "core_22tasks_tokenized.pt" \
+                "$data_dir/core_22tasks_tokenized.pt"
+            ;;
+        core_bmk_v3)
+            ensure_val_data "liujin99/quadmix-core-bmk-v3" \
+                "core_bmk_21tasks_v3_tokenized.pt" \
+                "$data_dir/core_bmk_21tasks_v3_tokenized.pt"
+            ;;
+        core_bmk_v4)
+            ensure_val_data "liujin99/quadmix-core-bmk-v4" \
+                "core_bmk_21tasks_v4_tokenized.pt" \
+                "$data_dir/core_bmk_21tasks_v4_tokenized.pt"
+            ;;
+        core_bmk_v4.2)
+            ensure_val_data "liujin99/quadmix-core-bmk-v4.2" \
+                "core_bmk_21tasks_v4.2_tokenized.pt" \
+                "$data_dir/core_bmk_21tasks_v4.2_tokenized.pt"
+            ;;
+        core_bmk_v4.3)
+            ensure_val_data "liujin99/quadmix-core-bmk-v4.3" \
+                "core_bmk_21tasks_v4.3_tokenized.pt" \
+                "$data_dir/core_bmk_21tasks_v4.3_tokenized.pt"
+            ;;
+        core_bmk_v5)
+            ensure_val_data "liujin99/quadmix-core-bmk-v5" \
+                "core_bmk_21tasks_v5_tokenized.pt" \
+                "$data_dir/core_bmk_21tasks_v5_tokenized.pt"
+            ;;
+        core_bmk_v6)
+            ensure_val_data "liujin99/quadmix-core-bmk-v6" \
+                "core_bmk_21tasks_v6_tokenized.pt" \
+                "$data_dir/core_bmk_21tasks_v6_tokenized.pt"
+            ;;
+        *)
+            echo "  [Error] Unknown val_set: $val_set"
+            echo "          Supported: openhermes, core, core_bmk_v3/v4/v4.2/v4.3/v5/v6"
+            return 1
+            ;;
+    esac
+}
