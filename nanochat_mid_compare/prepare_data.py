@@ -200,7 +200,7 @@ def _scan_preprocessed_shard_indexed(args):
     filtered_long = 0
     filtered_repeat = 0
     for i, cc in enumerate(char_counts):
-        if not cc or cc < 100:
+        if not cc:
             continue
         if max_chars is not None and cc > max_chars:
             filtered_long += 1
