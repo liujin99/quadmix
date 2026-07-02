@@ -263,9 +263,6 @@ def main():
 
     if per_task_analysis:
         parts.append("## Per-Task Analysis (R²-Adaptive Weighting)\n")
-    else:
-        parts.append("## Per-Task Analysis\n")
-        parts.append("> Not available: validation set has no task labels. Search uses aggregate model only.\n")
         n_active = per_task_analysis.get("n_active", 0)
         n_filtered = per_task_analysis.get("n_filtered", 0)
         r2_method = per_task_analysis.get("r2_method", "unknown")
@@ -316,6 +313,9 @@ def main():
             parts.append("")
             parts.append("Note: Per-task R² measures individual task prediction quality. Aggregate R² is lower due to correlated errors when averaging (mathematical property, not model failure).")
         parts.append("")
+    else:
+        parts.append("## Per-Task Analysis\n")
+        parts.append("> Not available: validation set has no task labels. Search uses aggregate model only.\n")
 
     dataset_size_prediction = summary.get("dataset_size_prediction")
     if dataset_size_prediction:
