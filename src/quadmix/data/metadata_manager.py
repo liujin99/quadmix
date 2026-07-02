@@ -238,8 +238,9 @@ class ShardMetadataManager:
             return []
 
         shard_groups = self.global_to_shard_rows(global_indices)
-        # global_idx → position in result array
-        pos_map = {int(idx): p for p, idx in enumerate(global_indices)}
+        pos_map: Dict[int, List[int]] = {}
+        for p, idx in enumerate(global_indices):
+            pos_map.setdefault(int(idx), []).append(p)
 
         result = [""] * len(global_indices)
 
@@ -253,8 +254,7 @@ class ShardMetadataManager:
             for local_row in local_rows:
                 text = chunk_map.get(local_row, "")
                 global_idx = self._shard_starts[sid] + local_row
-                pos = pos_map.get(int(global_idx))
-                if pos is not None:
+                for pos in pos_map.get(int(global_idx), []):
                     result[pos] = text
 
         return result
