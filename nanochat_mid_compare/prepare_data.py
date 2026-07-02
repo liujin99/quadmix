@@ -379,15 +379,16 @@ def main():
             print(f"  Quality method: {m} ({QUALITY_SCORE_MAP[m]})")
 
     print(f"\n[1/6] Reading QuadMix selected dataset...")
-    quadmix_df = pd.read_parquet(args.quadmix_sampled_data)
-    texts = quadmix_df["text"].tolist()
+    quadmix_table = pq.read_table(args.quadmix_sampled_data, columns=["text"])
+    texts = quadmix_table["text"].to_pylist()
+    del quadmix_table
     max_chars = args.max_chars
     max_char_repeat_ratio = args.max_char_repeat_ratio
     valid_texts = []
     n_too_short = 0
     n_too_long = 0
     n_repeat = 0
-    for t in texts:
+    for t in tqdm(texts, desc="  Filtering QuadMix docs"):
         if not t or len(t) < 100:
             n_too_short += 1
         elif len(t) > max_chars:
