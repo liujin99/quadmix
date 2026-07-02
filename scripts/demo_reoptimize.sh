@@ -42,12 +42,12 @@ export QUADMIX_TEMP_DIR="${QUADMIX_TEMP_DIR:-$HOME/.cache/QuaDMix/temp}"
 
 PREPROCESSED_DIR="$QUADMIX_TEMP_DIR/preprocessed"
 
-RESULT_DIR="$QUADMIX_DIR/result/revalidate_core_bmk_v6_20260627_000000"
+RESULT_DIR="$QUADMIX_DIR/result/demo_full_20260630_170836"
 OUTPUT=""
 NUM_SEARCH="100000"
 TOP_K="10"
 TARGET_TOKENS="0"
-SEARCH_MODE="r2_sigma_weighted"
+SEARCH_MODE="r2_weighted"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in

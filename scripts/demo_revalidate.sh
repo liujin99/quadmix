@@ -55,7 +55,7 @@ VAL_FILE="$QUADMIX_DIR/data/core_bmk_21tasks_v6_tokenized.pt"
 source "$QUADMIX_DIR/scripts/ensure_val_data.sh"
 ensure_val_data "liujin99/quadmix-core-bmk-v6" "core_bmk_21tasks_v6_tokenized.pt" "$VAL_FILE" || exit 1
 
-RESULT_DIR="$QUADMIX_DIR/result/demo_full_20260612_214550"
+RESULT_DIR="$QUADMIX_DIR/result/demo_full_20260630_170836"
 VAL_SET="core_bmk_v6"
 VAL_PATH=""
 OUTPUT=""
@@ -65,7 +65,7 @@ TOP_K="10"
 TARGET_TOKENS="0"
 BLOCK_SIZE="2048"
 MODEL_VARIANT="tinyllama_1M"
-SEARCH_MODE="r2_sigma_weighted"
+SEARCH_MODE="r2_weighted"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
