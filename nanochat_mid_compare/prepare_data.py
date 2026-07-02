@@ -382,10 +382,24 @@ def main():
     quadmix_df = pd.read_parquet(args.quadmix_sampled_data)
     texts = quadmix_df["text"].tolist()
     max_chars = args.max_chars
-    valid_texts = [t for t in texts if t and 100 <= len(t) <= max_chars]
-    n_filtered = len(texts) - len(valid_texts)
+    max_char_repeat_ratio = args.max_char_repeat_ratio
+    valid_texts = []
+    n_too_short = 0
+    n_too_long = 0
+    n_repeat = 0
+    for t in texts:
+        if not t or len(t) < 100:
+            n_too_short += 1
+        elif len(t) > max_chars:
+            n_too_long += 1
+        elif _has_char_repetition(t, max_char_repeat_ratio):
+            n_repeat += 1
+        else:
+            valid_texts.append(t)
+    n_filtered = n_too_short + n_too_long + n_repeat
     if n_filtered > 0:
-        print(f"  Filtered {n_filtered:,} docs (too short or > {max_chars:,} chars)")
+        print(f"  Filtered {n_filtered:,} docs: {n_too_short:,} too short, "
+              f"{n_too_long:,} > {max_chars:,} chars, {n_repeat:,} repetitive")
     print(f"  Counting tokens for {len(valid_texts):,} docs...")
     if enc and args.tokenizer_pkl:
         token_counts = count_tokens_mp(valid_texts, args.tokenizer_pkl, num_workers=args.num_workers)
