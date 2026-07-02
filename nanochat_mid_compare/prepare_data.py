@@ -435,7 +435,7 @@ def main():
     ]
     total_tokens = sum(token_counts)
 
-    del quadmix_df, texts, valid_texts, token_counts
+    del texts, valid_texts, token_counts
     gc.collect()
 
     print(f"  QuadMix docs: {len(quadmix_docs):,}")
