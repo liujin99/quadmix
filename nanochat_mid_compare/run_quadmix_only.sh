@@ -86,8 +86,11 @@ if [ -f "$DATA_DIR" ] && [[ "$DATA_DIR" == *.parquet ]]; then
 
     QUADMIX_TOKENS=$(DATA_DIR="$DATA_DIR" TOKENIZER_PKL="$TOKENIZER_PKL" SHARD_SIZE="$SHARD_SIZE" \
         NUM_NPU="$NUM_NPU" QUADMIX_DATA="$QUADMIX_DATA" PREPARED_DATA_DIR="$PREPARED_DATA_DIR" \
+        SCRIPT_DIR="$SCRIPT_DIR" \
         python3 -c "
-import os, json, pyarrow.parquet as pq, pyarrow as pa
+import os, sys, json, pyarrow.parquet as pq, pyarrow as pa
+sys.path.insert(0, os.environ['SCRIPT_DIR'])
+from prepare_data import count_tokens_mp
 
 src = os.environ['DATA_DIR']
 out_dir = os.environ['QUADMIX_DATA']
@@ -101,20 +104,13 @@ table = pq.read_table(src, columns=['text'])
 texts = [t for t in table['text'].to_pylist() if t and len(t) >= 100]
 print(f'  Valid docs: {len(texts):,}')
 
-enc = None
 token_method = 'char_count // 4 (estimate)'
 if os.path.exists(tokenizer_pkl):
-    import pickle
-    with open(tokenizer_pkl, 'rb') as f:
-        enc = pickle.load(f)
-    if hasattr(enc, 'encode_ordinary_batch'):
-        token_method = 'nanochat tokenizer'
-    else:
-        enc = None
+    token_method = 'nanochat tokenizer'
 
-if enc:
-    print(f'  Counting tokens ({token_method})...')
-    token_counts = [len(ids) for ids in enc.encode_ordinary_batch(texts, num_threads=16)]
+if os.path.exists(tokenizer_pkl):
+    print(f'  Counting tokens ({token_method}, multiprocessing)...')
+    token_counts = count_tokens_mp(texts, tokenizer_pkl)
 else:
     print(f'  Estimating tokens ({token_method})...')
     token_counts = [len(t) // 4 for t in texts]
