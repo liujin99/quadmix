@@ -26,7 +26,7 @@ QUADMIX_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # ══════ CONFIGURATION ══════
 RESULT_DIR="${RESULT_DIR:-$SCRIPT_DIR/results/20260623_220114}"
 NANOCHAT_MODEL_DIR="${NANOCHAT_MODEL_DIR:-/home/ma-user/work/nanochat_model_dir}"
-NANOCHAT_REPO="${NANOCHAT_REPO:-/home/ma-user/work/nanochat-npu}"
+NANOCHAT_REPO="${NANOCHAT_REPO:-/home/ma-user/work/nanochat_midtrain_326}"
 BASE_MODEL_TAG="${BASE_MODEL_TAG:-d24_0320}"
 DEVICE_BATCH_SIZE="${DEVICE_BATCH_SIZE:-8}"
 NUM_NPU="${NUM_NPU:-8}"

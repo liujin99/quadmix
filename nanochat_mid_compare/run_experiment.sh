@@ -34,7 +34,7 @@ TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 # QuadMix output: sampled_dataset.parquet from QuadMix pipeline
 # Auto-detects the latest result directory if not set
 if [ -z "${QUADMIX_SAMPLED_DATA:-}" ]; then
-    QUADMIX_SAMPLED_DATA="$(ls -t "$QUADMIX_DIR"/result/*/sampled_dataset.parquet 2>/dev/null | head -1)"
+    QUADMIX_SAMPLED_DATA="/home/ma-user/work/QuaDMix/result/revalidate_openhermes_20260702_193824/sampled_dataset.parquet"
 fi
 QUADMIX_SAMPLED_DATA="${QUADMIX_SAMPLED_DATA:-}"
 
@@ -53,7 +53,7 @@ NANOCHAT_MODEL_DIR="${NANOCHAT_MODEL_DIR:-/home/ma-user/work/nanochat_model_dir}
 BASE_MODEL_TAG="${BASE_MODEL_TAG:-d24_0320}"
 
 # Nanochat repo root
-NANOCHAT_REPO="${NANOCHAT_REPO:-/home/ma-user/work/nanochat-npu}"
+NANOCHAT_REPO="${NANOCHAT_REPO:-/home/ma-user/work/nanochat_midtrain_326}"
 
 # Mid-training checkpoint output directory (where trained models are saved)
 # If set, $NANOCHAT_MODEL_DIR/mid_checkpoints will be symlinked here

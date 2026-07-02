@@ -29,7 +29,7 @@ NANOCHAT_MODEL_DIR="${NANOCHAT_MODEL_DIR:-/home/ma-user/work/nanochat_model_dir}
 BASE_MODEL_TAG="${BASE_MODEL_TAG:-d24_0320}"
 
 # Nanochat repo root
-NANOCHAT_REPO="${NANOCHAT_REPO:-$HOME/nanochat-npu}"
+NANOCHAT_REPO="${NANOCHAT_REPO:-/home/ma-user/work/nanochat_midtrain_326}"
 
 # Output directory for evaluation log
 OUTPUT_DIR="${OUTPUT_DIR:-$(cd "$(dirname "$0")" && pwd)/results/base_eval}"
