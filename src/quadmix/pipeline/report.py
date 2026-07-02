@@ -230,6 +230,7 @@ def generate_report(
             for k, v in config.items():
                 parts.append(f"| {k} | {v} |")
         if metrics:
+            all_none = all(v is None for v in metrics.values())
             for k, v in metrics.items():
                 if v is None:
                     parts.append(f"| {k} | — |")
@@ -237,6 +238,9 @@ def generate_report(
                     parts.append(f"| {k} | {v:.4f} |")
                 else:
                     parts.append(f"| {k} | {v} |")
+            if all_none:
+                parts.append("")
+                parts.append("> Per-task metrics are N/A: validation set has no task labels (aggregate-only mode).")
         if elapsed is not None:
             parts.append(f"| Duration | {elapsed:.1f}s |")
         parts.append("")
@@ -423,6 +427,9 @@ def generate_report(
 
     if per_task_analysis:
         parts.append("## Per-Task Analysis (R²-Adaptive Weighting)\n")
+    else:
+        parts.append("## Per-Task Analysis\n")
+        parts.append("> Not available: validation set has no task labels. Search uses aggregate model only.\n")
         n_active = per_task_analysis.get("n_active", 0)
         n_filtered = per_task_analysis.get("n_filtered", 0)
         r2_method = per_task_analysis.get("r2_method", "unknown")
