@@ -104,7 +104,7 @@ class ParameterSampler:
 
     def sample_batch(self, n: int) -> List[ParameterSet]:
         """
-        Generate n parameter configurations.
+        Generate n parameter configurations (vectorized).
 
         Args:
             n: Number of parameter configurations to generate.
@@ -112,4 +112,37 @@ class ParameterSampler:
         Returns:
             List of n ParameterSet instances.
         """
-        return [self.sample_one() for _ in range(n)]
+        N = self.config.num_quality_criteria
+        M = self.config.num_domains
+
+        a_all = self._rng.uniform(0, 1, size=(n, N))
+        a_norm_all = a_all / a_all.sum(axis=1, keepdims=True)
+
+        b_all = self._rng.uniform(0, 1, size=(n, M, N))
+        b_raw_all = a_norm_all[:, np.newaxis, :] * b_all
+        b_norm_all = b_raw_all / b_raw_all.sum(axis=2, keepdims=True)
+
+        lambda_all = self._rng.uniform(self.config.lambda_min, self.config.lambda_max, size=(n, M)) * self.config.lambda_scale
+        omega_all = self._rng.uniform(self.config.omega_min, self.config.omega_max, size=(n, M)) * self.config.omega_scale
+        eta_all = self._rng.uniform(self.config.eta_min, self.config.eta_max, size=(n, M)) * self.config.eta_scale
+        epsilon_all = self._rng.uniform(self.config.epsilon_min, self.config.epsilon_max, size=(n, M)) * self.config.epsilon_scale
+
+        results = []
+        for i in range(n):
+            domain_weights = b_norm_all[i].flatten()
+            sampling_configs = [
+                SamplingConfig(
+                    lambda_=lambda_all[i, m],
+                    omega=omega_all[i, m],
+                    eta=eta_all[i, m],
+                    epsilon=epsilon_all[i, m],
+                )
+                for m in range(M)
+            ]
+            merge_config = MergedQualityConfig(
+                global_weights=a_norm_all[i],
+                domain_weights=domain_weights,
+            )
+            results.append(ParameterSet(merge_config=merge_config, sampling_configs=sampling_configs))
+
+        return results
