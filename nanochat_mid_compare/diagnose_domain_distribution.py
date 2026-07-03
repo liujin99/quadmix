@@ -26,6 +26,9 @@ from pathlib import Path
 
 import numpy as np
 import pyarrow.parquet as pq
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -176,6 +179,37 @@ def print_comparison(methods_data):
         print(row)
 
 
+def plot_comparison(methods_data, output_path):
+    labels = list(methods_data.keys())
+    n_methods = len(labels)
+    domains = DOMAIN_SHORT_NAMES
+    n_domains = len(domains)
+
+    x = np.arange(n_domains)
+    width = 0.8 / n_methods
+    colors = ["#2196F3", "#FF9800", "#4CAF50", "#E91E63", "#9C27B0"]
+
+    fig, ax = plt.subplots(figsize=(16, 6))
+    for i, label in enumerate(labels):
+        dist, total = methods_data[label]
+        pcts = [dist[d]["pct"] for d in domains]
+        offset = (i - n_methods / 2 + 0.5) * width
+        bars = ax.bar(x + offset, pcts, width, label=label, color=colors[i % len(colors)])
+        ax.bar_label(bars, fmt="%.1f", padding=1, fontsize=6, rotation=90)
+
+    ax.set_xlabel("Domain")
+    ax.set_ylabel("Percentage (%)")
+    ax.set_title("Domain Distribution Comparison")
+    ax.set_xticks(x)
+    ax.set_xticklabels(domains, rotation=45, ha="right", fontsize=9)
+    ax.legend(loc="upper right")
+    ax.grid(axis="y", alpha=0.3)
+    plt.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    print(f"\nPlot saved to: {output_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Diagnose domain distribution")
     parser.add_argument("--quadmix-sampled-data", type=str, required=True)
@@ -184,6 +218,8 @@ def main():
     parser.add_argument("--max-shards", type=int, default=500,
                         help="Max preprocessed shards to scan for all baselines (default: 500)")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--output-dir", type=str, default=".",
+                        help="Directory to save the plot (default: current directory)")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -233,6 +269,11 @@ def main():
     print("=" * 60)
     print()
     print_comparison(methods_data)
+
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    plot_path = output_dir / "domain_distribution_comparison.png"
+    plot_comparison(methods_data, plot_path)
 
 
 if __name__ == "__main__":
