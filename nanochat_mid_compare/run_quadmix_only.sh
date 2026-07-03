@@ -89,10 +89,10 @@ if [ -f "$DATA_DIR" ] && [[ "$DATA_DIR" == *.parquet ]]; then
         SCRIPT_DIR="$SCRIPT_DIR" MAX_CHARS="${MAX_CHARS:-1000000}" \
         MAX_CHAR_REPEAT_RATIO="${MAX_CHAR_REPEAT_RATIO:-0.3}" \
         python3 -c "
-import os, sys, json, pyarrow.parquet as pq, pyarrow as pa
-from collections import Counter
+import os, sys, json, multiprocessing as mp, pyarrow.parquet as pq, pyarrow as pa
+from tqdm import tqdm
 sys.path.insert(0, os.environ['SCRIPT_DIR'])
-from prepare_data import count_tokens_mp
+from prepare_data import count_tokens_mp, _filter_docs_chunk, _SPAWN_CTX
 
 src = os.environ['DATA_DIR']
 out_dir = os.environ['QUADMIX_DATA']
@@ -103,32 +103,28 @@ tokenizer_pkl = os.environ['TOKENIZER_PKL']
 max_chars = int(os.environ['MAX_CHARS'])
 max_char_repeat_ratio = float(os.environ['MAX_CHAR_REPEAT_RATIO'])
 
-def _has_char_repetition(text, max_ratio=0.3):
-    if len(text) < 1000:
-        return False
-    non_ws = [c for c in text if not c.isspace()]
-    if len(non_ws) < 1000:
-        return False
-    counts = Counter(non_ws)
-    most_common_count = counts.most_common(1)[0][1]
-    return most_common_count / len(non_ws) > max_ratio
-
 print(f'  Reading {src}...')
 table = pq.read_table(src, columns=['text'])
 raw_texts = table['text'].to_pylist()
+
+num_workers = min(mp.cpu_count(), 128) or 1
+chunk_size = max(1, len(raw_texts) // (num_workers * 4))
+chunks = [raw_texts[i:i + chunk_size] for i in range(0, len(raw_texts), chunk_size)]
+filter_tasks = [(c, max_chars, max_char_repeat_ratio) for c in chunks]
 texts = []
 n_empty = 0
 n_too_long = 0
 n_repeat = 0
-for t in raw_texts:
-    if not t:
-        n_empty += 1
-    elif len(t) > max_chars:
-        n_too_long += 1
-    elif _has_char_repetition(t, max_char_repeat_ratio):
-        n_repeat += 1
-    else:
-        texts.append(t)
+with _SPAWN_CTX.Pool(num_workers) as pool:
+    for valid, ne, tl, tr in tqdm(
+        pool.imap_unordered(_filter_docs_chunk, filter_tasks, chunksize=1),
+        total=len(filter_tasks),
+        desc=f'  Filtering ({num_workers} processes)',
+    ):
+        texts.extend(valid)
+        n_empty += ne
+        n_too_long += tl
+        n_repeat += tr
 n_filtered = n_empty + n_too_long + n_repeat
 if n_filtered > 0:
     print(f'  Filtered {n_empty:,} docs (empty), '
