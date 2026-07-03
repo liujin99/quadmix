@@ -86,9 +86,11 @@ if [ -f "$DATA_DIR" ] && [[ "$DATA_DIR" == *.parquet ]]; then
 
     QUADMIX_TOKENS=$(DATA_DIR="$DATA_DIR" TOKENIZER_PKL="$TOKENIZER_PKL" SHARD_SIZE="$SHARD_SIZE" \
         NUM_NPU="$NUM_NPU" QUADMIX_DATA="$QUADMIX_DATA" PREPARED_DATA_DIR="$PREPARED_DATA_DIR" \
-        SCRIPT_DIR="$SCRIPT_DIR" \
+        SCRIPT_DIR="$SCRIPT_DIR" MAX_CHARS="${MAX_CHARS:-1000000}" \
+        MAX_CHAR_REPEAT_RATIO="${MAX_CHAR_REPEAT_RATIO:-0.3}" \
         python3 -c "
 import os, sys, json, pyarrow.parquet as pq, pyarrow as pa
+from collections import Counter
 sys.path.insert(0, os.environ['SCRIPT_DIR'])
 from prepare_data import count_tokens_mp
 
@@ -98,10 +100,40 @@ stats_dir = os.environ['PREPARED_DATA_DIR']
 shard_size = int(os.environ['SHARD_SIZE'])
 num_npu = int(os.environ['NUM_NPU'])
 tokenizer_pkl = os.environ['TOKENIZER_PKL']
+max_chars = int(os.environ['MAX_CHARS'])
+max_char_repeat_ratio = float(os.environ['MAX_CHAR_REPEAT_RATIO'])
+
+def _has_char_repetition(text, max_ratio=0.3):
+    if len(text) < 1000:
+        return False
+    non_ws = [c for c in text if not c.isspace()]
+    if len(non_ws) < 1000:
+        return False
+    counts = Counter(non_ws)
+    most_common_count = counts.most_common(1)[0][1]
+    return most_common_count / len(non_ws) > max_ratio
 
 print(f'  Reading {src}...')
 table = pq.read_table(src, columns=['text'])
-texts = [t for t in table['text'].to_pylist() if t and len(t) >= 100]
+raw_texts = table['text'].to_pylist()
+texts = []
+n_empty = 0
+n_too_long = 0
+n_repeat = 0
+for t in raw_texts:
+    if not t:
+        n_empty += 1
+    elif len(t) > max_chars:
+        n_too_long += 1
+    elif _has_char_repetition(t, max_char_repeat_ratio):
+        n_repeat += 1
+    else:
+        texts.append(t)
+n_filtered = n_empty + n_too_long + n_repeat
+if n_filtered > 0:
+    print(f'  Filtered {n_empty:,} docs (empty), '
+          f'{n_too_long:,} docs (>{max_chars:,} chars), '
+          f'{n_repeat:,} docs (single char >{max_char_repeat_ratio*100:.0f}% repetition)')
 print(f'  Valid docs: {len(texts):,}')
 
 token_method = 'char_count // 4 (estimate)'
@@ -145,6 +177,7 @@ stats = {
         'val_ratio': 0,
         'token_method': token_method,
         'quadmix_source': src,
+        'tokenizer_pkl': tokenizer_pkl,
         'baselines': ['quadmix'],
     }
 }
@@ -172,6 +205,44 @@ else
 fi
 
 QUADMIX_DATA="$DATA_DIR/quadmix_data"
+
+CKPT_META_JSON=$(ls "$NANOCHAT_MODEL_DIR/base_checkpoints/$BASE_MODEL_TAG"/meta_*.json 2>/dev/null | sort | tail -1)
+CKPT_TOTAL_BATCH_SIZE=""
+if [ -n "$CKPT_META_JSON" ]; then
+    CKPT_TOTAL_BATCH_SIZE=$(python3 -c "import json; print(json.load(open('$CKPT_META_JSON'))['total_batch_size'])")
+fi
+
+DATA_DIR="$DATA_DIR" BASE_MODEL_TAG="$BASE_MODEL_TAG" \
+TARGET_PARAM_DATA_RATIO="$TARGET_PARAM_DATA_RATIO" \
+NUM_SCALING_PARAMS="$NUM_SCALING_PARAMS" \
+DEVICE_BATCH_SIZE="$DEVICE_BATCH_SIZE" \
+NUM_NPU="$NUM_NPU" \
+TOTAL_BATCH_SIZE="${CKPT_TOTAL_BATCH_SIZE:-524288}" \
+NANOCHAT_REPO="$NANOCHAT_REPO" \
+NANOCHAT_MODEL_DIR="$NANOCHAT_MODEL_DIR" \
+MID_CHECKPOINTS_OUTPUT_DIR="$MID_CHECKPOINTS_OUTPUT_DIR" \
+QUADMIX_GIT_HASH="$(git -C "$QUADMIX_DIR" rev-parse --short HEAD 2>/dev/null || echo 'unknown')" \
+NANOCHAT_GIT_HASH="$(git -C "$NANOCHAT_REPO" rev-parse --short HEAD 2>/dev/null || echo 'unknown')" \
+python3 -c "
+import os, json
+stats_path = os.path.join(os.environ['DATA_DIR'], 'dataset_stats.json')
+stats = json.load(open(stats_path))
+stats['config'].update({
+    'base_model_tag': os.environ['BASE_MODEL_TAG'],
+    'target_param_data_ratio': float(os.environ['TARGET_PARAM_DATA_RATIO']),
+    'num_scaling_params': int(os.environ['NUM_SCALING_PARAMS']),
+    'device_batch_size': int(os.environ['DEVICE_BATCH_SIZE']),
+    'total_batch_size': int(os.environ['TOTAL_BATCH_SIZE']),
+    'num_npu': int(os.environ['NUM_NPU']),
+    'nanochat_repo': os.environ.get('NANOCHAT_REPO', ''),
+    'nanochat_model_dir': os.environ.get('NANOCHAT_MODEL_DIR', ''),
+    'mid_checkpoints_output_dir': os.environ.get('MID_CHECKPOINTS_OUTPUT_DIR', ''),
+    'quadmix_git_hash': os.environ.get('QUADMIX_GIT_HASH', ''),
+    'nanochat_git_hash': os.environ.get('NANOCHAT_GIT_HASH', ''),
+})
+with open(stats_path, 'w') as f:
+    json.dump(stats, f, indent=2)
+"
 
 # ══════════════════════════════════════════════════════════════
 #  VALIDATION
@@ -315,7 +386,14 @@ s = json.load(open(os.path.join(os.environ['DATA_DIR'], 'dataset_stats.json')))
 print(s['quadmix']['tokens'])
 ")
 
-TOTAL_BATCH_SIZE=524288
+META_JSON=$(ls "$BASE_CKPT_DIR"/meta_*.json 2>/dev/null | sort | tail -1)
+if [ -n "$META_JSON" ]; then
+    TOTAL_BATCH_SIZE=$(python3 -c "import json; print(json.load(open('$META_JSON'))['total_batch_size'])")
+    echo "  Read total_batch_size=$TOTAL_BATCH_SIZE from checkpoint"
+else
+    TOTAL_BATCH_SIZE=524288
+    echo "  WARNING: No meta JSON found in $BASE_CKPT_DIR, falling back to 524288"
+fi
 TARGET_TOKENS=$(python3 -c "print(int($TARGET_PARAM_DATA_RATIO * $NUM_SCALING_PARAMS))")
 ACTUAL_TOKENS=$(python3 -c "print(min($TARGET_TOKENS, $QUADMIX_TOKENS))")
 NUM_ITERATIONS=$((ACTUAL_TOKENS / TOTAL_BATCH_SIZE))
@@ -344,6 +422,7 @@ python3 -m torch.distributed.run --standalone --nproc_per_node="$NUM_NPU" -m scr
     --num-iterations="$NUM_ITERATIONS" \
     --target-param-data-ratio="$ACTUAL_RATIO" \
     --device-batch-size="$DEVICE_BATCH_SIZE" \
+    --total-batch-size="$TOTAL_BATCH_SIZE" \
     --run="quadmix_mid" \
     --model-tag="$QUADMIX_MODEL_TAG" \
     --core-metric-every="$CORE_METRIC_EVERY" \
@@ -393,10 +472,18 @@ echo ""
 QUADMIX_LOG="$QUADMIX_LOG" QUADMIX_EVAL_LOG="$QUADMIX_EVAL_LOG" \
 QUADMIX_MODEL_TAG="$QUADMIX_MODEL_TAG" BASE_MODEL_TAG="$BASE_MODEL_TAG" \
 RESULT_DIR="$RESULT_DIR" DATA_DIR="$DATA_DIR" \
+DATA_SOURCE="$DATA_SOURCE" \
+TOKENIZER_PKL="$TOKENIZER_PKL" NANOCHAT_REPO="$NANOCHAT_REPO" \
+NANOCHAT_MODEL_DIR="$NANOCHAT_MODEL_DIR" \
+MID_CHECKPOINTS_OUTPUT_DIR="$MID_CHECKPOINTS_OUTPUT_DIR" \
 TARGET_PARAM_DATA_RATIO="$TARGET_PARAM_DATA_RATIO" \
 NUM_SCALING_PARAMS="$NUM_SCALING_PARAMS" \
-DEVICE_BATCH_SIZE="$DEVICE_BATCH_SIZE" NUM_NPU="$NUM_NPU" \
-MID_CHECKPOINTS_OUTPUT_DIR="$MID_CHECKPOINTS_OUTPUT_DIR" \
+DEVICE_BATCH_SIZE="$DEVICE_BATCH_SIZE" TOTAL_BATCH_SIZE="$TOTAL_BATCH_SIZE" \
+NUM_NPU="$NUM_NPU" \
+QUADMIX_TOKENS="$QUADMIX_TOKENS" ACTUAL_TOKENS="$ACTUAL_TOKENS" \
+ACTUAL_RATIO="$ACTUAL_RATIO" NUM_ITERATIONS="$NUM_ITERATIONS" \
+QUADMIX_GIT_HASH="$(git -C "$QUADMIX_DIR" rev-parse --short HEAD 2>/dev/null || echo 'unknown')" \
+NANOCHAT_GIT_HASH="$(git -C "$NANOCHAT_REPO" rev-parse --short HEAD 2>/dev/null || echo 'unknown')" \
 python3 -c "
 import os, re, json
 from datetime import datetime
@@ -462,6 +549,20 @@ lines.append(f'**Mid Model**: \`{os.environ[\"QUADMIX_MODEL_TAG\"]}\`')
 lines.append(f'**Result Dir**: \`{result_dir}\`')
 lines.append('')
 
+lines.append('## Provenance')
+lines.append('')
+lines.append('| Key | Value |')
+lines.append('|---|---|')
+quadmix_source = stats.get('config', {}).get('quadmix_source', 'N/A')
+lines.append(f'| Source parquet | \`{quadmix_source}\` |')
+lines.append(f'| Tokenizer | \`{os.environ.get(\"TOKENIZER_PKL\", \"N/A\")}\` |')
+lines.append(f'| Nanochat repo | \`{os.environ.get(\"NANOCHAT_REPO\", \"N/A\")}\` |')
+lines.append(f'| Nanochat model dir | \`{os.environ.get(\"NANOCHAT_MODEL_DIR\", \"N/A\")}\` |')
+lines.append(f'| Mid checkpoint output | \`{os.environ.get(\"MID_CHECKPOINTS_OUTPUT_DIR\", \"N/A\")}\` |')
+lines.append(f'| QuadMix git | \`{os.environ.get(\"QUADMIX_GIT_HASH\", \"N/A\")}\` |')
+lines.append(f'| Nanochat git | \`{os.environ.get(\"NANOCHAT_GIT_HASH\", \"N/A\")}\` |')
+lines.append('')
+
 lines.append('## Result')
 lines.append('')
 lines.append(f'**CORE metric: {fmt(evl[\"core_metric\"], \".4f\")}**')
@@ -507,6 +608,19 @@ lines.append(f'| Tokens | {q.get(\"tokens\", \"N/A\"):,} |' if isinstance(q.get(
 lines.append(f'| Shards | {q.get(\"shards\", \"N/A\")} |')
 lines.append('')
 
+lines.append('## Training Budget')
+lines.append('')
+lines.append('| Parameter | Value |')
+lines.append('|---|---|')
+lines.append(f'| Dataset tokens | {q.get(\"tokens\", \"N/A\"):,} |' if isinstance(q.get('tokens'), int) else '| Dataset tokens | N/A |')
+actual_tokens = os.environ.get('ACTUAL_TOKENS')
+actual_ratio = os.environ.get('ACTUAL_RATIO')
+num_iterations = os.environ.get('NUM_ITERATIONS')
+lines.append(f'| Actual training tokens | {int(actual_tokens):,} |' if actual_tokens else '| Actual training tokens | N/A |')
+lines.append(f'| Actual param-data ratio | {actual_ratio} |' if actual_ratio else '| Actual param-data ratio | N/A |')
+lines.append(f'| Iterations | {num_iterations} |' if num_iterations else '| Iterations | N/A |')
+lines.append('')
+
 lines.append('## Config')
 lines.append('')
 lines.append('| Parameter | Value |')
@@ -514,6 +628,7 @@ lines.append('|---|---|')
 lines.append(f'| target-param-data-ratio | {os.environ[\"TARGET_PARAM_DATA_RATIO\"]} |')
 lines.append(f'| num-scaling-params | {int(os.environ[\"NUM_SCALING_PARAMS\"]):,} |')
 lines.append(f'| device-batch-size | {os.environ[\"DEVICE_BATCH_SIZE\"]} |')
+lines.append(f'| total-batch-size | {int(os.environ[\"TOTAL_BATCH_SIZE\"]):,} |')
 lines.append(f'| NPU cards | {os.environ[\"NUM_NPU\"]} |')
 lines.append('')
 

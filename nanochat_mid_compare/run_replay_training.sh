@@ -13,8 +13,19 @@ END_STEP="${END_STEP:-330}"
 BASE_MODEL_TAG="${BASE_MODEL_TAG:-d24_0320}"
 BASE_MODEL_STEP="${BASE_MODEL_STEP:-6612}"
 DEVICE_BATCH_SIZE="${DEVICE_BATCH_SIZE:-8}"
-TOTAL_BATCH_SIZE="${TOTAL_BATCH_SIZE:-524288}"
+TOTAL_BATCH_SIZE="${TOTAL_BATCH_SIZE:-}"
 NUM_ITERATIONS="${NUM_ITERATIONS:-11}"
+
+MID_CKPT_DIR="$NANOCHAT_MODEL_DIR/mid_checkpoints/$BASE_MODEL_TAG"
+if [ -z "$TOTAL_BATCH_SIZE" ]; then
+    META_JSON=$(ls "$MID_CKPT_DIR"/meta_*.json 2>/dev/null | sort | tail -1)
+    if [ -n "$META_JSON" ]; then
+        TOTAL_BATCH_SIZE=$(python3 -c "import json; print(json.load(open('$META_JSON'))['total_batch_size'])")
+    else
+        TOTAL_BATCH_SIZE=524288
+        echo "WARNING: No meta JSON found in $MID_CKPT_DIR, falling back to 524288"
+    fi
+fi
 
 # ══════ NPU ENVIRONMENT (identical to run_experiment.sh) ══════
 export OMP_NUM_THREADS=1

@@ -149,6 +149,7 @@ def _tokenize_shard_parallel(
                 fut.add_done_callback(on_done)
                 futs.append(fut)
 
+            failed_shards = []
             for fut in futs:
                 try:
                     sid, parsed_rows, tokens_array, io_time, tok_time, total_time = fut.result()
@@ -157,6 +158,13 @@ def _tokenize_shard_parallel(
                     print(f"  [Tokenize Error] {e}")
                     import traceback
                     traceback.print_exc()
+                    failed_shards.append(str(e))
+
+    if failed_shards:
+        raise RuntimeError(
+            f"[ParallelTokenize] {len(failed_shards)} shard(s) failed to tokenize. "
+            f"First error: {failed_shards[0]}"
+        )
 
     total_time = time.time() - t0
     total_docs = sum(len(r[1]) for r in results)

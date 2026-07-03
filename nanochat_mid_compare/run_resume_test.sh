@@ -29,7 +29,7 @@ MODEL_TAG="${MODEL_TAG:-fineweb_edu_resume}"
 BASE_MODEL_TAG="${BASE_MODEL_TAG:-d24_0320}"
 BASE_MODEL_STEP="${BASE_MODEL_STEP:-6612}"
 DEVICE_BATCH_SIZE="${DEVICE_BATCH_SIZE:-8}"
-TOTAL_BATCH_SIZE="${TOTAL_BATCH_SIZE:-524288}"
+TOTAL_BATCH_SIZE="${TOTAL_BATCH_SIZE:-}"
 NUM_ITERATIONS="${NUM_ITERATIONS:-627}"
 
 # ══════ NPU ENVIRONMENT ══════
@@ -95,6 +95,16 @@ BASE_CKPT_DIR="$NANOCHAT_MODEL_DIR/base_checkpoints/$BASE_MODEL_TAG"
 if [ ! -e "$LINK_DIR" ]; then
     echo "Creating symlink: $LINK_DIR -> $BASE_CKPT_DIR"
     ln -s "$BASE_CKPT_DIR" "$LINK_DIR"
+fi
+
+if [ -z "$TOTAL_BATCH_SIZE" ]; then
+    META_JSON=$(ls "$BASE_CKPT_DIR"/meta_*.json 2>/dev/null | sort | tail -1)
+    if [ -n "$META_JSON" ]; then
+        TOTAL_BATCH_SIZE=$(python3 -c "import json; print(json.load(open('$META_JSON'))['total_batch_size'])")
+    else
+        TOTAL_BATCH_SIZE=524288
+        echo "WARNING: No meta JSON found in $BASE_CKPT_DIR, falling back to 524288"
+    fi
 fi
 
 echo ""

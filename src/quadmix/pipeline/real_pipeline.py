@@ -838,7 +838,7 @@ class QuaDMixPipeline:
 
         if actual_tokens > self.config.target_tokens:
             keep_prob = self.config.target_tokens / actual_tokens
-            rng = np.random.default_rng()
+            rng = np.random.default_rng(42)
             keep_mask = rng.random(len(selected_indices)) < keep_prob
             selected_indices = selected_indices[keep_mask]
             final_tokens = float(np.sum(token_counts[selected_indices]))

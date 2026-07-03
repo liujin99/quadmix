@@ -18,7 +18,7 @@ from quadmix.core.sampler import compute_sampling_values
 
 def _select_documents_vectorized(
     sampling_values: npt.NDArray[np.float64],
-    rng: np.random.Generator = np.random.default_rng(),
+    rng: Optional[np.random.Generator] = None,
 ) -> Tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]]:
     """Select documents based on sampling values (fully vectorized).
 
@@ -30,6 +30,8 @@ def _select_documents_vectorized(
         Tuple of (selected_indices, selection_weights).
         Each index may appear multiple times (if sampling_value > 1).
     """
+    if rng is None:
+        rng = np.random.default_rng(42)
     # Integer part: deterministic repeats
     int_part = np.floor(sampling_values).astype(np.int64)
     # Fractional part: stochastic Bernoulli
@@ -51,7 +53,7 @@ def sample_with_optimal_params(
     quality_ranks: npt.NDArray[np.float64],
     domain_labels: npt.NDArray[np.int64],
     params: ParameterSet,
-    rng: np.random.Generator = np.random.default_rng(),
+    rng: Optional[np.random.Generator] = None,
 ) -> Tuple[npt.NDArray[np.int64], npt.NDArray[np.float64], npt.NDArray[np.float64]]:
     """Apply optimal QuaDMix parameters to produce a sampled dataset.
 

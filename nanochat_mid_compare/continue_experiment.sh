@@ -174,7 +174,14 @@ run_mid_training() {
     local LOG_FILE="$4"
     local DATASET_TOKENS="$5"
 
-    local TOTAL_BATCH_SIZE=524288
+    local META_JSON=$(ls "$BASE_CKPT_DIR"/meta_*.json 2>/dev/null | sort | tail -1)
+    if [ -n "$META_JSON" ]; then
+        local TOTAL_BATCH_SIZE=$(python3 -c "import json; print(json.load(open('$META_JSON'))['total_batch_size'])")
+        echo "    Read total_batch_size=$TOTAL_BATCH_SIZE from checkpoint"
+    else
+        local TOTAL_BATCH_SIZE=524288
+        echo "    WARNING: No meta JSON found in $BASE_CKPT_DIR, falling back to 524288"
+    fi
     local TARGET_TOKENS=$(python3 -c "print(int($TARGET_PARAM_DATA_RATIO * $NUM_SCALING_PARAMS))")
     local ACTUAL_TOKENS=$(python3 -c "print(min($TARGET_TOKENS, $DATASET_TOKENS))")
     local NUM_ITERATIONS=$((ACTUAL_TOKENS / TOTAL_BATCH_SIZE))
@@ -202,6 +209,7 @@ run_mid_training() {
         --num-iterations="$NUM_ITERATIONS" \
         --target-param-data-ratio="$ACTUAL_RATIO" \
         --device-batch-size="$DEVICE_BATCH_SIZE" \
+        --total-batch-size="$TOTAL_BATCH_SIZE" \
         --run="$RUN_NAME" \
         --model-tag="$MODEL_TAG" \
         --core-metric-every="$CORE_METRIC_EVERY" \

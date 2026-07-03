@@ -284,6 +284,8 @@ def select_quality_topk(prep_files, prep_metadata, quality_method, total_tokens,
             break
         q_selected.append((shard_id, doc_id))
         q_accumulated += est_tokens
+    if not q_selected:
+        raise RuntimeError("No quality docs selected — check total_tokens and quality thresholds")
     cutoff_idx = min(len(q_selected) - 1, len(all_quality_docs) - 1)
     print(f"  Selected {len(q_selected):,} top-quality docs (estimated ~{q_accumulated:,} tokens)")
     print(f"  Quality score range: {all_quality_docs[0][2]:.4f} (best) -> {all_quality_docs[cutoff_idx][2]:.4f} (cutoff)")

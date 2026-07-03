@@ -59,12 +59,13 @@ def rank_normalize(scores: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
     """
     Rank-based normalization to [0, 1].
     Higher = better (largest value gets rank ~1, smallest gets rank ~0).
+    Tied scores receive the average rank.
     """
     n = len(scores)
     if n == 0:
         return scores
-    ranks = np.argsort(np.argsort(scores))  # 0 = smallest (worst)
-    return ranks.astype(np.float64) / n
+    ranks = sp_stats.rankdata(scores, method='average')
+    return (ranks - 1).astype(np.float64) / n
 
 
 def log1p_z_normalize(scores: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
@@ -131,9 +132,9 @@ def threshold_rank_normalize(scores: npt.NDArray[np.float64]) -> npt.NDArray[np.
         return rank_normalize(scores)
 
     signal_scores = scores[signal_mask]
-    signal_ranks = np.argsort(np.argsort(signal_scores))
+    signal_ranks = sp_stats.rankdata(signal_scores, method='average')
 
-    result[signal_mask] = signal_ranks.astype(np.float64) / signal_count
+    result[signal_mask] = (signal_ranks - 1).astype(np.float64) / signal_count
 
     return result
 

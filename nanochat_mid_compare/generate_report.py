@@ -152,6 +152,19 @@ def generate_report(args):
             lines.append(f"**Quality Method**: `{m}` ({qcol})")
     lines.append("")
 
+    lines.append("## Provenance")
+    lines.append("")
+    lines.append("| Key | Value |")
+    lines.append("|---|---|")
+    lines.append(f"| Source parquet | `{config.get('quadmix_source', 'N/A')}` |")
+    lines.append(f"| Tokenizer | `{config.get('tokenizer_pkl', 'N/A')}` |")
+    lines.append(f"| Nanochat repo | `{config.get('nanochat_repo', 'N/A')}` |")
+    lines.append(f"| Nanochat model dir | `{config.get('nanochat_model_dir', 'N/A')}` |")
+    lines.append(f"| Mid checkpoint output | `{config.get('mid_checkpoints_output_dir', 'N/A')}` |")
+    lines.append(f"| QuadMix git | `{config.get('quadmix_git_hash', 'N/A')}` |")
+    lines.append(f"| Nanochat git | `{config.get('nanochat_git_hash', 'N/A')}` |")
+    lines.append("")
+
     lines.append("## Summary")
     lines.append("")
     header = "| | " + " | ".join(labels[b] for b in baselines) + " |"
@@ -265,6 +278,8 @@ def generate_report(args):
     lines.append(f"| Num scaling params | {config.get('num_scaling_params', 'N/A'):,} |")
     lines.append(f"| Device batch size | {config.get('device_batch_size', 'N/A')} |")
     lines.append(f"| Num NPU | {config.get('num_npu', 'N/A')} |")
+    total_bs = config.get('total_batch_size')
+    lines.append(f"| Total batch size | {total_bs:,} |" if total_bs is not None else "| Total batch size | N/A |")
     lines.append(f"| Seed | {config.get('seed', 'N/A')} |")
     lines.append(f"| Token method | {config.get('token_method', 'N/A')} |")
     if quality_methods:

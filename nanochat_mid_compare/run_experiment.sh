@@ -284,11 +284,25 @@ else
     python3 "$SCRIPT_DIR/prepare_data.py" "${PREP_ARGS[@]}"
 fi
 
+CKPT_META_JSON=$(ls "$BASE_CKPT_DIR"/meta_*.json 2>/dev/null | sort | tail -1)
+CKPT_TOTAL_BATCH_SIZE=""
+if [ -n "$CKPT_META_JSON" ]; then
+    CKPT_TOTAL_BATCH_SIZE=$(python3 -c "import json; print(json.load(open('$CKPT_META_JSON'))['total_batch_size'])")
+fi
+
 DATA_DIR="$DATA_DIR" BASE_MODEL_TAG="$BASE_MODEL_TAG" \
 TARGET_PARAM_DATA_RATIO="$TARGET_PARAM_DATA_RATIO" \
 NUM_SCALING_PARAMS="$NUM_SCALING_PARAMS" \
 DEVICE_BATCH_SIZE="$DEVICE_BATCH_SIZE" \
-NUM_NPU="$NUM_NPU" python3 -c "
+NUM_NPU="$NUM_NPU" \
+TOTAL_BATCH_SIZE="${CKPT_TOTAL_BATCH_SIZE:-524288}" \
+TOKENIZER_PKL="$TOKENIZER_DIR/tokenizer.pkl" \
+NANOCHAT_REPO="$NANOCHAT_REPO" \
+NANOCHAT_MODEL_DIR="$NANOCHAT_MODEL_DIR" \
+MID_CHECKPOINTS_OUTPUT_DIR="$MID_CHECKPOINTS_OUTPUT_DIR" \
+QUADMIX_GIT_HASH="$(git -C "$QUADMIX_DIR" rev-parse --short HEAD 2>/dev/null || echo 'unknown')" \
+NANOCHAT_GIT_HASH="$(git -C "$NANOCHAT_REPO" rev-parse --short HEAD 2>/dev/null || echo 'unknown')" \
+python3 -c "
 import os, json
 stats_path = os.path.join(os.environ['DATA_DIR'], 'dataset_stats.json')
 stats = json.load(open(stats_path))
@@ -297,7 +311,14 @@ stats['config'].update({
     'target_param_data_ratio': float(os.environ['TARGET_PARAM_DATA_RATIO']),
     'num_scaling_params': int(os.environ['NUM_SCALING_PARAMS']),
     'device_batch_size': int(os.environ['DEVICE_BATCH_SIZE']),
+    'total_batch_size': int(os.environ['TOTAL_BATCH_SIZE']),
     'num_npu': int(os.environ['NUM_NPU']),
+    'tokenizer_pkl': os.environ.get('TOKENIZER_PKL', ''),
+    'nanochat_repo': os.environ.get('NANOCHAT_REPO', ''),
+    'nanochat_model_dir': os.environ.get('NANOCHAT_MODEL_DIR', ''),
+    'mid_checkpoints_output_dir': os.environ.get('MID_CHECKPOINTS_OUTPUT_DIR', ''),
+    'quadmix_git_hash': os.environ.get('QUADMIX_GIT_HASH', ''),
+    'nanochat_git_hash': os.environ.get('NANOCHAT_GIT_HASH', ''),
 })
 with open(stats_path, 'w') as f:
     json.dump(stats, f, indent=2)
@@ -366,7 +387,15 @@ run_mid_training() {
     local LOG_FILE="$4"
     local DATASET_TOKENS="$5"
 
-    local TOTAL_BATCH_SIZE=524288
+    local BASE_CKPT_DIR="$NANOCHAT_MODEL_DIR/base_checkpoints/$BASE_MODEL_TAG"
+    local META_JSON=$(ls "$BASE_CKPT_DIR"/meta_*.json 2>/dev/null | sort | tail -1)
+    if [ -n "$META_JSON" ]; then
+        local TOTAL_BATCH_SIZE=$(python3 -c "import json; print(json.load(open('$META_JSON'))['total_batch_size'])")
+        echo "    Read total_batch_size=$TOTAL_BATCH_SIZE from checkpoint"
+    else
+        echo "    ERROR: No meta JSON found in $BASE_CKPT_DIR, cannot determine total_batch_size" >&2
+        exit 1
+    fi
     local TARGET_TOKENS=$(python3 -c "print(int($TARGET_PARAM_DATA_RATIO * $NUM_SCALING_PARAMS))")
     local ACTUAL_TOKENS=$(python3 -c "print(min($TARGET_TOKENS, $DATASET_TOKENS))")
     local NUM_ITERATIONS=$((ACTUAL_TOKENS / TOTAL_BATCH_SIZE))
@@ -382,7 +411,6 @@ run_mid_training() {
     echo "    Steps:      $NUM_ITERATIONS"
     echo "    Log:        $LOG_FILE"
 
-    local BASE_CKPT_DIR="$NANOCHAT_MODEL_DIR/base_checkpoints/$BASE_MODEL_TAG"
     local LINK_DIR="$NANOCHAT_MODEL_DIR/base_checkpoints/$MODEL_TAG"
 
     if [ ! -e "$LINK_DIR" ]; then
@@ -395,6 +423,7 @@ run_mid_training() {
         --num-iterations="$NUM_ITERATIONS" \
         --target-param-data-ratio="$ACTUAL_RATIO" \
         --device-batch-size="$DEVICE_BATCH_SIZE" \
+        --total-batch-size="$TOTAL_BATCH_SIZE" \
         --run="$RUN_NAME" \
         --model-tag="$MODEL_TAG" \
         --core-metric-every="$CORE_METRIC_EVERY" \

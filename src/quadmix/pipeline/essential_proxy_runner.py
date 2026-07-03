@@ -469,6 +469,15 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         for i, (exp_id, selected_idx) in enumerate(zip(batch_exp_ids, batch_selected)):
             positions = np.searchsorted(all_global_ids, selected_idx)
+            positions = np.clip(positions, 0, len(all_global_ids) - 1)
+            matched = all_global_ids[positions] == selected_idx
+            if not matched.all():
+                n_missing = int((~matched).sum())
+                raise RuntimeError(
+                    f"[Pack] Experiment {exp_id}: {n_missing}/{len(selected_idx)} "
+                    f"documents not found in tokenized cache. "
+                    f"Check for shard tokenization failures."
+                )
             result = all_tokens_flat[positions]
 
             if shm_store is not None:
@@ -1042,7 +1051,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             iter_ct += 1
 
             if not is_acc and (step_ct % log_int == 0 or step_ct == 1):
-                avg = (loss_accum / step_ct).item()
+                avg = (loss_accum / iter_ct).item()
                 elapsed = time.time() - t_start
                 rem = (num_steps - step_ct) * elapsed / max(1, step_ct)
                 print(f"    [Exp {experiment_id:04d}] Step {step_ct}/{num_steps}, loss={avg:.4f}, "
@@ -1067,7 +1076,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             val_loss, per_task_losses = self._run_validation(model, device)
 
         with PerfTimer.section("save_metadata", _timer_prefix):
-            avg_train = (loss_accum / step_ct).item() if step_ct > 0 else 0
+            avg_train = (loss_accum / iter_ct).item() if iter_ct > 0 else 0
 
             domain_names = DOMAIN_NAMES
             quality_names = FASTTEXT_FIELDS
