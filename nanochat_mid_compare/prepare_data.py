@@ -341,8 +341,8 @@ def main():
                         help="Fraction of documents reserved for shared validation (default: 0.05)")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for reproducibility")
-    parser.add_argument("--max-random-scan", type=int, default=500,
-                        help="Max number of essential-web shards to scan for random baseline (default: 500)")
+    parser.add_argument("--max-shards", type=int, default=500,
+                        help="Max preprocessed shards to scan for all baselines (default: 500)")
     parser.add_argument("--num-workers", type=int, default=None,
                         help="Number of parallel workers. Tokenize: processes (each uses 4 rust threads). "
                              "Shard read: threads. Default: auto")
@@ -446,7 +446,7 @@ def main():
 
     print(f"\n[2/6] Scanning preprocessed shards metadata...")
     prep_files, prep_metadata = scan_preprocessed_shards(
-        args.preprocessed_data_dir, num_workers=args.num_workers, max_shards=args.max_random_scan,
+        args.preprocessed_data_dir, num_workers=args.num_workers, max_shards=args.max_shards,
         max_chars=args.max_chars, max_char_repeat_ratio=args.max_char_repeat_ratio)
     print(f"  Scanning {len(prep_files)} shards (metadata only)...")
 

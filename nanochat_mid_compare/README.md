@@ -45,7 +45,7 @@ bash nanochat_mid_compare/run_experiment.sh
 | `EVAL_EVERY` | val BPB 评估间隔 (-1 = 禁用，因各组数据 val 不可比) | `-1` |
 | `CORE_METRIC_EVERY` | 训练中 CORE metric 评估间隔 (-1 = 禁用，子集测试意义不大) | `-1` |
 | `SEED` | 随机种子 | `42` |
-| `MAX_RANDOM_SCAN` | 随机抽样扫描的最大 shard 数 | `500` |
+| `MAX_SHARDS` | 所有 baseline 扫描的最大 preprocessed shard 数 | `500` |
 
 ## Token Budget 计算策略
 

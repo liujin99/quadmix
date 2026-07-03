@@ -13,7 +13,7 @@ Usage:
         --quadmix-sampled-data /path/to/sampled_dataset.parquet \
         --preprocessed-data-dir /path/to/preprocessed \
         [--quality-methods dclm,fineweb_edu] \
-        [--max-random-scan 500] \
+        [--max-shards 500] \
         [--seed 42]
 """
 
@@ -181,7 +181,8 @@ def main():
     parser.add_argument("--quadmix-sampled-data", type=str, required=True)
     parser.add_argument("--preprocessed-data-dir", type=str, required=True)
     parser.add_argument("--quality-methods", type=str, default="dclm,fineweb_edu")
-    parser.add_argument("--max-random-scan", type=int, default=500)
+    parser.add_argument("--max-shards", type=int, default=500,
+                        help="Max preprocessed shards to scan for all baselines (default: 500)")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -199,7 +200,7 @@ def main():
 
     print(f"\n[2/4] Scanning preprocessed shards...")
     shard_files, all_docs = scan_shards_metadata(
-        args.preprocessed_data_dir, max_shards=args.max_random_scan)
+        args.preprocessed_data_dir, max_shards=args.max_shards)
     print(f"  Scanned {len(shard_files)} shards, {len(all_docs):,} candidate docs")
 
     methods_data = {}

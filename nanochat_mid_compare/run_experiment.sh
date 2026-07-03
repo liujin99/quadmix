@@ -81,7 +81,7 @@ EVAL_EVERY="${EVAL_EVERY:--1}"
 SHARD_SIZE="${SHARD_SIZE:-10000}"
 VAL_RATIO="${VAL_RATIO:-0}"
 SEED="${SEED:-42}"
-MAX_RANDOM_SCAN="${MAX_RANDOM_SCAN:-500}"
+MAX_SHARDS="${MAX_SHARDS:-500}"
 
 # Mid-training model tags (auto-generated if empty)
 # The script creates a symlink from BASE_MODEL_TAG to MODEL_TAG in base_checkpoints/
@@ -275,7 +275,7 @@ else
         --shard-size "$SHARD_SIZE"
         --val-ratio "$VAL_RATIO"
         --seed "$SEED"
-        --max-random-scan "$MAX_RANDOM_SCAN"
+        --max-shards "$MAX_SHARDS"
         --num-npu "$NUM_NPU"
     )
     if [ "$DO_QUALITY" -eq 1 ]; then
