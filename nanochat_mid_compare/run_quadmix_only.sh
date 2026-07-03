@@ -234,6 +234,7 @@ stats['config'].update({
     'device_batch_size': int(os.environ['DEVICE_BATCH_SIZE']),
     'total_batch_size': int(os.environ['TOTAL_BATCH_SIZE']),
     'num_npu': int(os.environ['NUM_NPU']),
+    'tokenizer_pkl': os.environ.get('TOKENIZER_PKL', ''),
     'nanochat_repo': os.environ.get('NANOCHAT_REPO', ''),
     'nanochat_model_dir': os.environ.get('NANOCHAT_MODEL_DIR', ''),
     'mid_checkpoints_output_dir': os.environ.get('MID_CHECKPOINTS_OUTPUT_DIR', ''),
