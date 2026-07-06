@@ -49,6 +49,7 @@ from quadmix.constants import (
     HF_CORE_BMK_V43_DATASET, HF_CORE_BMK_V43_FILENAME,
     HF_CORE_BMK_V5_DATASET, HF_CORE_BMK_V5_FILENAME,
     HF_CORE_BMK_V6_DATASET, HF_CORE_BMK_V6_FILENAME,
+    HF_CAP_V1_DATASET, HF_CAP_V1_FILENAME,
     DEFAULT_EVAL_BUNDLE,
 )
 
@@ -122,6 +123,9 @@ def resolve_val_path(val_set: str, val_path: str) -> str:
     if val_set == "core_bmk_v6":
         local = os.path.join(DEFAULT_VAL_DIR, HF_CORE_BMK_V6_FILENAME)
         return _check_and_download(local, HF_CORE_BMK_V6_DATASET, HF_CORE_BMK_V6_FILENAME)
+    if val_set == "cap_v1":
+        local = os.path.join(DEFAULT_VAL_DIR, HF_CAP_V1_FILENAME)
+        return _check_and_download(local, HF_CAP_V1_DATASET, HF_CAP_V1_FILENAME)
     local = os.path.join(DEFAULT_VAL_DIR, HF_OPENHERMES_FILENAME)
     return _check_and_download(local, HF_OPENHERMES_DATASET, HF_OPENHERMES_FILENAME)
 
@@ -140,7 +144,7 @@ def build_parser():
     p.add_argument("--preprocessed-dir", required=True,
                    help="Path to preprocessed shards directory")
     p.add_argument("--val-set", type=str, default="core",
-                   choices=["openhermes", "core", "core_bmk_v3", "core_bmk_v4", "core_bmk_v4.2", "core_bmk_v4.3", "core_bmk_v5", "core_bmk_v6"],
+                   choices=["openhermes", "core", "core_bmk_v3", "core_bmk_v4", "core_bmk_v4.2", "core_bmk_v4.3", "core_bmk_v5", "core_bmk_v6", "cap_v1"],
                    help="New validation set to evaluate on (default: core)")
     p.add_argument("--val-path", type=str, default=None,
                    help="Path to custom validation .pt file (overrides --val-set)")

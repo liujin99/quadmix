@@ -43,8 +43,8 @@ export QUADMIX_TEMP_DIR="${QUADMIX_TEMP_DIR:-$HOME/.cache/QuaDMix/temp}"
 PREPROCESSED_DIR="$QUADMIX_TEMP_DIR/preprocessed"
 RAW_DATA_DIR="${RAW_DATA_DIR:-/home/ma-user/work/QuaDMix/data/essential-web}"
 
-# ── 扫描 --val-set 参数（默认 core_bmk_v6）──────────────────
-VAL_SET="core_bmk_v6"
+# ── 扫描 --val-set 参数（默认 cap_v1）──────────────────
+VAL_SET="cap_v1"
 for arg in "$@"; do
     if [[ "$prev_arg" == "--val-set" ]]; then
         VAL_SET="$arg"

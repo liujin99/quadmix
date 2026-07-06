@@ -115,6 +115,9 @@ HF_CORE_BMK_V5_FILENAME = "core_bmk_21tasks_v5_tokenized.pt"
 HF_CORE_BMK_V6_DATASET = "liujin99/quadmix-core-bmk-v6"
 HF_CORE_BMK_V6_FILENAME = "core_bmk_21tasks_v6_tokenized.pt"
 
+HF_CAP_V1_DATASET = "liujin99/quadmix-cap-v1"
+HF_CAP_V1_FILENAME = "cap_v1_tokenized.pt"
+
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 DEFAULT_TEMP_DIR = os.environ.get(
