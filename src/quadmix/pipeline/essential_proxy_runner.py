@@ -82,7 +82,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             test_block_size: Optional[int] = None,
             rank_ref_size: int = 10000,
             token_cache_dir: Optional[str] = None,
-            memory_cache_max_gb: float = 16.0,
+            memory_cache_max_gb: float = 500.0,
             checkpoint_interval: int = 1000,
     ):
         from quadmix.constants import DEFAULT_TOKEN_CACHE_DIR
