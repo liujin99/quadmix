@@ -220,7 +220,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             self._memory_cache_lru.append(sid)
         return set(int(r) for r in self._memory_cache[sid]["rows"])
 
-    def _memory_cache_add_rows(self, sid: int, new_rows: np.ndarray, new_tokens: np.ndarray):
+    def _memory_cache_add_rows(self, sid: int, new_rows: np.ndarray, new_tokens: np.ndarray,
+                                skip_eviction: bool = False):
         """Add new rows to memory cache. LRU eviction when over limit."""
         old_bytes = 0
         if sid in self._memory_cache:
@@ -254,6 +255,9 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         if sid in self._memory_cache_lru:
             self._memory_cache_lru.remove(sid)
         self._memory_cache_lru.append(sid)
+
+        if skip_eviction:
+            return
 
         max_bytes = int(self.memory_cache_max_gb * 1024 ** 3)
         while self._memory_cache_bytes > max_bytes and self._memory_cache_lru:
@@ -1524,7 +1528,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
             with PerfTimer.section("cache_results", "tokenize_all"):
                 for sid, parsed_rows, miss_tokens, io_time, tokenize_time, total_time in parallel_results:
-                    self._memory_cache_add_rows(sid, parsed_rows, miss_tokens)
+                    self._memory_cache_add_rows(sid, parsed_rows, miss_tokens, skip_eviction=True)
                     total_tokenized += len(parsed_rows)
         else:
             print(f"[TokenizeAll] All {len(shard_groups)} shards fully cached, 0 miss rows")
@@ -1549,7 +1553,10 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         sort_idx = np.argsort(all_global_ids)
         self._global_index = (all_global_ids[sort_idx], all_tokens_flat[sort_idx])
         del global_ids_list, tokens_list, sort_idx
-        print(f"[TokenizeAll] Global index built: {len(self._global_index[0]):,} docs ({time.time() - pack_t0:.1f}s)")
+        cache_gb = self._memory_cache_bytes / (1024 ** 3)
+        print(f"[TokenizeAll] Global index built: {len(self._global_index[0]):,} docs "
+              f"({time.time() - pack_t0:.1f}s), memory cache: {cache_gb:.1f} GB "
+              f"({len(self._memory_cache)} shards, limit: {self.memory_cache_max_gb:.0f} GB)")
         print(f"[TokenizeAll] All {len(all_selected)} experiments ready (memory cache)")
 
     def _serialize_config(self, shared_metadata: Optional[Dict[str, "SharedArrayInfo"]] = None) -> dict:
