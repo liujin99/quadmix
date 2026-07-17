@@ -46,6 +46,7 @@ from quadmix.constants import (
     HF_CORE_BMK_V5_DATASET, HF_CORE_BMK_V5_FILENAME,
     HF_CORE_BMK_V6_DATASET, HF_CORE_BMK_V6_FILENAME,
     HF_CAP_V1_DATASET, HF_CAP_V1_FILENAME,
+    HF_STEM_V1_DATASET, HF_STEM_V1_FILENAME,
     DEFAULT_EVAL_BUNDLE,
 )
 
@@ -761,6 +762,46 @@ def ensure_cap_v1_data(val_path: str) -> str:
     )
 
 
+def ensure_stem_v1_data(val_path: str) -> str:
+    os.makedirs(os.path.dirname(val_path), exist_ok=True)
+
+    local_size = os.path.getsize(val_path) if os.path.exists(val_path) else 0
+    remote_size = _hf_remote_size(HF_STEM_V1_DATASET, HF_STEM_V1_FILENAME)
+
+    if remote_size == 0:
+        if local_size > 0:
+            print(f"\n[Setup] Warning: Cannot connect to HuggingFace to check {HF_STEM_V1_FILENAME}")
+            print(f"[Setup] Using local file ({local_size / 1024**2:.0f} MB)")
+            print(f"[Setup] To force re-download, delete: {val_path}")
+            return val_path
+    elif local_size == remote_size:
+        print(f"[Setup] STEM v1 validation set up-to-date: {HF_STEM_V1_FILENAME} ({local_size / 1024**2:.0f} MB)")
+        return val_path
+    elif local_size > 0:
+        print(f"\n[Setup] {HF_STEM_V1_FILENAME} version mismatch")
+        print(f"[Setup]   Local:  {local_size / 1024**2:.0f} MB")
+        print(f"[Setup]   Remote: {remote_size / 1024**2:.0f} MB")
+        print(f"[Setup]   Re-downloading...")
+        os.remove(val_path)
+    else:
+        print(f"\n[Setup] STEM v1 validation set not found at:\n  {val_path}")
+
+    if remote_size > 0:
+        if _download_hf_file(HF_STEM_V1_DATASET, HF_STEM_V1_FILENAME, val_path):
+            return val_path
+        print(f"[Setup] Download failed. You can manually download from:\n"
+              f"  https://huggingface.co/datasets/{HF_STEM_V1_DATASET}")
+    else:
+        print(f"[Setup] Cannot connect to HuggingFace.")
+        print(f"[Setup] You can manually download from:\n"
+              f"  https://huggingface.co/datasets/{HF_STEM_V1_DATASET}")
+
+    raise FileNotFoundError(
+        f"STEM v1 validation set not available:\n  {val_path}\n"
+        f"Download from: https://huggingface.co/datasets/{HF_STEM_V1_DATASET}"
+    )
+
+
 from quadmix.constants import DOMAIN_NAMES, QUALITY_NAMES, QUALITY_COLUMNS, NUM_DOMAINS
 
 
@@ -808,7 +849,7 @@ def build_parser():
                         "(default: 1000, 0 = disable). "
                         "Results saved to each exp dir as checkpoint_trajectory.json.")
     p.add_argument("--val-set", type=str, default="openhermes",
-                   choices=["openhermes", "core", "core_bmk_v2", "core_bmk_v3", "core_bmk_v4", "core_bmk_v4.2", "core_bmk_v4.3", "core_bmk_v5", "core_bmk_v6", "cap_v1"],
+                   choices=["openhermes", "core", "core_bmk_v2", "core_bmk_v3", "core_bmk_v4", "core_bmk_v4.2", "core_bmk_v4.3", "core_bmk_v5", "core_bmk_v6", "cap_v1", "stem_v1"],
                    help="Validation set: 'openhermes' (default, auto-download), "
                         "'core' (CORE benchmark 22-task, continuation-only loss), "
                         "'core_bmk_v2' (10 BMK-like tasks, full-sequence loss), "
@@ -817,8 +858,9 @@ def build_parser():
                         "'core_bmk_v4.2' (21 tasks, per-task loss strategy), "
                         "'core_bmk_v4.3' (21 tasks, piqa/arc moved to full-seq), "
                         "'core_bmk_v5' (21 tasks, HF-loaded, per-task hybrid, data quality fixes), "
-                        "'core_bmk_v6' (21 tasks, HellaSwag tags cleaned, MC format fixed), or "
-                        "'cap_v1' (5 capability clusters, 70% external + 30% benchmark train)")
+                        "'core_bmk_v6' (21 tasks, HellaSwag tags cleaned, MC format fixed), "
+                        "'cap_v1' (5 capability clusters, 70% external + 30% benchmark train), or "
+                        "'stem_v1' (4 STEM benchmarks: GSM8K/MMLU-22STEM/ARC-Easy/ARC-Challenge)")
     p.add_argument("--val-path", type=str, default=None,
                    help="Path to validation .pt file (overrides --val-set)")
     p.add_argument("--eval-bundle", type=str, default=DEFAULT_EVAL_BUNDLE,
@@ -864,6 +906,9 @@ def create_proxy_runner(config, args, output_dir, metadata_manager):
     elif args.val_set == "cap_v1":
         val_path = os.path.join(DEFAULT_VAL_DIR, HF_CAP_V1_FILENAME)
         val_path = ensure_cap_v1_data(val_path)
+    elif args.val_set == "stem_v1":
+        val_path = os.path.join(DEFAULT_VAL_DIR, HF_STEM_V1_FILENAME)
+        val_path = ensure_stem_v1_data(val_path)
     else:
         val_path = os.path.join(DEFAULT_VAL_DIR, HF_OPENHERMES_FILENAME)
         val_path = ensure_val_data(val_path)

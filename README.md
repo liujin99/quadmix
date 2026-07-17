@@ -82,6 +82,7 @@ quadmix/
 │   │   └── download_essential_web.py   # Download tool
 │   ├── validation_set/             # Validation set preparation scripts
 │   │   ├── prepare_cap_v1.py           # CAP v1 (default, capability-aligned)
+│   │   ├── prepare_stem_v1.py          # STEM v1 (4 STEM benchmarks, aligned with downstream)
 │   │   ├── prepare_core_bmk_v6.py      # CORE-BMK v6 (21 benchmarks)
 │   │   └── ...                         # v2-v5 historical versions
 │   ├── analysis/                   # Diagnostic & analysis scripts
@@ -105,6 +106,7 @@ quadmix/
 ├── result/                         # Final results (one dir per run)
 ├── data/                           # Validation sets (auto-downloaded)
 │   ├── cap_v1_tokenized.pt             # CAP v1 (default)
+│   ├── stem_v1_tokenized.pt            # STEM v1 (4 tasks: GSM8K/MMLU-22STEM/ARC-Easy/ARC-Challenge)
 │   ├── core_bmk_21tasks_v6_tokenized.pt # CORE-BMK v6
 │   └── ...                             # Historical versions
 └── temp/                           # Intermediate data (deletable)
@@ -154,6 +156,7 @@ python scripts/runners/run_essential_web_v1.py \
 | 验证集 | 来源 | 特点 | 默认 |
 |--------|------|------|------|
 | **cap_v1** | 外部训练数据(70%) + benchmark train(30%) | 能力对齐，绕过 C2 假设，5 clusters × 8K = 40K samples | ✓ |
+| **stem_v1** | 4 STEM benchmarks (GSM8K/MMLU-22STEM/ARC-Easy/ARC-Challenge) | 与下游直接对应 (arc_easy/arc_challenge/mmlu_stem/gpqa_diamond/gsm8k_cot/math_cot)，full-sequence loss，~10.5K samples | |
 | core_bmk_v6 | 21 个 CORE benchmark | Benchmark 对齐，per-task loss，~31K samples | |
 | openhermes | OpenHermes-2.5-1M | SFT 对话格式，通用质量信号，10K samples | |
 

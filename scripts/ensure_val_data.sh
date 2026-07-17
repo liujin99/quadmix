@@ -206,9 +206,14 @@ ensure_val_set() {
                 "cap_v1_tokenized.pt" \
                 "$data_dir/cap_v1_tokenized.pt"
             ;;
+        stem_v1)
+            ensure_val_data "liujin99/quadmix-stem-v1" \
+                "stem_v1_tokenized.pt" \
+                "$data_dir/stem_v1_tokenized.pt"
+            ;;
         *)
             echo "  [Error] Unknown val_set: $val_set"
-            echo "          Supported: openhermes, core, core_bmk_v3/v4/v4.2/v4.3/v5/v6, cap_v1"
+            echo "          Supported: openhermes, core, core_bmk_v3/v4/v4.2/v4.3/v5/v6, cap_v1, stem_v1"
             return 1
             ;;
     esac
