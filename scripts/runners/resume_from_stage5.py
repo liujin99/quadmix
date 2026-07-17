@@ -129,7 +129,9 @@ def build_parser():
     p.add_argument("--proxy-dir", required=True,
                    help="Path to proxy_experiments/ directory")
     p.add_argument("--preprocessed-dir", required=True,
-                   help="Path to preprocessed shards directory")
+                   help="Path to input parquet shards directory")
+    p.add_argument("--input-format", default="preprocessed",
+                   choices=["preprocessed", "stem_raw"])
     p.add_argument("--output", "-o", default=None,
                    help="Output directory (default: <project>/result/reoptimize_<timestamp>)")
     p.add_argument("--num-search", type=int, default=5000)
@@ -198,7 +200,9 @@ def main():
     pipeline = QuaDMixPipeline(config)
 
     print(f"\n[Resume] Loading metadata from: {args.preprocessed_dir}")
-    mm = ShardMetadataManager(args.preprocessed_dir)
+    mm = ShardMetadataManager(
+        args.preprocessed_dir, input_format=args.input_format
+    )
     print(f"[Resume] {mm.num_docs:,} docs across {mm.num_shards} shards")
 
     domain_labels = mm.domain_labels

@@ -43,6 +43,7 @@ from quadmix.constants import DOMAIN_NAMES, FASTTEXT_FIELDS
 from quadmix.utils.perf_timer import PerfTimer
 from quadmix.pipeline.loss_utils import chunked_loss_from_hidden, chunked_loss_per_token_from_hidden
 from quadmix.pipeline.shared_memory import SharedArrayInfo, ndarray_to_shared, shared_to_ndarray
+from quadmix.data.metadata_manager import read_parquet_text_rows
 from quadmix.pipeline.parallel_dispatch import (
     _worker_dynamic_loop,
     _tokenize_shard_parallel,
@@ -122,11 +123,20 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         self.gradient_accumulation_steps = max(1, self.batch_size // micro_batch_size)
 
         from transformers import AutoTokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-neox-20b")
+        tokenizer_source = os.environ.get(
+            "QUADMIX_TOKENIZER_PATH",
+            "EleutherAI/gpt-neox-20b",
+        )
+        tokenizer_is_local = os.path.exists(tokenizer_source)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_source,
+            local_files_only=tokenizer_is_local,
+        )
         self.tokenizer.pad_token = self.tokenizer.eos_token
         assert self.tokenizer.vocab_size <= self.model_config.vocab_size, \
             f"Tokenizer vocab ({self.tokenizer.vocab_size}) > model vocab ({self.model_config.vocab_size})"
-        print(f"[ProxyRunner] GPT-NeoX tokenizer: vocab={self.tokenizer.vocab_size}")
+        print(f"[ProxyRunner] GPT-NeoX tokenizer: {tokenizer_source}, "
+              f"vocab={self.tokenizer.vocab_size}")
         print(f"[ProxyRunner] Model config: {model_variant}, "
               f"block={self.block_size}, model_vocab={self.model_config.vocab_size}")
         print(f"[ProxyRunner] Training: batch={self.batch_size}, "
@@ -576,14 +586,9 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                     self._cache_misses += len(miss_rows)
                     miss_rows_arr = np.array(miss_rows, dtype=np.int64)
 
-                    df_shard = pd.read_parquet(
-                        shard_path,
-                        columns=["row_in_shard", "text"],
-                        filters=[("row_in_shard", "in", miss_rows_arr.tolist())],
+                    parsed_rows, selected_texts = read_parquet_text_rows(
+                        shard_path, miss_rows_arr
                     )
-                    df_shard = df_shard.sort_values("row_in_shard")
-                    selected_texts = df_shard["text"].astype(str).tolist()
-                    parsed_rows = df_shard["row_in_shard"].to_numpy(dtype=np.int64)
 
                     print(f"    [Partial miss] shard {sid}: "
                           f"tokenizing {len(miss_rows):,} docs "
@@ -615,14 +620,9 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                     shard_tokens = hit_tokens
             else:
                 self._cache_misses += len(local_rows)
-                df_shard = pd.read_parquet(
-                    shard_path,
-                    columns=["row_in_shard", "text"],
-                    filters=[("row_in_shard", "in", local_rows.tolist())],
+                parsed_rows, selected_texts = read_parquet_text_rows(
+                    shard_path, local_rows
                 )
-                df_shard = df_shard.sort_values("row_in_shard")
-                selected_texts = df_shard["text"].astype(str).tolist()
-                parsed_rows = df_shard["row_in_shard"].to_numpy(dtype=np.int64)
 
                 print(f"    [Cache miss] shard {sid}: "
                       f"tokenizing {len(selected_texts):,} docs...")
@@ -1566,6 +1566,10 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             "val_data_path": self.val_data_path,
             "preprocessed_dir": (
                 self.metadata_manager._dir if self.metadata_manager else None
+            ),
+            "metadata_input_format": (
+                getattr(self.metadata_manager, "input_format", "preprocessed")
+                if self.metadata_manager else "preprocessed"
             ),
             "output_dir": self.output_dir,
             "device_type": self.device_type,

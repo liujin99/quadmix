@@ -22,7 +22,18 @@ def _get_tokenizer(tokenizer_path: str) -> "Tokenizer":
     """Get or create a cached tokenizer instance (per-process cache)."""
     if tokenizer_path not in _tokenizer_cache:
         from tokenizers import Tokenizer
-        _tokenizer_cache[tokenizer_path] = Tokenizer.from_pretrained(tokenizer_path)
+        if os.path.isdir(tokenizer_path):
+            tokenizer_file = os.path.join(tokenizer_path, "tokenizer.json")
+            if not os.path.isfile(tokenizer_file):
+                raise FileNotFoundError(
+                    f"local tokenizer.json not found: {tokenizer_file}"
+                )
+            tokenizer = Tokenizer.from_file(tokenizer_file)
+        elif os.path.isfile(tokenizer_path):
+            tokenizer = Tokenizer.from_file(tokenizer_path)
+        else:
+            tokenizer = Tokenizer.from_pretrained(tokenizer_path)
+        _tokenizer_cache[tokenizer_path] = tokenizer
     return _tokenizer_cache[tokenizer_path]
 
 
@@ -32,16 +43,11 @@ def _io_read_shard(
         miss_rows: List[int],
 ) -> Tuple[int, np.ndarray, List[str], float]:
     """Stage 1 worker: read one shard's parquet, return (sid, rows, texts, io_time)."""
-    import pandas as pd
     io_t0 = time.time()
-    df_shard = pd.read_parquet(
-        shard_path,
-        columns=["row_in_shard", "text"],
-        filters=[("row_in_shard", "in", miss_rows)],
+    from quadmix.data.metadata_manager import read_parquet_text_rows
+    parsed_rows, texts = read_parquet_text_rows(
+        shard_path, np.asarray(miss_rows, dtype=np.int64)
     )
-    df_shard = df_shard.sort_values("row_in_shard")
-    texts = df_shard["text"].astype(str).tolist()
-    parsed_rows = df_shard["row_in_shard"].to_numpy(dtype=np.int64)
     io_time = time.time() - io_t0
     return (sid, parsed_rows, texts, io_time)
 
@@ -62,15 +68,10 @@ def _process_shard_full(
     Returns (sid, parsed_rows, tokens_array, io_time, tok_time, total_time).
     """
     io_t0 = time.time()
-    import pandas as pd
-    df_shard = pd.read_parquet(
-        shard_path,
-        columns=["row_in_shard", "text"],
-        filters=[("row_in_shard", "in", miss_rows)],
+    from quadmix.data.metadata_manager import read_parquet_text_rows
+    parsed_rows, texts = read_parquet_text_rows(
+        shard_path, np.asarray(miss_rows, dtype=np.int64)
     )
-    df_shard = df_shard.sort_values("row_in_shard")
-    texts = df_shard["text"].astype(str).tolist()
-    parsed_rows = df_shard["row_in_shard"].to_numpy(dtype=np.int64)
     io_time = time.time() - io_t0
 
     tok_t0 = time.time()
@@ -103,7 +104,9 @@ def _tokenize_shard_parallel(
     n_shards = len(shard_tasks)
     num_cpus = mp.cpu_count() or 8
 
-    threads_per_worker = 4
+    threads_per_worker = max(
+        1, int(os.environ.get("TOKENIZE_THREADS_PER_WORKER", "4"))
+    )
     os.environ["RAYON_NUM_THREADS"] = str(threads_per_worker)
     os.environ["OMP_NUM_THREADS"] = str(threads_per_worker)
 
@@ -282,7 +285,10 @@ def _worker_dynamic_loop(
                   f"({time.time() - t0:.1f}s vs ~60s disk reload)")
         else:
             if config_dict.get("preprocessed_dir"):
-                mgr = ShardMetadataManager(config_dict["preprocessed_dir"])
+                mgr = ShardMetadataManager(
+                    config_dict["preprocessed_dir"],
+                    input_format=config_dict.get("metadata_input_format", "preprocessed"),
+                )
             else:
                 mgr = None
 

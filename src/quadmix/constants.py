@@ -8,28 +8,10 @@ directory defaults that were previously duplicated across scripts.
 import os
 
 DOMAIN_NAMES = [
-    "Computers_and_Electronics",
-    "News_and_General_Works",
-    "Philosophy_and_Psychology",
-    "Religion",
-    "Law_and_Government",
-    "Economics_and_Finance",
-    "Education",
-    "People_and_Society",
-    "English_Language",
     "Mathematics",
-    "Physics_and_Chemistry",
-    "Earth_and_Life_Sciences",
-    "Medicine_and_Health",
-    "Business_and_Management",
-    "Engineering",
-    "Agriculture",
-    "Arts_and_Entertainment",
-    "Sports_and_Recreation",
-    "Books_and_Literature",
-    "History",
-    "Geography_and_Travel",
-    "Home_Economics",
+    "Chemistry",
+    "Biology",
+    "Physics",
 ]
 
 FDC_PREFIX_TO_DOMAIN = {
@@ -63,26 +45,34 @@ FDC_PREFIX_TO_DOMAIN = {
     "64": 21,
 }
 
-NUM_DOMAINS = 22
+NUM_DOMAINS = 4
 
 DOMAIN_SHORT_NAMES = [
-    "Computers", "News", "Philosophy", "Religion", "Law",
-    "Economics", "Education", "People", "English",
-    "Math", "Physics", "EarthLife", "Medicine", "Business",
-    "Engineering", "Agriculture", "Arts", "Sports", "Books",
-    "History", "Geography", "HomeEcon",
+    "Math", "Chem", "Bio", "Physics",
 ]
 
-QUALITY_NAMES = ["dclm", "fineweb_edu", "english", "math_general", "math_openweb"]
+QUALITY_NAMES = [
+    "stem_relevance",
+    "knowledge_value",
+    "notation_fidelity",
+    "rigor_coherence",
+    "noise_level",
+]
 
 QUALITY_COLUMNS = [
-    "qs_dclm", "qs_fineweb_edu_approx", "qs_english",
-    "qs_eai_general_math", "qs_eai_open_web_math",
+    "stem_relevance",
+    "knowledge_value",
+    "notation_fidelity",
+    "rigor_coherence",
+    "noise_level",
 ]
 
 FASTTEXT_FIELDS = [
-    "dclm", "fineweb_edu_approx", "english",
-    "eai_general_math", "eai_open_web_math",
+    "stem_relevance",
+    "knowledge_value",
+    "notation_fidelity",
+    "rigor_coherence",
+    "noise_level",
 ]
 
 HF_ENDPOINT = os.environ.get("HF_ENDPOINT", "https://huggingface.co")

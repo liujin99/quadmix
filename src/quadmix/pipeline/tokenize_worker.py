@@ -8,7 +8,14 @@ def _get_tokenizer(tokenizer_path: str):
     """Lazy load tokenizer."""
     from tokenizers import Tokenizer
     import os
-    if os.path.exists(tokenizer_path):
+    if os.path.isdir(tokenizer_path):
+        tokenizer_file = os.path.join(tokenizer_path, "tokenizer.json")
+        if not os.path.isfile(tokenizer_file):
+            raise FileNotFoundError(
+                f"local tokenizer.json not found: {tokenizer_file}"
+            )
+        return Tokenizer.from_file(tokenizer_file)
+    elif os.path.isfile(tokenizer_path):
         return Tokenizer.from_file(tokenizer_path)
     else:
         return Tokenizer.from_pretrained(tokenizer_path)
@@ -53,15 +60,10 @@ def _process_shard_full(
 ) -> Tuple[int, np.ndarray, np.ndarray, float, float, float]:
     """Process one shard: IO + tokenize in sequence."""
     io_t0 = time.time()
-    import pandas as pd
-    df_shard = pd.read_parquet(
-        shard_path,
-        columns=["row_in_shard", "text"],
-        filters=[("row_in_shard", "in", miss_rows)],
+    from quadmix.data.metadata_manager import read_parquet_text_rows
+    parsed_rows, texts = read_parquet_text_rows(
+        shard_path, np.asarray(miss_rows, dtype=np.int64)
     )
-    df_shard = df_shard.sort_values("row_in_shard")
-    texts = df_shard["text"].astype(str).tolist()
-    parsed_rows = df_shard["row_in_shard"].to_numpy(dtype=np.int64)
     io_time = time.time() - io_t0
 
     tok_t0 = time.time()
