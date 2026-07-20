@@ -801,8 +801,7 @@ def ensure_stem_v1_data(val_path: str) -> str:
         f"Download from: https://huggingface.co/datasets/{HF_STEM_V1_DATASET}"
     )
 
-
-from quadmix.constants import DOMAIN_NAMES, QUALITY_NAMES, QUALITY_COLUMNS, NUM_DOMAINS
+from quadmix.data.dataset_schema import DatasetSchema
 
 
 def build_parser():
@@ -866,6 +865,10 @@ def build_parser():
     p.add_argument("--eval-bundle", type=str, default=DEFAULT_EVAL_BUNDLE,
                    help="Path to CORE eval bundle directory "
                         "(used when --val-set=core, default: $EVAL_BUNDLE_DIR)")
+    p.add_argument("--schema", type=str, default=None,
+                   help="YAML dataset schema config file. If not specified, "
+                        "uses Essential-Web defaults (domain_col='domain', "
+                        "quality_cols=qs_*, text_col='text', char_count_col='doc_char_count')")
     return p
 
 
@@ -922,15 +925,18 @@ def create_proxy_runner(config, args, output_dir, metadata_manager):
         val_data_path=val_path,
         output_dir=proxy_dir,
         device_type=args.device_type,
-        npu_device_id=0,  # Main process uses card 0; workers use their own
+        npu_device_id=0,
         micro_batch_size=args.micro_batch_size,
         global_batch_size=args.global_batch_size,
         tiny_steps=args.tiny_steps,
-        doc_limit=None,  # Always use full data pool for proxy experiments
+        doc_limit=None,
         test_block_size=args.block_size,
         rank_ref_size=args.rank_ref_size,
         token_cache_dir=os.path.join(QUADMIX_TEMP_DIR, "token_cache"),
         checkpoint_interval=checkpoint_interval,
+        domain_names=metadata_manager.detected_domain_names,
+        quality_names=metadata_manager.detected_quality_names,
+        quality_directions=metadata_manager.quality_directions,
     )
     return runner
 
@@ -951,11 +957,25 @@ def main():
         QUADMIX_DIR, f"result/quadmix_{time.strftime('%Y%m%d_%H%M%S')}"
     )
 
+    # ── Load dataset schema ──
+    if args.schema:
+        print(f"\n[Setup] Loading dataset schema from: {args.schema}")
+        schema = DatasetSchema.from_yaml(args.schema)
+    else:
+        print(f"\n[Setup] Using default Essential-Web schema")
+        schema = DatasetSchema()
+    print(f"[Setup] Schema: domain_col='{schema.domain_col}', "
+          f"quality_cols={schema.quality_cols}, "
+          f"text_col='{schema.text_col}', "
+          f"char_count_col={schema.char_count_col}")
+
     # ── Load metadata manager (reads only domain + quality from all shards) ──
     print(f"\n[Setup] Loading ShardMetadataManager from: {args.preprocessed_dir}")
-    metadata_manager = ShardMetadataManager(args.preprocessed_dir)
+    metadata_manager = ShardMetadataManager(args.preprocessed_dir, schema=schema)
     print(f"[Setup] {metadata_manager.num_docs:,} docs across "
-          f"{metadata_manager.num_shards} shards")
+          f"{metadata_manager.num_shards} shards, "
+          f"{metadata_manager.num_domains} domains, "
+          f"{metadata_manager.num_quality_criteria} quality criteria")
 
     # ── Dataset size estimation ──
     total_tokens_est = metadata_manager.get_total_tokens_estimate()
@@ -992,7 +1012,8 @@ def main():
     print(f"════════════════════════════════════════════════════════")
 
     config = QuaDMixConfig(
-        num_domains=NUM_DOMAINS, num_quality_criteria=5,
+        num_domains=metadata_manager.num_domains,
+        num_quality_criteria=metadata_manager.num_quality_criteria,
         num_proxy_experiments=n_exp, num_search_points=n_search,
         top_k_average=top_k,
         target_tokens=int(args.target_tokens * 1e9) if args.target_tokens > 0 else 0,
@@ -1007,16 +1028,19 @@ def main():
          f"val={args.val_set}"
          f"{', ' + str(args.npu_devices) + ' NPU devices' if args.npu_devices > 1 else ''}")
 
+    domain_names = metadata_manager.detected_domain_names
+    quality_names = metadata_manager.detected_quality_names
+    quality_directions = metadata_manager.quality_directions
+
     pipeline.run(
         data_path=args.preprocessed_dir,
         output_dir=output_dir,
         precomputed=True,
-        # load_precomputed_sharded will be triggered by passing metadata_manager
-        # via **load_kwargs:
         metadata_manager=metadata_manager,
-        doc_limit=None,  # Always use full data pool
-        domain_names=DOMAIN_NAMES,
-        quality_names=QUALITY_NAMES,
+        doc_limit=None,
+        domain_names=domain_names,
+        quality_names=quality_names,
+        quality_directions=quality_directions,
         proxy_runner=proxy_runner,
         parallel_workers=args.npu_devices,
         val_set=args.val_set,

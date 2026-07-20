@@ -30,18 +30,26 @@ def _io_read_shard(
         sid: int,
         shard_path: str,
         miss_rows: List[int],
+        text_col: str = "text",
+        row_in_shard_col: str = "row_in_shard",
+        has_row_in_shard: bool = True,
 ) -> Tuple[int, np.ndarray, List[str], float]:
     """Stage 1 worker: read one shard's parquet, return (sid, rows, texts, io_time)."""
     import pandas as pd
     io_t0 = time.time()
-    df_shard = pd.read_parquet(
-        shard_path,
-        columns=["row_in_shard", "text"],
-        filters=[("row_in_shard", "in", miss_rows)],
-    )
-    df_shard = df_shard.sort_values("row_in_shard")
-    texts = df_shard["text"].astype(str).tolist()
-    parsed_rows = df_shard["row_in_shard"].to_numpy(dtype=np.int64)
+    if has_row_in_shard:
+        df_shard = pd.read_parquet(
+            shard_path,
+            columns=[row_in_shard_col, text_col],
+            filters=[(row_in_shard_col, "in", miss_rows)],
+        )
+        df_shard = df_shard.sort_values(row_in_shard_col)
+        texts = df_shard[text_col].astype(str).tolist()
+        parsed_rows = df_shard[row_in_shard_col].to_numpy(dtype=np.int64)
+    else:
+        df_shard = pd.read_parquet(shard_path, columns=[text_col])
+        texts = df_shard[text_col].astype(str).tolist()
+        parsed_rows = np.arange(len(texts), dtype=np.int64)
     io_time = time.time() - io_t0
     return (sid, parsed_rows, texts, io_time)
 
@@ -53,6 +61,9 @@ def _process_shard_full(
         tokenizer_path: str,
         block_size: int,
         threads_per_worker: int = 4,
+        text_col: str = "text",
+        row_in_shard_col: str = "row_in_shard",
+        has_row_in_shard: bool = True,
 ) -> Tuple[int, np.ndarray, np.ndarray, float, float, float]:
     """Process one shard: IO + tokenize in sequence.
 
@@ -63,14 +74,19 @@ def _process_shard_full(
     """
     io_t0 = time.time()
     import pandas as pd
-    df_shard = pd.read_parquet(
-        shard_path,
-        columns=["row_in_shard", "text"],
-        filters=[("row_in_shard", "in", miss_rows)],
-    )
-    df_shard = df_shard.sort_values("row_in_shard")
-    texts = df_shard["text"].astype(str).tolist()
-    parsed_rows = df_shard["row_in_shard"].to_numpy(dtype=np.int64)
+    if has_row_in_shard:
+        df_shard = pd.read_parquet(
+            shard_path,
+            columns=[row_in_shard_col, text_col],
+            filters=[(row_in_shard_col, "in", miss_rows)],
+        )
+        df_shard = df_shard.sort_values(row_in_shard_col)
+        texts = df_shard[text_col].astype(str).tolist()
+        parsed_rows = df_shard[row_in_shard_col].to_numpy(dtype=np.int64)
+    else:
+        df_shard = pd.read_parquet(shard_path, columns=[text_col])
+        texts = df_shard[text_col].astype(str).tolist()
+        parsed_rows = np.arange(len(texts), dtype=np.int64)
     io_time = time.time() - io_t0
 
     tok_t0 = time.time()
@@ -85,6 +101,9 @@ def _tokenize_shard_parallel(
         shard_tasks: List[Tuple[int, str, List[int]]],
         tokenizer_path: str,
         block_size: int,
+        text_col: str = "text",
+        row_in_shard_col: Optional[str] = "row_in_shard",
+        has_row_in_shard: bool = True,
 ) -> List[Tuple[int, np.ndarray, np.ndarray, float, float, float]]:
     """Parallel tokenize using ProcessPoolExecutor to bypass GIL.
 
@@ -145,6 +164,7 @@ def _tokenize_shard_parallel(
                     _worker_process_shard,
                     sid, shard_path, miss_rows,
                     tokenizer_path, block_size, threads_per_worker,
+                    text_col, row_in_shard_col if row_in_shard_col is not None else "row_in_shard", has_row_in_shard,
                 )
                 fut.add_done_callback(on_done)
                 futs.append(fut)
@@ -277,12 +297,19 @@ def _worker_dynamic_loop(
                 per_shard_info=per_shard_info,
                 shard_starts=shard_starts_arr,
                 preprocessed_dir=config_dict.get("preprocessed_dir", ""),
+                schema=config_dict.get("schema"),
+                num_domains=config_dict.get("num_domains"),
+                num_quality_criteria=config_dict.get("num_quality_criteria"),
+                detected_domain_names=config_dict.get("detected_domain_names"),
+                detected_quality_names=config_dict.get("detected_quality_names"),
+                quality_directions=config_dict.get("quality_directions"),
+                domain_label_map=config_dict.get("domain_label_map"),
             )
             print(f"[Worker {worker_id}] Mapped {len(domain_labels):,} docs from shared memory "
                   f"({time.time() - t0:.1f}s vs ~60s disk reload)")
         else:
             if config_dict.get("preprocessed_dir"):
-                mgr = ShardMetadataManager(config_dict["preprocessed_dir"])
+                mgr = ShardMetadataManager(config_dict["preprocessed_dir"], schema=config_dict.get("schema"))
             else:
                 mgr = None
 
@@ -307,6 +334,9 @@ def _worker_dynamic_loop(
             rank_ref_size=config_dict["rank_ref_size"],
             token_cache_dir=config_dict["token_cache_dir"],
             checkpoint_interval=config_dict.get("checkpoint_interval", 1000),
+            domain_names=config_dict.get("domain_names"),
+            quality_names=config_dict.get("quality_names"),
+            quality_directions=config_dict.get("quality_directions"),
         )
 
         completed = 0

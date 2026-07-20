@@ -17,20 +17,25 @@ import matplotlib.pyplot as plt
 
 from quadmix.core.types import ParameterSet
 
-from quadmix.constants import DOMAIN_NAMES, DOMAIN_SHORT_NAMES
+from quadmix.constants import DOMAIN_NAMES as _DEFAULT_DOMAIN_NAMES, DOMAIN_SHORT_NAMES
 
 
-def _get_domain_short(num_domains):
+def _get_domain_short(num_domains, domain_names=None):
+    if domain_names is not None:
+        if num_domains <= len(domain_names):
+            return [str(n) for n in domain_names[:num_domains]]
+        return [str(n) for n in domain_names] + [f"D{i}" for i in range(len(domain_names), num_domains)]
     if num_domains <= len(DOMAIN_SHORT_NAMES):
         return DOMAIN_SHORT_NAMES[:num_domains]
     return DOMAIN_SHORT_NAMES + [f"D{i}" for i in range(len(DOMAIN_SHORT_NAMES), num_domains)]
 
-QUALITY_NAMES = ["DCLM", "FineWeb-Edu", "English", "Math (Gen)", "Math (OpenWeb)"]
-QUALITY_SHORT = ["DCLM", "Edu", "Eng", "MathG", "MathO"]
+_DEFAULT_QUALITY_NAMES = ["DCLM", "FineWeb-Edu", "English", "Math (Gen)", "Math (OpenWeb)"]
+_DEFAULT_QUALITY_SHORT = ["DCLM", "Edu", "Eng", "MathG", "MathO"]
 
 COLOR_ORIG = "#5B9BD5"
 COLOR_OPT = "#ED7D31"
-QUALITY_COLORS = ["#4472C4", "#ED7D31", "#A5A5A5", "#FFC000", "#5B9BD5"]
+QUALITY_COLORS = ["#4472C4", "#ED7D31", "#A5A5A5", "#FFC000", "#5B9BD5",
+                   "#70AD47", "#264478", "#9B59B6", "#2ECC71", "#E74C3C"]
 
 
 def _setup_style():
@@ -56,9 +61,9 @@ def _save_fig(fig, output_dir, filename):
 
 # ── Figure 1 ──
 
-def _make_fig1(orig_dist, opt_dist, output_dir, num_domains=22):
+def _make_fig1(orig_dist, opt_dist, output_dir, num_domains=22, domain_names=None):
     _setup_style()
-    domain_short = _get_domain_short(num_domains)
+    domain_short = _get_domain_short(num_domains, domain_names)
     fig, ax = plt.subplots(figsize=(8, 4.5))
     m = len(orig_dist)
     x = np.arange(m)
@@ -87,9 +92,11 @@ def _make_fig1(orig_dist, opt_dist, output_dir, num_domains=22):
 
 # ── Figure 2 ──
 
-def _make_fig2(domain_weights, num_domains, num_criteria, output_dir):
+def _make_fig2(domain_weights, num_domains, num_criteria, output_dir,
+               domain_names=None, quality_names=None):
     _setup_style()
-    domain_short = _get_domain_short(num_domains)
+    domain_short = _get_domain_short(num_domains, domain_names)
+    q_names = quality_names if quality_names is not None else _DEFAULT_QUALITY_NAMES
     data = np.zeros((num_domains, num_criteria))
     for m in range(num_domains):
         start = m * num_criteria
@@ -101,7 +108,7 @@ def _make_fig2(domain_weights, num_domains, num_criteria, output_dir):
     bottom = np.zeros(len(labels))
     for n in range(num_criteria):
         ax.bar(x, data[:, n], bottom=bottom, width=0.65,
-               label=QUALITY_NAMES[n], color=QUALITY_COLORS[n],
+               label=q_names[n], color=QUALITY_COLORS[n % len(QUALITY_COLORS)],
                edgecolor="white", linewidth=0.4)
         bottom += data[:, n]
     ax.set_xlabel("Domain")
@@ -129,7 +136,8 @@ def _make_fig2(domain_weights, num_domains, num_criteria, output_dir):
 # ── Table ──
 
 def _experiment_table(exp_outputs_dir, data_path, num_domains=22, top_k=50,
-                       domain_labels_override=None):
+                       domain_labels_override=None, domain_names=None,
+                       domain_col="domain"):
     """Generate experiment table. If domain_labels_override is provided, use it
     instead of loading from data_path (supports sharded mode)."""
     if domain_labels_override is not None:
@@ -138,7 +146,7 @@ def _experiment_table(exp_outputs_dir, data_path, num_domains=22, top_k=50,
         return "*(experiment table: sharded mode, see pipeline_summary.json)*"
     else:
         df = pd.read_parquet(data_path)
-        domain_labels = df["domain"].to_numpy(dtype=np.int64)
+        domain_labels = df[domain_col].to_numpy(dtype=np.int64)
     exp_dirs = sorted([
         d for d in os.listdir(exp_outputs_dir)
         if d.startswith("exp_") and os.path.isdir(os.path.join(exp_outputs_dir, d))
@@ -147,7 +155,7 @@ def _experiment_table(exp_outputs_dir, data_path, num_domains=22, top_k=50,
         return "*(no experiment data)*"
 
     rows = []
-    domain_short = _get_domain_short(num_domains)
+    domain_short = _get_domain_short(num_domains, domain_names)
     for exp_dir_name in exp_dirs[:top_k]:
         exp_dir = os.path.join(exp_outputs_dir, exp_dir_name)
         meta_path = os.path.join(exp_dir, "meta.json")
@@ -204,6 +212,7 @@ def generate_report(
     config=None, metrics=None, elapsed=None,
     use_sharded=False, reliability=None, proxy_loss_stats=None,
     per_task_analysis=None, dataset_size_prediction=None, stage_times=None,
+    domain_names=None, quality_names=None, domain_col="domain",
 ):
     """Generate MD report with separate PNG figures."""
     # Compute distributions
@@ -215,8 +224,9 @@ def generate_report(
     domain_w = optimal_params.merge_config.domain_weights
 
     # Save figures
-    fig1_file = _make_fig1(orig_dist, opt_dist, output_dir, num_domains)
-    fig2_file = _make_fig2(domain_w, num_domains, num_criteria, output_dir)
+    fig1_file = _make_fig1(orig_dist, opt_dist, output_dir, num_domains, domain_names)
+    fig2_file = _make_fig2(domain_w, num_domains, num_criteria, output_dir,
+                           domain_names, quality_names)
 
     sel_tokens = token_counts[optimal_selected_indices].sum()
 
@@ -534,6 +544,7 @@ def generate_report(
         parts += ["---\n", _experiment_table(
             proxy_dir, data_path, num_domains,
             domain_labels_override=domain_labels if use_sharded else None,
+            domain_names=domain_names, domain_col=domain_col,
         )]
 
     parts += ["---\n", f"*报告生成时间: {time.strftime('%Y-%m-%d %H:%M:%S')}*\n"]

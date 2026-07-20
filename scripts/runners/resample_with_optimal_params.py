@@ -29,7 +29,8 @@ import pandas as pd
 
 from quadmix.core.types import ParameterSet
 from quadmix.data.metadata_manager import ShardMetadataManager
-from quadmix.constants import DOMAIN_NAMES, QUALITY_NAMES, PROJECT_DIR
+from quadmix.data.dataset_schema import DatasetSchema
+from quadmix.constants import PROJECT_DIR
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _QUADMIX_DIR = PROJECT_DIR
@@ -66,6 +67,8 @@ def build_parser():
                    help="Force re-preprocess even if output exists")
     p.add_argument("--workers", type=int, default=64,
                    help="Number of parallel preprocessing workers")
+    p.add_argument("--schema", default=None,
+                   help="Path to dataset schema YAML (default: Essential-Web schema)")
     return p
 
 
@@ -124,7 +127,9 @@ def main():
     # ── Stage 1: Load metadata ───────────────────────────────
     _t = time.time()
     print(f"\n[Stage 1] Loading metadata from: {preprocessed_dir}")
-    mm = ShardMetadataManager(preprocessed_dir)
+    schema = DatasetSchema.from_yaml(args.schema) if args.schema else DatasetSchema()
+    mm = ShardMetadataManager(preprocessed_dir, schema=schema)
+    domain_names = mm.detected_domain_names
     print(f"[Stage 1] {mm.num_docs:,} docs across {mm.num_shards} shards")
     domain_labels = mm.domain_labels
     quality_scores = mm.quality_scores
@@ -139,7 +144,7 @@ def main():
     print(f"  Domains: {optimal_params.num_domains}, "
           f"Criteria: {optimal_params.num_criteria}")
     for m, sc in enumerate(optimal_params.sampling_configs):
-        name = DOMAIN_NAMES[m] if m < len(DOMAIN_NAMES) else f"D{m}"
+        name = domain_names[m] if m < len(domain_names) else f"D{m}"
         print(f"    [{m}] {name}: λ={sc.lambda_:.2f}, ω={sc.omega:.6f}, "
               f"η={sc.eta:.4f}, ε={sc.epsilon:.6f}")
     stage_times["stage2_params"] = time.time() - _t
@@ -215,7 +220,7 @@ def main():
     for m in range(num_domains):
         if orig_dist[m] > 0:
             ratio = sel_dist[m] / orig_dist[m]
-            name = DOMAIN_NAMES[m] if m < len(DOMAIN_NAMES) else f"D{m}"
+            name = domain_names[m] if m < len(domain_names) else f"D{m}"
             print(f"    [{m}] {name:>10s}: {orig_dist[m]:>7,} → {sel_dist[m]:>7,}  ({ratio:.2f}x)")
 
     # ── Stage 7: Save outputs ────────────────────────────────
@@ -230,9 +235,9 @@ def main():
 
     sampled_path = os.path.join(output_dir, "sampled_dataset.parquet")
     pd.DataFrame({
-        "text": sampled_texts,
+        schema.text_col: sampled_texts,
         "doc_id": selected_indices,
-        "domain": sel_domain,
+        schema.domain_col: sel_domain,
         "quality_rank": sel_rank,
         "sampling_weight": sel_weights,
         "sampling_value": sel_sv,
@@ -256,7 +261,7 @@ def main():
         "estimated_tokens": total_tokens_est,
         "estimated_tokens_billions": round(total_tokens_est / 1e9, 3),
         "domain_distribution": {
-            DOMAIN_NAMES[m] if m < len(DOMAIN_NAMES) else f"D{m}": {
+            domain_names[m] if m < len(domain_names) else f"D{m}": {
                 "original": int(orig_dist[m]),
                 "selected": int(sel_dist[m]),
                 "ratio": round(sel_dist[m] / orig_dist[m], 4) if orig_dist[m] > 0 else 0,

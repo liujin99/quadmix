@@ -82,6 +82,8 @@ def save_sampled_dataset(
     sampling_values: Optional[npt.NDArray[np.float64]] = None,
     doc_ids: Optional[List[str]] = None,
     format: str = "parquet",
+    text_col: str = "text",
+    domain_col: str = "domain",
 ):
     """Save the sampled dataset with metadata.
 
@@ -97,13 +99,13 @@ def save_sampled_dataset(
     """
     selected_texts = [original_texts[i] for i in selected_indices]
 
-    records = {"text": selected_texts}
+    records = {text_col: selected_texts}
 
     if doc_ids is not None:
         records["doc_id"] = [doc_ids[i] for i in selected_indices]
 
     if domain_labels is not None:
-        records["domain"] = domain_labels[selected_indices].tolist()
+        records[domain_col] = domain_labels[selected_indices].tolist()
 
     if quality_ranks is not None:
         records["quality_rank"] = quality_ranks[selected_indices].tolist()

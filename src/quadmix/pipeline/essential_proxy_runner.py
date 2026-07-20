@@ -39,7 +39,6 @@ from quadmix.core.quality_merger import compute_merged_quality_scores
 from quadmix.core.quality_rank import compute_quality_ranks
 from quadmix.core.sampler import compute_sampling_values
 from quadmix.pipeline.proxy_runner import BaseProxyRunner
-from quadmix.constants import DOMAIN_NAMES, FASTTEXT_FIELDS
 from quadmix.utils.perf_timer import PerfTimer
 from quadmix.pipeline.loss_utils import chunked_loss_from_hidden, chunked_loss_per_token_from_hidden
 from quadmix.pipeline.shared_memory import SharedArrayInfo, ndarray_to_shared, shared_to_ndarray
@@ -84,6 +83,9 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             token_cache_dir: Optional[str] = None,
             memory_cache_max_gb: float = 500.0,
             checkpoint_interval: int = 1000,
+            domain_names: Optional[List[str]] = None,
+            quality_names: Optional[List[str]] = None,
+            quality_directions: Optional[List[bool]] = None,
     ):
         from quadmix.constants import DEFAULT_TOKEN_CACHE_DIR
         if token_cache_dir is None:
@@ -103,6 +105,10 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         self.rank_ref_size = rank_ref_size
         self.token_cache_dir = token_cache_dir
         self.checkpoint_interval = checkpoint_interval
+
+        self._domain_names = domain_names
+        self._quality_names = quality_names
+        self._quality_directions = quality_directions
 
         self.global_batch_size = global_batch_size
         self.micro_batch_size = micro_batch_size
@@ -161,10 +167,16 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         t0 = time.time()
         mgr = self.metadata_manager
         self._domain_labels = mgr.domain_labels
-        self._quality_scores = mgr.quality_scores
+        self._quality_scores = mgr.quality_scores.copy()
         self._token_counts = mgr.estimate_token_counts()
         self._num_docs = mgr.num_docs
         self._train_idx = np.arange(self._num_docs)
+
+        quality_directions = self._quality_directions or mgr.quality_directions
+        if quality_directions:
+            for n, hb in enumerate(quality_directions):
+                if not hb:
+                    self._quality_scores[:, n] = -self._quality_scores[:, n]
 
         print(f"[ProxyRunner] Sharded mode: {self._num_docs:,} docs "
               f"(metadata only, {mgr.num_shards} shards) ({time.time() - t0:.0f}s)")
@@ -628,14 +640,23 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                     self._cache_misses += len(miss_rows)
                     miss_rows_arr = np.array(miss_rows, dtype=np.int64)
 
-                    df_shard = pd.read_parquet(
-                        shard_path,
-                        columns=["row_in_shard", "text"],
-                        filters=[("row_in_shard", "in", miss_rows_arr.tolist())],
-                    )
-                    df_shard = df_shard.sort_values("row_in_shard")
-                    selected_texts = df_shard["text"].astype(str).tolist()
-                    parsed_rows = df_shard["row_in_shard"].to_numpy(dtype=np.int64)
+                    schema = self.metadata_manager.schema
+                    text_col = schema.text_col
+                    row_col = schema.row_in_shard_col if self.metadata_manager._has_row_in_shard else None
+
+                    if row_col is not None:
+                        df_shard = pd.read_parquet(
+                            shard_path,
+                            columns=[row_col, text_col],
+                            filters=[(row_col, "in", miss_rows_arr.tolist())],
+                        )
+                        df_shard = df_shard.sort_values(row_col)
+                        selected_texts = df_shard[text_col].astype(str).tolist()
+                        parsed_rows = df_shard[row_col].to_numpy(dtype=np.int64)
+                    else:
+                        df_shard = pd.read_parquet(shard_path, columns=[text_col])
+                        selected_texts = df_shard[text_col].astype(str).tolist()
+                        parsed_rows = np.arange(len(selected_texts), dtype=np.int64)
 
                     print(f"    [Partial miss] shard {sid}: "
                           f"tokenizing {len(miss_rows):,} docs "
@@ -667,14 +688,23 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                     shard_tokens = hit_tokens
             else:
                 self._cache_misses += len(local_rows)
-                df_shard = pd.read_parquet(
-                    shard_path,
-                    columns=["row_in_shard", "text"],
-                    filters=[("row_in_shard", "in", local_rows.tolist())],
-                )
-                df_shard = df_shard.sort_values("row_in_shard")
-                selected_texts = df_shard["text"].astype(str).tolist()
-                parsed_rows = df_shard["row_in_shard"].to_numpy(dtype=np.int64)
+                schema = self.metadata_manager.schema
+                text_col = schema.text_col
+                row_col = schema.row_in_shard_col if self.metadata_manager._has_row_in_shard else None
+
+                if row_col is not None:
+                    df_shard = pd.read_parquet(
+                        shard_path,
+                        columns=[row_col, text_col],
+                        filters=[(row_col, "in", local_rows.tolist())],
+                    )
+                    df_shard = df_shard.sort_values(row_col)
+                    selected_texts = df_shard[text_col].astype(str).tolist()
+                    parsed_rows = df_shard[row_col].to_numpy(dtype=np.int64)
+                else:
+                    df_shard = pd.read_parquet(shard_path, columns=[text_col])
+                    selected_texts = df_shard[text_col].astype(str).tolist()
+                    parsed_rows = np.arange(len(selected_texts), dtype=np.int64)
 
                 print(f"    [Cache miss] shard {sid}: "
                       f"tokenizing {len(selected_texts):,} docs...")
@@ -1134,8 +1164,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         with PerfTimer.section("save_metadata", _timer_prefix):
             avg_train = (loss_accum / iter_ct).item() if iter_ct > 0 else 0
 
-            domain_names = DOMAIN_NAMES
-            quality_names = FASTTEXT_FIELDS
+            domain_names = self._domain_names or [f"domain_{m}" for m in range(M)]
+            quality_names = self._quality_names or [f"criterion_{n}" for n in range(N)]
             M = params.num_domains
             N = params.num_criteria
             dw = params.merge_config.domain_weights
@@ -1574,8 +1604,12 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             print(f"[TokenizeAll] {sum(shard_miss_meta.values()):,} miss rows across {len(shard_miss_info)} shards, parallel tokenizing...")
 
             with PerfTimer.section("parallel_tokenize", "tokenize_all"):
+                schema = self.metadata_manager.schema
                 parallel_results = _tokenize_shard_parallel(
-                    shard_miss_info, self.tokenizer.name_or_path, self.block_size
+                    shard_miss_info, self.tokenizer.name_or_path, self.block_size,
+                    text_col=schema.text_col,
+                    row_in_shard_col=schema.row_in_shard_col,
+                    has_row_in_shard=self.metadata_manager._has_row_in_shard,
                 )
 
             with PerfTimer.section("cache_results", "tokenize_all"):
@@ -1654,6 +1688,15 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             "shared_doc_char_counts": shared_metadata.get("doc_char_counts") if shared_metadata else None,
             "shared_normalized_quality": shared_metadata.get("normalized_quality") if shared_metadata else None,
             "per_shard_info": self.metadata_manager.shard_info if self.metadata_manager else None,
+            "domain_names": self._domain_names,
+            "quality_names": self._quality_names,
+            "quality_directions": self._quality_directions,
+            "num_domains": self.metadata_manager.num_domains if self.metadata_manager else None,
+            "num_quality_criteria": self.metadata_manager.num_quality_criteria if self.metadata_manager else None,
+            "detected_domain_names": self.metadata_manager.detected_domain_names if self.metadata_manager else None,
+            "detected_quality_names": self.metadata_manager.detected_quality_names if self.metadata_manager else None,
+            "domain_label_map": self.metadata_manager.domain_label_map if self.metadata_manager else None,
+            "schema": self.metadata_manager.schema if self.metadata_manager else None,
         }
         return cfg
 

@@ -50,18 +50,26 @@ def _process_shard_full(
         tokenizer_path: str,
         block_size: int,
         threads_per_worker: int = 4,
+        text_col: str = "text",
+        row_in_shard_col: str = "row_in_shard",
+        has_row_in_shard: bool = True,
 ) -> Tuple[int, np.ndarray, np.ndarray, float, float, float]:
     """Process one shard: IO + tokenize in sequence."""
     io_t0 = time.time()
     import pandas as pd
-    df_shard = pd.read_parquet(
-        shard_path,
-        columns=["row_in_shard", "text"],
-        filters=[("row_in_shard", "in", miss_rows)],
-    )
-    df_shard = df_shard.sort_values("row_in_shard")
-    texts = df_shard["text"].astype(str).tolist()
-    parsed_rows = df_shard["row_in_shard"].to_numpy(dtype=np.int64)
+    if has_row_in_shard:
+        df_shard = pd.read_parquet(
+            shard_path,
+            columns=[row_in_shard_col, text_col],
+            filters=[(row_in_shard_col, "in", miss_rows)],
+        )
+        df_shard = df_shard.sort_values(row_in_shard_col)
+        texts = df_shard[text_col].astype(str).tolist()
+        parsed_rows = df_shard[row_in_shard_col].to_numpy(dtype=np.int64)
+    else:
+        df_shard = pd.read_parquet(shard_path, columns=[text_col])
+        texts = df_shard[text_col].astype(str).tolist()
+        parsed_rows = np.arange(len(texts), dtype=np.int64)
     io_time = time.time() - io_t0
 
     tok_t0 = time.time()
