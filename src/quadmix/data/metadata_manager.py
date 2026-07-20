@@ -25,12 +25,19 @@ CHAR_COUNT_COL = "doc_char_count"
 _METADATA_COLUMNS = ["domain", *QUALITY_COLUMNS, CHAR_COUNT_COL]
 
 
+def _parse_shard_idx(basename: str) -> int:
+    import re
+    m = re.search(r'(\d+)', basename)
+    if m:
+        return int(m.group(1))
+    raise ValueError(f"Cannot extract shard index from filename: {basename}")
+
+
 def _read_shard_metadata(shard_path: str) -> dict:
     df_meta = pd.read_parquet(shard_path, columns=_METADATA_COLUMNS)
     n = len(df_meta)
     basename = os.path.basename(shard_path)
-    idx_str = basename.replace("preprocessed_", "").replace(".parquet", "")
-    parsed_idx = int(idx_str)
+    parsed_idx = _parse_shard_idx(basename)
     return {
         "shard_idx": parsed_idx,
         "path": shard_path,
@@ -62,11 +69,11 @@ class ShardMetadataManager:
         self._dir = preprocessed_dir
 
         self._shard_files: List[str] = sorted(
-            glob.glob(os.path.join(preprocessed_dir, "preprocessed_*.parquet"))
+            glob.glob(os.path.join(preprocessed_dir, "*.parquet"))
         )
         if not self._shard_files:
             raise FileNotFoundError(
-                f"No preprocessed_*.parquet files found in {preprocessed_dir}"
+                f"No .parquet files found in {preprocessed_dir}"
             )
 
         self._shard_index: Optional[dict] = None
