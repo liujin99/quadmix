@@ -1818,14 +1818,17 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         dispatcher_thread = threading.Thread(target=dispatcher_thread_func, daemon=True)
         dispatcher_thread.start()
 
+        worker_processes = []
         alive_workers = {"count": num_workers}
 
         def collector_thread_func():
-            """Collect results from result queue."""
+            """Collect results from result queue, with worker health monitoring."""
             nonlocal completed_count
+            last_progress_time = time.time()
             while completed_count < n_exp:
                 try:
                     result = result_queue.get(timeout=1.0)
+                    last_progress_time = time.time()
                     if result is None:
                         alive_workers["count"] -= 1
                         if alive_workers["count"] <= 0 and completed_count < n_exp:
@@ -1850,14 +1853,31 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                     if completed_count % 50 == 0 or completed_count == n_exp:
                         print(f"[Collector] {completed_count}/{n_exp} done ({elapsed:.0f}s, ETA: {eta:.0f}s)")
                 except thread_queue.Empty:
-                    pass
+                    if time.time() - last_progress_time > 60:
+                        all_dead = (len(worker_processes) > 0 and
+                                    all(not p.is_alive() for p in worker_processes))
+                        if all_dead:
+                            missing = [i for i in range(n_exp) if all_results[i] is None]
+                            print(f"[Collector] All workers dead; {completed_count}/{n_exp} results, "
+                                  f"{len(missing)} missing")
+                            for eid in missing:
+                                all_results[eid] = ProxyResult(
+                                    parameters=params_list[eid],
+                                    validation_loss=float('inf'),
+                                    metadata={"experiment_id": eid, "error": "worker_crash"}
+                                )
+                                completed_count += 1
+                            break
+                        alive_count = sum(1 for p in worker_processes if p.is_alive())
+                        print(f"[Collector] No progress for 60s; {alive_count}/{len(worker_processes)} workers alive, "
+                              f"{completed_count}/{n_exp} results")
+                        last_progress_time = time.time()
                 except Exception as e:
                     print(f"[Collector] Unexpected error: {e}")
 
         collector_thread = threading.Thread(target=collector_thread_func, daemon=True)
         collector_thread.start()
 
-        worker_processes = []
         for wid in range(num_workers):
             p = ctx.Process(
                 target=_worker_dynamic_loop,
