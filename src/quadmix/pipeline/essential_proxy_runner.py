@@ -375,8 +375,60 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             shm_store: Optional[Dict[int, tuple]] = None,
     ) -> Dict[int, str]:
         """NPU Parallel Mode: Batch tokenize union miss rows across all experiments."""
-        mgr = self.metadata_manager
         t0 = time.time()
+
+        if hasattr(self, '_global_index') and self._global_index is not None:
+            sorted_global_ids, all_tokens_flat, sort_idx = self._global_index
+
+            exp_token_paths: Dict[int, str] = {}
+            pack_t0 = time.time()
+            n_batch = len(batch_exp_ids)
+
+            print(f"[BatchTokenize] {n_batch} exps, using _global_index "
+                  f"({len(sorted_global_ids):,} docs, skip cache check)")
+
+            for i, (exp_id, selected_idx) in enumerate(zip(batch_exp_ids, batch_selected)):
+                positions = np.searchsorted(sorted_global_ids, selected_idx)
+                positions = np.clip(positions, 0, len(sorted_global_ids) - 1)
+                matched = sorted_global_ids[positions] == selected_idx
+                if not matched.all():
+                    n_missing = int((~matched).sum())
+                    raise RuntimeError(
+                        f"[Pack] Experiment {exp_id}: {n_missing}/{len(selected_idx)} "
+                        f"documents not found in tokenized cache. "
+                        f"Check for shard tokenization failures."
+                    )
+                flat_positions = sort_idx[positions]
+                result = all_tokens_flat[flat_positions]
+
+                if shm_store is not None:
+                    from multiprocessing.shared_memory import SharedMemory
+                    shm = SharedMemory(create=True, size=result.nbytes)
+                    shm_array = np.ndarray(result.shape, dtype=result.dtype, buffer=shm.buf)
+                    shm_array[:] = result[:]
+                    shm_store[exp_id] = (shm.name, result.shape, result.dtype.str)
+                    shm.close()
+                    exp_token_paths[exp_id] = f"shm://{shm_store[exp_id][0]}"
+                else:
+                    exp_token_path = self._get_exp_token_path(exp_id)
+                    np.save(exp_token_path, result)
+                    exp_token_paths[exp_id] = exp_token_path
+
+                elapsed = time.time() - pack_t0
+                speed = (i + 1) / elapsed if elapsed > 0 else 0
+                eta = (n_batch - i - 1) / speed if speed > 0 else 0
+                print(f"  [Pack] {i+1}/{n_batch} exps ({(i+1)*100//n_batch}%), "
+                      f"{elapsed:.1f}s elapsed, ETA {eta:.0f}s")
+
+            pack_time = time.time() - pack_t0
+            print(f"[BatchTokenize] Pack {n_batch} exps: {pack_time:.1f}s")
+
+            elapsed = time.time() - t0
+            print(f"[BatchTokenize] Total: {elapsed:.1f}s for {n_batch} experiments")
+
+            return exp_token_paths
+
+        mgr = self.metadata_manager
 
         shard_to_exp_rows: Dict[int, Dict[int, List[int]]] = {}
 
@@ -1548,16 +1600,30 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             global_ids_list.append(global_ids)
             tokens_list.append(tokens)
 
+        n_docs_est = sum(len(g) for g in global_ids_list)
+        print(f"[TokenizeAll] Concatenating {len(global_ids_list)} shards "
+              f"({n_docs_est:,} docs)...", flush=True)
         all_global_ids = np.concatenate(global_ids_list).astype(np.int64)
         all_tokens_flat = np.concatenate(tokens_list, axis=0)
+        del global_ids_list, tokens_list
+
+        freed_gb = self._memory_cache_bytes / (1024 ** 3)
+        self._memory_cache.clear()
+        self._memory_cache_bytes = 0
+        print(f"[TokenizeAll] Concatenated, freed {freed_gb:.1f} GB from memory cache. "
+              f"Sorting global IDs...", flush=True)
+
         sort_idx = np.argsort(all_global_ids)
-        self._global_index = (all_global_ids[sort_idx], all_tokens_flat[sort_idx])
-        del global_ids_list, tokens_list, sort_idx
-        cache_gb = self._memory_cache_bytes / (1024 ** 3)
-        print(f"[TokenizeAll] Global index built: {len(self._global_index[0]):,} docs "
-              f"({time.time() - pack_t0:.1f}s), memory cache: {cache_gb:.1f} GB "
-              f"({len(self._memory_cache)} shards, limit: {self.memory_cache_max_gb:.0f} GB)")
-        print(f"[TokenizeAll] All {len(all_selected)} experiments ready (memory cache)")
+        sorted_global_ids = all_global_ids[sort_idx]
+        self._global_index = (sorted_global_ids, all_tokens_flat, sort_idx)
+        del all_global_ids
+
+        elapsed = time.time() - pack_t0
+        index_gb = all_tokens_flat.nbytes / (1024 ** 3)
+        print(f"[TokenizeAll] Global index built: {len(sorted_global_ids):,} docs "
+              f"({elapsed:.1f}s), index: {index_gb:.1f} GB "
+              f"(freed {freed_gb:.1f} GB cache, peak reduced from 3X to 2X)")
+        print(f"[TokenizeAll] All {len(all_selected)} experiments ready")
 
     def _serialize_config(self, shared_metadata: Optional[Dict[str, "SharedArrayInfo"]] = None) -> dict:
         """Pickle-safe config for worker processes."""
@@ -1676,7 +1742,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         print(f"[DynamicParallel] NPU Parallel Mode: SharedMemory + memory_cache + AsyncWrite enabled")
 
         ctx = mp.get_context("spawn")
-        task_queue = ctx.Queue(maxsize=num_workers * 2)
+        task_queue = ctx.Queue(maxsize=max(n_exp, num_workers * 2))
         result_queue = ctx.Queue()
 
         async_write_queue = thread_queue.Queue()
@@ -1781,30 +1847,36 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             pos = 0
             failed_exps = []
             while pos < n_exp:
+                task_item = None
+                skip_item = None
                 with ready_cond:
                     is_ready = ready_events.get(pos, None)
-
                     if is_ready is True:
                         shm_info = exp_shm_info.get(pos)
-                        task_queue.put((
+                        task_item = (
                             pos, params_list[pos],
                             all_selected_train[pos], shm_info,
                             len(all_selected[pos]),
-                        ))
-                        pos += 1
-                        continue
+                        )
                     elif is_ready is False:
-                        print(f"[Dispatcher] Skipping exp {pos} (tokenize failed)")
-                        failed_exps.append(pos)
-                        result_queue.put(ProxyResult(
-                            parameters=params_list[pos],
-                            validation_loss=float('inf'),
-                            metadata={"experiment_id": pos, "error": "tokenize_failed"}
-                        ))
-                        pos += 1
-                        continue
+                        skip_item = (pos, params_list[pos])
                     else:
                         ready_cond.wait(timeout=1.0)
+                        continue
+
+                if task_item is not None:
+                    task_queue.put(task_item)
+                    pos += 1
+                elif skip_item is not None:
+                    skip_pos, skip_params = skip_item
+                    print(f"[Dispatcher] Skipping exp {skip_pos} (tokenize failed)")
+                    failed_exps.append(skip_pos)
+                    result_queue.put(ProxyResult(
+                        parameters=skip_params,
+                        validation_loss=float('inf'),
+                        metadata={"experiment_id": skip_pos, "error": "tokenize_failed"}
+                    ))
+                    pos += 1
 
             for _ in range(num_workers):
                 task_queue.put(None)
@@ -1816,14 +1888,17 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         dispatcher_thread = threading.Thread(target=dispatcher_thread_func, daemon=True)
         dispatcher_thread.start()
 
+        worker_processes = []
         alive_workers = {"count": num_workers}
 
         def collector_thread_func():
-            """Collect results from result queue."""
+            """Collect results from result queue, with worker health monitoring."""
             nonlocal completed_count
+            last_progress_time = time.time()
             while completed_count < n_exp:
                 try:
                     result = result_queue.get(timeout=1.0)
+                    last_progress_time = time.time()
                     if result is None:
                         alive_workers["count"] -= 1
                         if alive_workers["count"] <= 0 and completed_count < n_exp:
@@ -1847,13 +1922,32 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                     eta = (n_exp - completed_count) * elapsed / max(1, completed_count)
                     if completed_count % 50 == 0 or completed_count == n_exp:
                         print(f"[Collector] {completed_count}/{n_exp} done ({elapsed:.0f}s, ETA: {eta:.0f}s)")
-                except:
-                    pass
+                except thread_queue.Empty:
+                    if time.time() - last_progress_time > 60:
+                        all_dead = (len(worker_processes) > 0 and
+                                    all(not p.is_alive() for p in worker_processes))
+                        if all_dead:
+                            missing = [i for i in range(n_exp) if all_results[i] is None]
+                            print(f"[Collector] All workers dead; {completed_count}/{n_exp} results, "
+                                  f"{len(missing)} missing")
+                            for eid in missing:
+                                all_results[eid] = ProxyResult(
+                                    parameters=params_list[eid],
+                                    validation_loss=float('inf'),
+                                    metadata={"experiment_id": eid, "error": "worker_crash"}
+                                )
+                                completed_count += 1
+                            break
+                        alive_count = sum(1 for p in worker_processes if p.is_alive())
+                        print(f"[Collector] No progress for 60s; {alive_count}/{len(worker_processes)} workers alive, "
+                              f"{completed_count}/{n_exp} results")
+                        last_progress_time = time.time()
+                except Exception as e:
+                    print(f"[Collector] Unexpected error: {e}")
 
         collector_thread = threading.Thread(target=collector_thread_func, daemon=True)
         collector_thread.start()
 
-        worker_processes = []
         for wid in range(num_workers):
             p = ctx.Process(
                 target=_worker_dynamic_loop,

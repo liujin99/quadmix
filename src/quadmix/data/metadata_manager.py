@@ -10,8 +10,9 @@ Usage:
     tx  = mgr.read_texts(indices)  # List[str] for selected docs
 """
 
-import json, os, glob, re
+import json, os, glob, re, time
 from typing import Dict, List, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 import pandas as pd
@@ -97,6 +98,24 @@ def read_parquet_text_rows(
         raise ValueError(f"Null or non-string text found in selected rows of {shard_path}")
     return parsed, texts
 
+_METADATA_COLUMNS = ["domain", *QUALITY_COLUMNS, CHAR_COUNT_COL]
+
+
+def _read_shard_metadata(shard_path: str) -> dict:
+    df_meta = pd.read_parquet(shard_path, columns=_METADATA_COLUMNS)
+    n = len(df_meta)
+    basename = os.path.basename(shard_path)
+    idx_str = basename.replace("preprocessed_", "").replace(".parquet", "")
+    parsed_idx = int(idx_str)
+    return {
+        "shard_idx": parsed_idx,
+        "path": shard_path,
+        "num_docs": n,
+        "domain": df_meta["domain"].to_numpy(dtype=np.int64),
+        "quality": df_meta[QUALITY_COLUMNS].to_numpy(dtype=np.float64),
+        "char_count": df_meta[CHAR_COUNT_COL].to_numpy(dtype=np.int64),
+    }
+
 
 class ShardMetadataManager:
     """
@@ -117,6 +136,7 @@ class ShardMetadataManager:
         input_format: str = "preprocessed",
         batch_size: int = 65536,
         shard_limit: Optional[int] = None,
+        max_workers: Optional[int] = None,
     ):
         self._dir = preprocessed_dir
         self.input_format = input_format
@@ -130,7 +150,6 @@ class ShardMetadataManager:
             self._init_stem_raw(batch_size=batch_size, shard_limit=shard_limit)
             return
 
-        # Discover shards (sorted by filename for deterministic ordering)
         self._shard_files: List[str] = sorted(
             glob.glob(os.path.join(preprocessed_dir, "preprocessed_*.parquet"))
         )
@@ -139,7 +158,6 @@ class ShardMetadataManager:
                 f"No preprocessed_*.parquet files found in {preprocessed_dir}"
             )
 
-        # Load index for validation
         self._shard_index: Optional[dict] = None
         if index_file is None:
             index_candidate = os.path.join(preprocessed_dir, "shard_index.json")
@@ -149,7 +167,6 @@ class ShardMetadataManager:
             with open(index_file, encoding="utf-8") as f:
                 self._shard_index = json.load(f)
 
-        # Validate: check if shard_index matches discovered files
         if self._shard_index:
             expected_shards = self._shard_index.get("num_shards", 0)
             actual_shards = len(self._shard_files)
@@ -158,51 +175,68 @@ class ShardMetadataManager:
                       f"but found {actual_shards} files. "
                       f"May need to re-run preprocessing.")
 
-        print(f"[ShardMetadataManager] Discovered {len(self._shard_files)} shards")
+        total_shards = len(self._shard_files)
+        n_workers = max_workers if max_workers is not None else min(32, total_shards)
+        print(f"[ShardMetadataManager] Discovered {total_shards} shards, "
+              f"loading metadata with {n_workers} parallel workers")
 
-        # ── Load metadata (domain + quality columns + char count, skip text) ──
+        self._per_shard_info: List[Optional[dict]] = [None] * total_shards
+        shard_data: List[Optional[dict]] = [None] * total_shards
+
+        load_t0 = time.time()
+        done = 0
+        log_interval = max(1, total_shards // 20)
+
+        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+            future_to_idx = {
+                pool.submit(_read_shard_metadata, sf): i
+                for i, sf in enumerate(self._shard_files)
+            }
+            for future in as_completed(future_to_idx):
+                i = future_to_idx[future]
+                result = future.result()
+                shard_data[i] = result
+                done += 1
+                if done % log_interval == 0 or done == total_shards:
+                    elapsed = time.time() - load_t0
+                    pct = done / total_shards * 100
+                    docs_so_far = sum(r["num_docs"] for r in shard_data if r is not None)
+                    eta = elapsed / done * (total_shards - done)
+                    print(f"[ShardMetadataManager] {done}/{total_shards} "
+                          f"({pct:.0f}%) — {docs_so_far:,} docs, "
+                          f"elapsed {elapsed:.0f}s, ETA {eta:.0f}s")
+
+        global_start = 0
         domain_list: List[np.ndarray] = []
         quality_list: List[np.ndarray] = []
         char_count_list: List[np.ndarray] = []
-        self._per_shard_info: List[dict] = []
 
-        global_start = 0
-        for sf in self._shard_files:
-            df_meta = pd.read_parquet(
-                sf,
-                columns=["domain", *QUALITY_COLUMNS, CHAR_COUNT_COL],
-            )
-            n = len(df_meta)
-            domain_list.append(df_meta["domain"].to_numpy(dtype=np.int64))
-            quality_list.append(df_meta[QUALITY_COLUMNS].to_numpy(dtype=np.float64))
-            char_count_list.append(df_meta[CHAR_COUNT_COL].to_numpy(dtype=np.int64))
-
-            # Parse shard_idx from filename
-            basename = os.path.basename(sf)
-            idx_str = basename.replace("preprocessed_", "").replace(".parquet", "")
-            parsed_idx = int(idx_str)
-
-            self._per_shard_info.append({
-                "shard_idx": parsed_idx,
-                "path": sf,
-                "num_docs": n,
+        for i, data in enumerate(shard_data):
+            domain_list.append(data["domain"])
+            quality_list.append(data["quality"])
+            char_count_list.append(data["char_count"])
+            self._per_shard_info[i] = {
+                "shard_idx": data["shard_idx"],
+                "path": data["path"],
+                "num_docs": data["num_docs"],
                 "start_idx": global_start,
-                "end_idx": global_start + n,
-            })
-            global_start += n
+                "end_idx": global_start + data["num_docs"],
+            }
+            global_start += data["num_docs"]
 
         self._domain_labels = np.concatenate(domain_list)
         self._quality_scores = np.concatenate(quality_list)
         self._doc_char_counts = np.concatenate(char_count_list)
         self._num_docs = global_start
-        self._num_shards = len(self._shard_files)
+        self._num_shards = total_shards
 
         self._shard_starts = np.array(
             [s["start_idx"] for s in self._per_shard_info], dtype=np.int64
         )
 
+        total_time = time.time() - load_t0
         print(f"[ShardMetadataManager] Loaded {self._num_docs:,} docs "
-              f"({self._num_shards} shards)")
+              f"({self._num_shards} shards) in {total_time:.1f}s")
         print(f"[ShardMetadataManager] Quality scores: {self._quality_scores.shape}")
 
     def _init_stem_raw(self, batch_size: int, shard_limit: Optional[int]) -> None:
