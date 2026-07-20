@@ -1672,7 +1672,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         print(f"[DynamicParallel] NPU Parallel Mode: SharedMemory + memory_cache + AsyncWrite enabled")
 
         ctx = mp.get_context("spawn")
-        task_queue = ctx.Queue(maxsize=num_workers * 2)
+        task_queue = ctx.Queue(maxsize=max(n_exp, num_workers * 2))
         result_queue = ctx.Queue()
 
         async_write_queue = thread_queue.Queue()
@@ -1777,30 +1777,36 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             pos = 0
             failed_exps = []
             while pos < n_exp:
+                task_item = None
+                skip_item = None
                 with ready_cond:
                     is_ready = ready_events.get(pos, None)
-
                     if is_ready is True:
                         shm_info = exp_shm_info.get(pos)
-                        task_queue.put((
+                        task_item = (
                             pos, params_list[pos],
                             all_selected_train[pos], shm_info,
                             len(all_selected[pos]),
-                        ))
-                        pos += 1
-                        continue
+                        )
                     elif is_ready is False:
-                        print(f"[Dispatcher] Skipping exp {pos} (tokenize failed)")
-                        failed_exps.append(pos)
-                        result_queue.put(ProxyResult(
-                            parameters=params_list[pos],
-                            validation_loss=float('inf'),
-                            metadata={"experiment_id": pos, "error": "tokenize_failed"}
-                        ))
-                        pos += 1
-                        continue
+                        skip_item = (pos, params_list[pos])
                     else:
                         ready_cond.wait(timeout=1.0)
+                        continue
+
+                if task_item is not None:
+                    task_queue.put(task_item)
+                    pos += 1
+                elif skip_item is not None:
+                    skip_pos, skip_params = skip_item
+                    print(f"[Dispatcher] Skipping exp {skip_pos} (tokenize failed)")
+                    failed_exps.append(skip_pos)
+                    result_queue.put(ProxyResult(
+                        parameters=skip_params,
+                        validation_loss=float('inf'),
+                        metadata={"experiment_id": skip_pos, "error": "tokenize_failed"}
+                    ))
+                    pos += 1
 
             for _ in range(num_workers):
                 task_queue.put(None)
@@ -1843,8 +1849,10 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                     eta = (n_exp - completed_count) * elapsed / max(1, completed_count)
                     if completed_count % 50 == 0 or completed_count == n_exp:
                         print(f"[Collector] {completed_count}/{n_exp} done ({elapsed:.0f}s, ETA: {eta:.0f}s)")
-                except:
+                except thread_queue.Empty:
                     pass
+                except Exception as e:
+                    print(f"[Collector] Unexpected error: {e}")
 
         collector_thread = threading.Thread(target=collector_thread_func, daemon=True)
         collector_thread.start()
