@@ -10,12 +10,12 @@ Usage:
     tx  = mgr.read_texts(indices)  # List[str] for selected docs
 """
 
-import json, os, glob, time
+import json, os, glob, time, re
+import multiprocessing as mp
 from typing import Dict, List, Optional, Tuple
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
-import pandas as pd
 import numpy.typing as npt
 
 from quadmix.constants import QUALITY_COLUMNS
@@ -26,26 +26,36 @@ _METADATA_COLUMNS = ["domain", *QUALITY_COLUMNS, CHAR_COUNT_COL]
 
 
 def _parse_shard_idx(basename: str) -> int:
-    import re
     m = re.search(r'(\d+)', basename)
     if m:
         return int(m.group(1))
     raise ValueError(f"Cannot extract shard index from filename: {basename}")
 
 
-def _read_shard_metadata(shard_path: str) -> dict:
-    df_meta = pd.read_parquet(shard_path, columns=_METADATA_COLUMNS)
-    n = len(df_meta)
+def _read_shard_metadata_pyarrow(shard_path: str) -> dict:
+    import pyarrow.parquet as pq
     basename = os.path.basename(shard_path)
     parsed_idx = _parse_shard_idx(basename)
+    pf = pq.ParquetFile(shard_path)
+    table = pf.read(columns=_METADATA_COLUMNS, use_threads=False)
+    n = len(table)
+    domain = table.column("domain").to_numpy(zero_copy_only=False).astype(np.int64)
+    quality = np.column_stack([
+        table.column(c).to_numpy(zero_copy_only=False).astype(np.float64)
+        for c in QUALITY_COLUMNS
+    ])
+    char_count = table.column(CHAR_COUNT_COL).to_numpy(zero_copy_only=False).astype(np.int64)
     return {
         "shard_idx": parsed_idx,
         "path": shard_path,
         "num_docs": n,
-        "domain": df_meta["domain"].to_numpy(dtype=np.int64),
-        "quality": df_meta[QUALITY_COLUMNS].to_numpy(dtype=np.float64),
-        "char_count": df_meta[CHAR_COUNT_COL].to_numpy(dtype=np.int64),
+        "domain": domain,
+        "quality": quality,
+        "char_count": char_count,
     }
+
+
+_CACHE_FILENAME = "metadata_cache.npz"
 
 
 class ShardMetadataManager:
@@ -94,20 +104,47 @@ class ShardMetadataManager:
                       f"May need to re-run preprocessing.")
 
         total_shards = len(self._shard_files)
+        load_t0 = time.time()
+
+        cache_path = os.path.join(preprocessed_dir, _CACHE_FILENAME)
+        shard_info_path = os.path.join(preprocessed_dir, "metadata_shard_info.json")
+
+        if os.path.exists(cache_path) and os.path.exists(shard_info_path):
+            print(f"[ShardMetadataManager] Loading from cache: {cache_path}")
+            cached = np.load(cache_path, allow_pickle=False)
+            self._domain_labels = cached["domain_labels"]
+            self._quality_scores = cached["quality_scores"]
+            self._doc_char_counts = cached["doc_char_counts"]
+            self._num_docs = len(self._domain_labels)
+            self._num_shards = total_shards
+
+            with open(shard_info_path) as f:
+                info_list = json.load(f)
+            self._per_shard_info = info_list
+            self._shard_starts = np.array(
+                [s["start_idx"] for s in self._per_shard_info], dtype=np.int64
+            )
+
+            total_time = time.time() - load_t0
+            print(f"[ShardMetadataManager] Loaded {self._num_docs:,} docs "
+                  f"({self._num_shards} shards) from cache in {total_time:.1f}s")
+            print(f"[ShardMetadataManager] Quality scores: {self._quality_scores.shape}")
+            return
+
         n_workers = max_workers if max_workers is not None else min(32, total_shards)
         print(f"[ShardMetadataManager] Discovered {total_shards} shards, "
-              f"loading metadata with {n_workers} parallel workers")
+              f"loading metadata with {n_workers} ProcessPoolExecutor workers")
 
         self._per_shard_info: List[Optional[dict]] = [None] * total_shards
         shard_data: List[Optional[dict]] = [None] * total_shards
 
-        load_t0 = time.time()
         done = 0
         log_interval = max(1, total_shards // 20)
 
-        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        ctx = mp.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as pool:
             future_to_idx = {
-                pool.submit(_read_shard_metadata, sf): i
+                pool.submit(_read_shard_metadata_pyarrow, sf): i
                 for i, sf in enumerate(self._shard_files)
             }
             for future in as_completed(future_to_idx):
@@ -157,6 +194,19 @@ class ShardMetadataManager:
               f"({self._num_shards} shards) in {total_time:.1f}s")
         print(f"[ShardMetadataManager] Quality scores: {self._quality_scores.shape}")
 
+        try:
+            np.savez(cache_path,
+                     domain_labels=self._domain_labels,
+                     quality_scores=self._quality_scores,
+                     doc_char_counts=self._doc_char_counts)
+            with open(shard_info_path, "w") as f:
+                json.dump(self._per_shard_info, f)
+            cache_size = os.path.getsize(cache_path) / (1024 ** 3)
+            print(f"[ShardMetadataManager] Saved metadata cache: {cache_path} "
+                  f"({cache_size:.2f} GB)")
+        except Exception as e:
+            print(f"[ShardMetadataManager] Failed to save cache: {e}")
+
     # ── Properties ──
 
     @property
@@ -205,7 +255,7 @@ class ShardMetadataManager:
         mgr._shard_starts = shard_starts
         mgr._num_docs = len(domain_labels)
         mgr._num_shards = len(per_shard_info)
-        mgr._shard_files = []  # not needed for shared mode
+        mgr._shard_files = []
         mgr._shard_index = None
         return mgr
 
@@ -216,17 +266,6 @@ class ShardMetadataManager:
         return int(np.sum(self._doc_char_counts))
 
     def get_total_tokens_estimate(self, chars_per_token: float = 4.0) -> int:
-        """
-        Estimate total tokens from character count.
-        
-        For English text, typical ratio is ~4 chars per token (GPT-NeoX tokenizer).
-        
-        Args:
-            chars_per_token: Ratio for estimation. Default 4.0 for English.
-        
-        Returns:
-            Estimated total tokens.
-        """
         total_chars = self.get_total_chars()
         return int(total_chars / chars_per_token)
 
@@ -235,18 +274,11 @@ class ShardMetadataManager:
     def global_to_shard_rows(
         self, global_indices: npt.NDArray[np.int64]
     ) -> Dict[int, Tuple[str, npt.NDArray[np.int64]]]:
-        """
-        Convert global document indices to per-shard lookup instructions.
-
-        Returns:
-            Dict[shard_idx, (shard_path, local_row_indices)]
-        """
         shard_ids = np.searchsorted(
             self._shard_starts, global_indices, side="right"
         ) - 1
         shard_ids = np.clip(shard_ids, 0, self._num_shards - 1)
 
-        # Sort by shard_id for grouping
         order = np.argsort(shard_ids)
         sorted_shard_ids = shard_ids[order]
         sorted_global_idx = global_indices[order]
@@ -269,12 +301,7 @@ class ShardMetadataManager:
     def read_texts(
         self, global_indices: npt.NDArray[np.int64]
     ) -> List[str]:
-        """
-        Read text for selected global indices, preserving input order.
-
-        Groups by shard, reads only needed rows from each shard via
-        parquet row filters.
-        """
+        import pandas as pd
         if len(global_indices) == 0:
             return []
 
@@ -305,5 +332,4 @@ class ShardMetadataManager:
     def estimate_token_counts(
         self,
     ) -> npt.NDArray[np.int64]:
-        """Estimate token count per doc: char_count // 4 (same formula as single-file mode)."""
         return np.maximum(self._doc_char_counts // 4, 1).astype(np.int64)
