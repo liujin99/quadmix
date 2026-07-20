@@ -109,8 +109,41 @@ class ShardMetadataManager:
         cache_path = os.path.join(preprocessed_dir, _CACHE_FILENAME)
         shard_info_path = os.path.join(preprocessed_dir, "metadata_shard_info.json")
 
+        current_shard_stats = {
+            os.path.basename(f): {"size": os.path.getsize(f), "mtime": os.path.getmtime(f)}
+            for f in self._shard_files
+        }
+        current_basenames = sorted(current_shard_stats.keys())
+
+        cache_valid = False
         if os.path.exists(cache_path) and os.path.exists(shard_info_path):
-            print(f"[ShardMetadataManager] Loading from cache: {cache_path}")
+            try:
+                with open(shard_info_path) as f:
+                    cached_info = json.load(f)
+                cached_basenames = cached_info.get("shard_basenames", [])
+                cached_stats = cached_info.get("shard_stats", {})
+                if cached_basenames == current_basenames:
+                    mismatches = []
+                    for bn in current_basenames:
+                        cs = cached_stats.get(bn, {})
+                        cr = current_shard_stats[bn]
+                        if cs.get("size") != cr["size"] or cs.get("mtime") != cr["mtime"]:
+                            mismatches.append(bn)
+                    if not mismatches:
+                        cache_valid = True
+                    else:
+                        print(f"[ShardMetadataManager] Cache invalid: {len(mismatches)} shard(s) changed "
+                              f"(e.g. {mismatches[:3]})")
+                else:
+                    added = [b for b in current_basenames if b not in cached_basenames]
+                    removed = [b for b in cached_basenames if b not in current_basenames]
+                    print(f"[ShardMetadataManager] Cache invalid: shard list changed "
+                          f"(+{len(added)} new, -{len(removed)} removed)")
+            except Exception as e:
+                print(f"[ShardMetadataManager] Cache read error: {e}")
+
+        if cache_valid:
+            print(f"[ShardMetadataManager] Cache valid, loading from: {cache_path}")
             cached = np.load(cache_path, allow_pickle=False)
             self._domain_labels = cached["domain_labels"]
             self._quality_scores = cached["quality_scores"]
@@ -118,9 +151,7 @@ class ShardMetadataManager:
             self._num_docs = len(self._domain_labels)
             self._num_shards = total_shards
 
-            with open(shard_info_path) as f:
-                info_list = json.load(f)
-            self._per_shard_info = info_list
+            self._per_shard_info = cached_info["per_shard_info"]
             self._shard_starts = np.array(
                 [s["start_idx"] for s in self._per_shard_info], dtype=np.int64
             )
@@ -199,8 +230,13 @@ class ShardMetadataManager:
                      domain_labels=self._domain_labels,
                      quality_scores=self._quality_scores,
                      doc_char_counts=self._doc_char_counts)
+            cache_meta = {
+                "shard_basenames": current_basenames,
+                "shard_stats": current_shard_stats,
+                "per_shard_info": self._per_shard_info,
+            }
             with open(shard_info_path, "w") as f:
-                json.dump(self._per_shard_info, f)
+                json.dump(cache_meta, f)
             cache_size = os.path.getsize(cache_path) / (1024 ** 3)
             print(f"[ShardMetadataManager] Saved metadata cache: {cache_path} "
                   f"({cache_size:.2f} GB)")
