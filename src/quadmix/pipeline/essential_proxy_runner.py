@@ -365,8 +365,60 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             shm_store: Optional[Dict[int, tuple]] = None,
     ) -> Dict[int, str]:
         """NPU Parallel Mode: Batch tokenize union miss rows across all experiments."""
-        mgr = self.metadata_manager
         t0 = time.time()
+
+        if hasattr(self, '_global_index') and self._global_index is not None:
+            sorted_global_ids, all_tokens_flat, sort_idx = self._global_index
+
+            exp_token_paths: Dict[int, str] = {}
+            pack_t0 = time.time()
+            n_batch = len(batch_exp_ids)
+
+            print(f"[BatchTokenize] {n_batch} exps, using _global_index "
+                  f"({len(sorted_global_ids):,} docs, skip cache check)")
+
+            for i, (exp_id, selected_idx) in enumerate(zip(batch_exp_ids, batch_selected)):
+                positions = np.searchsorted(sorted_global_ids, selected_idx)
+                positions = np.clip(positions, 0, len(sorted_global_ids) - 1)
+                matched = sorted_global_ids[positions] == selected_idx
+                if not matched.all():
+                    n_missing = int((~matched).sum())
+                    raise RuntimeError(
+                        f"[Pack] Experiment {exp_id}: {n_missing}/{len(selected_idx)} "
+                        f"documents not found in tokenized cache. "
+                        f"Check for shard tokenization failures."
+                    )
+                flat_positions = sort_idx[positions]
+                result = all_tokens_flat[flat_positions]
+
+                if shm_store is not None:
+                    from multiprocessing.shared_memory import SharedMemory
+                    shm = SharedMemory(create=True, size=result.nbytes)
+                    shm_array = np.ndarray(result.shape, dtype=result.dtype, buffer=shm.buf)
+                    shm_array[:] = result[:]
+                    shm_store[exp_id] = (shm.name, result.shape, result.dtype.str)
+                    shm.close()
+                    exp_token_paths[exp_id] = f"shm://{shm_store[exp_id][0]}"
+                else:
+                    exp_token_path = self._get_exp_token_path(exp_id)
+                    np.save(exp_token_path, result)
+                    exp_token_paths[exp_id] = exp_token_path
+
+                elapsed = time.time() - pack_t0
+                speed = (i + 1) / elapsed if elapsed > 0 else 0
+                eta = (n_batch - i - 1) / speed if speed > 0 else 0
+                print(f"  [Pack] {i+1}/{n_batch} exps ({(i+1)*100//n_batch}%), "
+                      f"{elapsed:.1f}s elapsed, ETA {eta:.0f}s")
+
+            pack_time = time.time() - pack_t0
+            print(f"[BatchTokenize] Pack {n_batch} exps: {pack_time:.1f}s")
+
+            elapsed = time.time() - t0
+            print(f"[BatchTokenize] Total: {elapsed:.1f}s for {n_batch} experiments")
+
+            return exp_token_paths
+
+        mgr = self.metadata_manager
 
         shard_to_exp_rows: Dict[int, Dict[int, List[int]]] = {}
 
@@ -1548,16 +1600,30 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             global_ids_list.append(global_ids)
             tokens_list.append(tokens)
 
+        n_docs_est = sum(len(g) for g in global_ids_list)
+        print(f"[TokenizeAll] Concatenating {len(global_ids_list)} shards "
+              f"({n_docs_est:,} docs)...", flush=True)
         all_global_ids = np.concatenate(global_ids_list).astype(np.int64)
         all_tokens_flat = np.concatenate(tokens_list, axis=0)
+        del global_ids_list, tokens_list
+
+        freed_gb = self._memory_cache_bytes / (1024 ** 3)
+        self._memory_cache.clear()
+        self._memory_cache_bytes = 0
+        print(f"[TokenizeAll] Concatenated, freed {freed_gb:.1f} GB from memory cache. "
+              f"Sorting global IDs...", flush=True)
+
         sort_idx = np.argsort(all_global_ids)
-        self._global_index = (all_global_ids[sort_idx], all_tokens_flat[sort_idx])
-        del global_ids_list, tokens_list, sort_idx
-        cache_gb = self._memory_cache_bytes / (1024 ** 3)
-        print(f"[TokenizeAll] Global index built: {len(self._global_index[0]):,} docs "
-              f"({time.time() - pack_t0:.1f}s), memory cache: {cache_gb:.1f} GB "
-              f"({len(self._memory_cache)} shards, limit: {self.memory_cache_max_gb:.0f} GB)")
-        print(f"[TokenizeAll] All {len(all_selected)} experiments ready (memory cache)")
+        sorted_global_ids = all_global_ids[sort_idx]
+        self._global_index = (sorted_global_ids, all_tokens_flat, sort_idx)
+        del all_global_ids
+
+        elapsed = time.time() - pack_t0
+        index_gb = all_tokens_flat.nbytes / (1024 ** 3)
+        print(f"[TokenizeAll] Global index built: {len(sorted_global_ids):,} docs "
+              f"({elapsed:.1f}s), index: {index_gb:.1f} GB "
+              f"(freed {freed_gb:.1f} GB cache, peak reduced from 3X to 2X)")
+        print(f"[TokenizeAll] All {len(all_selected)} experiments ready")
 
     def _serialize_config(self, shared_metadata: Optional[Dict[str, "SharedArrayInfo"]] = None) -> dict:
         """Pickle-safe config for worker processes."""
