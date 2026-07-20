@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 
 from quadmix.core.types import ParameterSet
 
-from quadmix.constants import DOMAIN_NAMES as _DEFAULT_DOMAIN_NAMES, DOMAIN_SHORT_NAMES
+from quadmix.constants import DOMAIN_SHORT_NAMES
 
 
 def _get_domain_short(num_domains, domain_names=None):

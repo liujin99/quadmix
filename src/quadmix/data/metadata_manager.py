@@ -34,10 +34,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 import numpy.typing as npt
 
-from quadmix.constants import QUALITY_COLUMNS
 from quadmix.data.dataset_schema import DatasetSchema, _parse_quality_cols
-
-_DEFAULT_SCHEMA = DatasetSchema()
 
 
 def _parse_shard_idx(basename: str) -> Optional[int]:
@@ -141,12 +138,12 @@ class ShardMetadataManager:
     def __init__(
         self,
         preprocessed_dir: str,
-        schema: Optional[DatasetSchema] = None,
+        schema: DatasetSchema,
         index_file: Optional[str] = None,
         max_workers: Optional[int] = None,
     ):
         self._dir = preprocessed_dir
-        self._schema = schema if schema is not None else _DEFAULT_SCHEMA
+        self._schema = schema
 
         self._shard_files: List[str] = sorted(
             glob.glob(os.path.join(preprocessed_dir, "*.parquet"))
@@ -501,7 +498,7 @@ class ShardMetadataManager:
         mgr._num_shards = len(per_shard_info)
         mgr._shard_files = []
         mgr._shard_index = None
-        mgr._schema = schema if schema is not None else _DEFAULT_SCHEMA
+        mgr._schema = schema
         mgr._num_domains = num_domains if num_domains is not None else len(np.unique(domain_labels))
         mgr._num_quality_criteria = num_quality_criteria if num_quality_criteria is not None else len(mgr._schema.quality_cols)
         mgr._detected_domain_names = detected_domain_names if detected_domain_names is not None else [f"D{m}" for m in range(mgr._num_domains)]

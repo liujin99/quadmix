@@ -280,7 +280,7 @@ def main():
     # ── Stage 8: Save Outputs ───────────────────────────
     _t = time.time()
     params_path = os.path.join(output_dir, "optimal_parameters.json")
-    serialized = pipeline._serialize_params(optimal_params, DOMAIN_NAMES, QUALITY_NAMES)
+    serialized = pipeline._serialize_params(optimal_params, mm.detected_domain_names, mm.detected_quality_names)
     with open(params_path, "w") as f:
         json.dump(serialized, f, indent=2)
     print(f"\n[Stage 8] Optimal parameters saved to: {params_path}")

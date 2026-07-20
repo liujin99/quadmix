@@ -2,32 +2,30 @@
 DatasetSchema — YAML-driven configuration that maps parquet column names
 to algorithm concepts (domain, quality, text, char_count).
 
-Decouples QuaDMix from Essential-Web's hardcoded schema so that arbitrary
-datasets can be run with zero code changes.
+Decouples QuaDMix from any specific dataset schema so that arbitrary
+datasets can be run with zero code changes — just write a YAML config.
 
 Usage:
-    # From YAML file
-    schema = DatasetSchema.from_yaml("schema_stem.yaml")
-
-    # Default (Essential-Web)
-    schema = DatasetSchema()
+    # From YAML file (唯一入口)
+    schema = DatasetSchema.from_yaml("configs/schema_essential_web.yaml")
 
     # Validate against a parquet file
     schema._validate(parquet_columns, parquet_dtypes)
 
     # Access parsed config
-    schema.domain_col        # "category_name"
-    schema.quality_cols      # ["category_score", "stem_relevance", ...]
+    schema.domain_col        # "domain" (from YAML)
+    schema.quality_cols      # ["qs_dclm", ...] (from YAML)
     schema.quality_directions # [True, True, ..., False]  (higher_better)
-    schema.text_col          # "text"
-    schema.char_count_col    # None (compute from text)
+    schema.text_col          # "text" (from YAML)
+    schema.char_count_col    # "doc_char_count" or None (from YAML)
+
+DatasetSchema() 无参构造会报错 — 必须通过 from_yaml() 加载配置。
+示例配置: configs/schema_essential_web.yaml
 """
 
 import yaml
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
-
-from quadmix.constants import QUALITY_COLUMNS, QUALITY_NAMES, DOMAIN_NAMES, NUM_DOMAINS
 
 
 def _parse_quality_cols(raw: list) -> Tuple[List[str], List[bool]]:
@@ -52,14 +50,28 @@ def _parse_quality_cols(raw: list) -> Tuple[List[str], List[bool]]:
 
 @dataclass
 class DatasetSchema:
-    domain_col: str = "domain"
-    quality_cols: List[str] = field(default_factory=lambda: list(QUALITY_COLUMNS))
-    quality_directions: List[bool] = field(default_factory=lambda: [True] * len(QUALITY_COLUMNS))
-    text_col: str = "text"
-    char_count_col: Optional[str] = "doc_char_count"
-    row_in_shard_col: Optional[str] = "row_in_shard"
-    domain_names: Optional[List[str]] = field(default_factory=lambda: list(DOMAIN_NAMES))
-    quality_names: Optional[List[str]] = field(default_factory=lambda: list(QUALITY_NAMES))
+    domain_col: Optional[str] = None
+    quality_cols: Optional[List[str]] = None
+    quality_directions: Optional[List[bool]] = None
+    text_col: Optional[str] = None
+    char_count_col: Optional[str] = None
+    row_in_shard_col: Optional[str] = None
+    domain_names: Optional[List[str]] = None
+    quality_names: Optional[List[str]] = None
+
+    def __post_init__(self):
+        if self.domain_col is None and self.quality_cols is None and self.text_col is None:
+            raise ValueError(
+                "DatasetSchema() 无参构造不可用。请通过 from_yaml() 加载配置文件。\n"
+                "示例: schema = DatasetSchema.from_yaml('configs/schema_essential_web.yaml')\n"
+                "详见 configs/ 目录下的示例 YAML 配置。"
+            )
+        if self.domain_col is None:
+            raise ValueError("DatasetSchema.domain_col 是必填项。")
+        if self.text_col is None:
+            raise ValueError("DatasetSchema.text_col 是必填项。")
+        if self.quality_cols is None or len(self.quality_cols) == 0:
+            raise ValueError("DatasetSchema.quality_cols 是必填项且不可为空列表。")
 
     @classmethod
     def from_yaml(cls, path: str) -> "DatasetSchema":
@@ -68,18 +80,28 @@ class DatasetSchema:
             data = yaml.safe_load(f)
 
         if data is None:
-            return cls()
+            raise ValueError(
+                f"YAML 配置文件为空: {path}\n"
+                "请填写 domain_col, quality_cols, text_col 等字段。\n"
+                "示例: configs/schema_essential_web.yaml"
+            )
 
-        raw_quality = data.get("quality_cols", list(QUALITY_COLUMNS))
+        raw_quality = data.get("quality_cols")
+        if raw_quality is None:
+            raise ValueError(
+                f"YAML 配置缺少 quality_cols 字段: {path}\n"
+                "quality_cols 是必填项，指定数据集的质量评分列名。"
+            )
+
         col_names, directions = _parse_quality_cols(raw_quality)
 
         return cls(
-            domain_col=data.get("domain_col", "domain"),
+            domain_col=data.get("domain_col"),
             quality_cols=col_names,
             quality_directions=directions,
-            text_col=data.get("text_col", "text"),
-            char_count_col=data.get("char_count_col", "doc_char_count"),
-            row_in_shard_col=data.get("row_in_shard_col", "row_in_shard"),
+            text_col=data.get("text_col"),
+            char_count_col=data.get("char_count_col"),
+            row_in_shard_col=data.get("row_in_shard_col"),
             domain_names=data.get("domain_names"),
             quality_names=data.get("quality_names"),
         )

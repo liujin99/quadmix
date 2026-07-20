@@ -865,10 +865,9 @@ def build_parser():
     p.add_argument("--eval-bundle", type=str, default=DEFAULT_EVAL_BUNDLE,
                    help="Path to CORE eval bundle directory "
                         "(used when --val-set=core, default: $EVAL_BUNDLE_DIR)")
-    p.add_argument("--schema", type=str, default=None,
-                   help="YAML dataset schema config file. If not specified, "
-                        "uses Essential-Web defaults (domain_col='domain', "
-                        "quality_cols=qs_*, text_col='text', char_count_col='doc_char_count')")
+    p.add_argument("--schema", type=str, required=True,
+                   help="YAML dataset schema config file (必填)。"
+                        "示例数据集: configs/schema_essential_web.yaml")
     return p
 
 
@@ -958,12 +957,8 @@ def main():
     )
 
     # ── Load dataset schema ──
-    if args.schema:
-        print(f"\n[Setup] Loading dataset schema from: {args.schema}")
-        schema = DatasetSchema.from_yaml(args.schema)
-    else:
-        print(f"\n[Setup] Using default Essential-Web schema")
-        schema = DatasetSchema()
+    print(f"\n[Setup] Loading dataset schema from: {args.schema}")
+    schema = DatasetSchema.from_yaml(args.schema)
     print(f"[Setup] Schema: domain_col='{schema.domain_col}', "
           f"quality_cols={schema.quality_cols}, "
           f"text_col='{schema.text_col}', "

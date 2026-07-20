@@ -42,7 +42,6 @@ from quadmix.data.base import BaseDataAdapter, UnifiedData
 from quadmix.data.registry import get_adapter
 from quadmix.sampling.batch_sampler import save_sampled_dataset, sample_with_optimal_params
 from quadmix.pipeline.report import generate_report, save_report
-from quadmix.constants import QUALITY_COLUMNS
 from quadmix.data.dataset_schema import DatasetSchema
 
 
@@ -149,11 +148,11 @@ class QuaDMixPipeline:
         Single-file mode: loads all text upfront.
         """
         if text_col is None:
-            text_col = self._schema.text_col if hasattr(self, '_schema') else "text"
+            text_col = self._schema.text_col
         if domain_col is None:
-            domain_col = self._schema.domain_col if hasattr(self, '_schema') else "domain"
+            domain_col = self._schema.domain_col
         if quality_cols is None:
-            quality_cols = self._schema.quality_cols if hasattr(self, '_schema') else list(QUALITY_COLUMNS)
+            quality_cols = self._schema.quality_cols
         expected_n = self.config.num_quality_criteria
         if len(quality_cols) != expected_n:
             raise ValueError(
@@ -720,7 +719,7 @@ class QuaDMixPipeline:
 
             sampled_path = os.path.join(output_dir, "sampled_dataset.parquet")
             os.makedirs(os.path.dirname(sampled_path) or ".", exist_ok=True)
-            schema = self._schema if hasattr(self, '_schema') else DatasetSchema()
+            schema = self._schema
             pd.DataFrame({
                 schema.text_col: sampled_texts,
                 "doc_id": selected_indices,
@@ -732,7 +731,7 @@ class QuaDMixPipeline:
             print(f"[Stage 8] Sampled dataset saved (sharded): {sampled_path}")
         else:
             sampled_path = os.path.join(output_dir, "sampled_dataset.parquet")
-            schema = self._schema if hasattr(self, '_schema') else DatasetSchema()
+            schema = self._schema
             save_sampled_dataset(
                 original_texts=texts,
                 selected_indices=selected_indices,
@@ -774,7 +773,7 @@ class QuaDMixPipeline:
             stage_times={k: v for k, v in stage_times.items() if k != "stage9_report"},
             domain_names=domain_names if domain_names else mm.detected_domain_names if mm else None,
             quality_names=quality_names if quality_names else mm.detected_quality_names if mm else None,
-            domain_col=self._schema.domain_col if hasattr(self, '_schema') else "domain",
+            domain_col=self._schema.domain_col,
         )
         save_report(report, output_dir)
         stage_times["stage9_report"] = time.time() - _t

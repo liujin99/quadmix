@@ -238,6 +238,7 @@ export TOKENIZE_THREADS_PER_WORKER="${TOKENIZE_THREADS_PER_WORKER:-4}"
 export QUADMIX_PERF_TIMER="${QUADMIX_PERF_TIMER:-1}"
 
 python3 "$QUADMIX_DIR/scripts/runners/run_essential_web_v1.py" \
+    --schema "$QUADMIX_DIR/configs/schema_essential_web.yaml" \
     --preprocessed-dir "$PREPROCESSED_DIR" \
     --num-experiments "$NUM_EXPERIMENTS" \
     --num-search 5000 \

@@ -1,0 +1,51 @@
+# Essential-Web v1 dataset schema — QuaDMix 默认示例数据集
+#
+# 用法:
+#   python scripts/runners/run_essential_web_v1.py --schema configs/schema_essential_web.yaml ...
+#   bash scripts/demo_run_quick.sh   # 已内置此配置
+#
+# 自定义数据集时，参考此文件修改列名映射即可。
+# 详见 docs/DATASET_SCHEMA_DESIGN.md
+
+domain_col: domain
+domain_names:
+  - Computers_and_Electronics
+  - News_and_General_Works
+  - Philosophy_and_Psychology
+  - Religion
+  - Law_and_Government
+  - Economics_and_Finance
+  - Education
+  - People_and_Society
+  - English_Language
+  - Mathematics
+  - Physics_and_Chemistry
+  - Earth_and_Life_Sciences
+  - Medicine_and_Health
+  - Business_and_Management
+  - Engineering
+  - Agriculture
+  - Arts_and_Entertainment
+  - Sports_and_Recreation
+  - Books_and_Literature
+  - History
+  - Geography_and_Travel
+  - Home_Economics
+
+quality_cols:
+  - qs_dclm
+  - qs_fineweb_edu_approx
+  - qs_english
+  - qs_eai_general_math
+  - qs_eai_open_web_math
+
+quality_names:
+  - dclm
+  - fineweb_edu
+  - english
+  - math_general
+  - math_openweb
+
+text_col: text
+char_count_col: doc_char_count
+row_in_shard_col: row_in_shard
