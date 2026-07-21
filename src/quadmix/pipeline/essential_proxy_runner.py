@@ -27,6 +27,7 @@ import multiprocessing as mp
 import multiprocessing.shared_memory
 from functools import partial
 from typing import List, Optional, Dict, Tuple, Callable
+from joblib import Parallel, delayed
 from contextlib import contextmanager
 import pandas as pd
 
@@ -187,17 +188,22 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         t1 = time.time()
         num_criteria = self._quality_scores.shape[1]
-        self._normalized_quality = np.zeros_like(self._quality_scores)
-        for n in range(num_criteria):
-            self._normalized_quality[:, n] = normalize_fn(self._quality_scores[:, n])
+        n_jobs = min(num_criteria, os.cpu_count()) if self._num_docs > 50000 else 1
+        normalized_cols = Parallel(n_jobs=n_jobs, prefer="threads")(
+            delayed(normalize_fn)(self._quality_scores[:, n]) for n in range(num_criteria)
+        )
+        self._normalized_quality = np.column_stack(normalized_cols).astype(self._quality_scores.dtype)
         print(f"[ProxyRunner] Pre-normalized {num_criteria} quality criteria "
               f"({time.time() - t1:.1f}s) — Eq.1 now ~5x faster per experiment")
 
         t2 = time.time()
-        unique_domains = np.unique(self._domain_labels)
+        sort_idx = np.argsort(self._domain_labels)
+        sorted_labels = self._domain_labels[sort_idx]
+        boundaries = np.concatenate([[0], np.where(sorted_labels[:-1] != sorted_labels[1:])[0] + 1, [self._num_docs]])
         self._domain_indices: Dict[int, np.ndarray] = {}
-        for m in unique_domains:
-            self._domain_indices[int(m)] = np.where(self._domain_labels == m)[0]
+        for i in range(len(boundaries) - 1):
+            domain_id = int(sorted_labels[boundaries[i]])
+            self._domain_indices[domain_id] = sort_idx[boundaries[i]:boundaries[i + 1]]
         print(f"[ProxyRunner] Pre-computed domain indices for {len(self._domain_indices)} domains "
               f"({time.time() - t2:.1f}s) — Eq.1 mask elimination")
 
@@ -780,17 +786,22 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         t1 = time.time()
         num_criteria = self._quality_scores.shape[1]
-        self._normalized_quality = np.zeros_like(self._quality_scores)
-        for n in range(num_criteria):
-            self._normalized_quality[:, n] = normalize_fn(self._quality_scores[:, n])
+        n_jobs = min(num_criteria, os.cpu_count()) if self._num_docs > 50000 else 1
+        normalized_cols = Parallel(n_jobs=n_jobs, prefer="threads")(
+            delayed(normalize_fn)(self._quality_scores[:, n]) for n in range(num_criteria)
+        )
+        self._normalized_quality = np.column_stack(normalized_cols).astype(self._quality_scores.dtype)
         print(f"[ProxyRunner] (legacy) Pre-normalized {num_criteria} criteria "
               f"({time.time() - t1:.1f}s) — Eq.1 now ~5x faster")
 
         t2 = time.time()
-        unique_domains = np.unique(self._domain_labels)
+        sort_idx = np.argsort(self._domain_labels)
+        sorted_labels = self._domain_labels[sort_idx]
+        boundaries = np.concatenate([[0], np.where(sorted_labels[:-1] != sorted_labels[1:])[0] + 1, [self._num_docs]])
         self._domain_indices: Dict[int, np.ndarray] = {}
-        for m in unique_domains:
-            self._domain_indices[int(m)] = np.where(self._domain_labels == m)[0]
+        for i in range(len(boundaries) - 1):
+            domain_id = int(sorted_labels[boundaries[i]])
+            self._domain_indices[domain_id] = sort_idx[boundaries[i]:boundaries[i + 1]]
         print(f"[ProxyRunner] (legacy) Pre-computed domain indices for {len(self._domain_indices)} domains "
               f"({time.time() - t2:.1f}s)")
 
