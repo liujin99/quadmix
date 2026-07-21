@@ -25,7 +25,7 @@ to use the BMK v2 set (10 BMK-like tasks, full-sequence loss), or
 1M proxy learnability, full-sequence loss).
 """
 
-import argparse, os, sys, time, urllib.request
+import argparse, os, sys, time, urllib.request, ssl
 try:
     import quadmix
 except ImportError:
@@ -59,8 +59,9 @@ def _hf_remote_size(repo_id: str, filename: str) -> int:
     """Get remote file size from HuggingFace via HEAD request. Returns 0 if failed."""
     url = f"{HF_ENDPOINT}/datasets/{repo_id}/resolve/main/{filename}"
     try:
+        ctx = ssl._create_unverified_context()
         req = urllib.request.Request(url, method="HEAD")
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
             return int(resp.headers.get("Content-Length", 0))
     except Exception:
         pass
