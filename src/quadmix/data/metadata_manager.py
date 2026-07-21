@@ -210,7 +210,14 @@ class ShardMetadataManager:
                 cached_basenames = cached_info.get("shard_basenames", [])
                 cached_stats = cached_info.get("shard_stats", {})
                 cached_schema_key = cached_info.get("schema_key", None)
-                current_schema_key = f"{self._schema.domain_col}:{','.join(self._schema.quality_cols)}:{self._schema.text_col}:{self._schema.char_count_col}"
+                current_schema_key = (
+                    f"{self._schema.domain_col}"
+                    f":{','.join(self._schema.quality_cols)}"
+                    f":{self._schema.text_col}"
+                    f":{self._schema.char_count_col}"
+                    f":domain_names={','.join(self._schema.domain_names or [])}"
+                    f":quality_directions={','.join(str(d) for d in self._schema.quality_directions)}"
+                )
 
                 if cached_basenames == current_basenames and cached_schema_key == current_schema_key:
                     mismatches = []
@@ -383,7 +390,14 @@ class ShardMetadataManager:
                      domain_labels=self._domain_labels,
                      quality_scores=self._quality_scores,
                      doc_char_counts=self._doc_char_counts)
-            schema_key = f"{self._schema.domain_col}:{','.join(self._schema.quality_cols)}:{self._schema.text_col}:{self._schema.char_count_col}"
+            schema_key = (
+                f"{self._schema.domain_col}"
+                f":{','.join(self._schema.quality_cols)}"
+                f":{self._schema.text_col}"
+                f":{self._schema.char_count_col}"
+                f":domain_names={','.join(self._schema.domain_names or [])}"
+                f":quality_directions={','.join(str(d) for d in self._schema.quality_directions)}"
+            )
             cache_meta = {
                 "shard_basenames": current_basenames,
                 "shard_stats": current_shard_stats,
