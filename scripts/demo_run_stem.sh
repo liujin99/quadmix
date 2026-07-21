@@ -59,7 +59,7 @@ echo "  [配置] 发现 $NUM_SHARDS shards in $STEM_DATA_DIR"
 NUM_EXPERIMENTS="${NUM_EXPERIMENTS:-500}"
 
 # ── 扫描 --val-set 参数（默认 cap_v1）──────────────────
-VAL_SET="cap_v1"
+VAL_SET="stem_v1"
 for arg in "$@"; do
     if [[ "$prev_arg" == "--val-set" ]]; then
         VAL_SET="$arg"
@@ -151,7 +151,7 @@ python3 "$QUADMIX_DIR/scripts/runners/run_essential_web_v1.py" \
     --rank-ref-size 10000 \
     --checkpoint-interval 0 \
     --val-set "$VAL_SET" \
-    --search-mode r2_sigma_weighted \
+    --search-mode r2_weighted \
     --output "$OUTPUT_DIR" \
     $DEVICE_ARG \
     "$@" || exit $?
