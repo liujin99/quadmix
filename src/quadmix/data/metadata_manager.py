@@ -27,9 +27,13 @@ Usage:
 """
 
 import json, os, glob, time, re
+
 import multiprocessing as mp
+
 from typing import Dict, List, Optional, Tuple
 from concurrent.futures import ProcessPoolExecutor, as_completed
+
+from quadmix.utils.concurrency import ConcurrencyConfig
 
 import numpy as np
 import numpy.typing as npt
@@ -261,7 +265,8 @@ class ShardMetadataManager:
             print(f"[ShardMetadataManager] Quality scores: {self._quality_scores.shape}")
             return
 
-        n_workers = max_workers if max_workers is not None else min(32, total_shards)
+        cfg = ConcurrencyConfig()
+        n_workers = max_workers if max_workers is not None else min(cfg.max_io_workers, total_shards)
         print(f"[ShardMetadataManager] Discovered {total_shards} shards, "
               f"loading metadata with {n_workers} workers "
               f"(schema: domain_col='{self._schema.domain_col}', "

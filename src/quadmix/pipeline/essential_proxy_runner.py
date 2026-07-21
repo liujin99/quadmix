@@ -22,7 +22,7 @@ Aligned with RegMix:
   - RegMix training loop: gradient accumulation, cosine LR, AdamW
 """
 
-import os, math, time, json, glob, ctypes, threading
+import os, math, time, json, glob, threading
 import multiprocessing as mp
 import multiprocessing.shared_memory
 from functools import partial
@@ -30,42 +30,6 @@ from typing import List, Optional, Dict, Tuple, Callable
 from joblib import Parallel, delayed
 from contextlib import contextmanager
 import pandas as pd
-
-PRECOMPUTE_MAX_WORKERS = 16
-
-
-def _get_blas_threads() -> int:
-    for lib_name in ['libopenblas.so', 'libopenblas.so.0',
-                     'libscipy_openblas64.so',
-                     'libmkl_rt.so', 'libmkl_rt.so.1',
-                     'libmkl_rt.so.2']:
-        try:
-            lib = ctypes.CDLL(lib_name)
-            if hasattr(lib, 'openblas_get_num_threads'):
-                return lib.openblas_get_num_threads()
-            if hasattr(lib, 'MKL_Get_Max_Threads'):
-                return lib.MKL_Get_Max_Threads()
-        except OSError:
-            continue
-    return 0
-
-
-def _set_blas_threads(n: int) -> bool:
-    for lib_name in ['libopenblas.so', 'libopenblas.so.0',
-                     'libscipy_openblas64.so',
-                     'libmkl_rt.so', 'libmkl_rt.so.1',
-                     'libmkl_rt.so.2']:
-        try:
-            lib = ctypes.CDLL(lib_name)
-            if hasattr(lib, 'openblas_set_num_threads'):
-                lib.openblas_set_num_threads(n)
-                return True
-            if hasattr(lib, 'MKL_Set_Num_Threads'):
-                lib.MKL_Set_Num_Threads(n)
-                return True
-        except OSError:
-            continue
-    return False
 
 import numpy as np
 import torch
@@ -77,6 +41,7 @@ from quadmix.core.quality_rank import compute_quality_ranks
 from quadmix.core.sampler import compute_sampling_values
 from quadmix.pipeline.proxy_runner import BaseProxyRunner
 from quadmix.utils.perf_timer import PerfTimer
+from quadmix.utils.concurrency import ConcurrencyConfig, get_blas_threads, set_blas_threads
 from quadmix.pipeline.loss_utils import chunked_loss_from_hidden, chunked_loss_per_token_from_hidden
 from quadmix.pipeline.shared_memory import SharedArrayInfo, ndarray_to_shared, shared_to_ndarray
 from quadmix.pipeline.parallel_dispatch import (
@@ -129,6 +94,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             token_cache_dir = DEFAULT_TOKEN_CACHE_DIR
 
         self.config = config
+        self._concurrency = ConcurrencyConfig()
         self.metadata_manager = metadata_manager
         self.legacy_data_path = data_path
         self.val_data_path = val_data_path
@@ -1519,9 +1485,10 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         """Run Eq.1-3 + fractional sampling for all experiments."""
         from concurrent.futures import ThreadPoolExecutor
 
+        cfg = self._concurrency
         t0 = time.time()
         n = len(all_params)
-        num_cpus = mp.cpu_count() or 8
+        num_cpus = cfg.cpu_count
         n_m_max = max((len(idx) for idx in self._domain_indices.values()), default=self._num_docs)
         mem_per_thread = 6 * n_m_max * 8
         try:
@@ -1530,11 +1497,11 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         except ImportError:
             available_ram = 1.5 * 1024**3 * 0.6
         max_threads_by_mem = max(1, int(available_ram / mem_per_thread))
-        n_workers = min(n, num_cpus, max_threads_by_mem, PRECOMPUTE_MAX_WORKERS)
+        n_workers = min(n, num_cpus, max_threads_by_mem, cfg.max_compute_workers)
 
-        blas_threads = max(1, num_cpus // n_workers)
-        orig_blas = _get_blas_threads()
-        _set_blas_threads(blas_threads)
+        blas_threads = cfg.blas_threads_for(n_workers)
+        orig_blas = get_blas_threads()
+        set_blas_threads(blas_threads)
         print(f"[PreSample] Pre-sampling {n} experiments (Eq.1-3) "
               f"with {n_workers} threads × {blas_threads} BLAS threads "
               f"(={n_workers * blas_threads} effective, "
@@ -1580,7 +1547,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             raise
         finally:
             executor.shutdown(wait=True)
-            _set_blas_threads(orig_blas if orig_blas > 0 else num_cpus)
+            set_blas_threads(orig_blas if orig_blas > 0 else num_cpus)
             cancel_flag.clear()
 
         elapsed = time.time() - t0
@@ -2083,17 +2050,34 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             p.start()
             worker_processes.append(p)
 
-        collector_thread.join()
-        dispatcher_thread.join()
-        tokenize_thread.join()
-        async_write_thread.join()
+        interrupted = False
+        try:
+            collector_thread.join()
+            dispatcher_thread.join()
+            tokenize_thread.join()
+            async_write_thread.join()
+        except KeyboardInterrupt:
+            interrupted = True
+            print("\n[DynamicParallel] Interrupted — sending shutdown to workers...")
+            for _ in range(num_workers):
+                try:
+                    task_queue.put(None, timeout=2)
+                except Exception:
+                    pass
+            for p in worker_processes:
+                p.join(timeout=10)
+                if p.is_alive():
+                    p.terminate()
 
         for p in worker_processes:
             p.join(timeout=5.0)
+            if p.is_alive():
+                p.terminate()
             print(f"[DynamicParallel] Worker {p.pid} exitcode={p.exitcode}")
 
-        elapsed = time.time() - t_start
-        print(f"\n[DynamicParallel] All {n_exp} experiments complete ({elapsed:.0f}s ≈ {elapsed / 60:.1f}min)")
+        if not interrupted:
+            elapsed = time.time() - t_start
+            print(f"\n[DynamicParallel] All {n_exp} experiments complete ({elapsed:.0f}s ≈ {elapsed / 60:.1f}min)")
 
         if shared_meta:
             import gc
@@ -2117,5 +2101,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 pass
         if leaked:
             print(f"[SharedMem] Cleaned up {leaked} leaked token blocks")
+
+        if interrupted:
+            raise KeyboardInterrupt
 
         return all_results

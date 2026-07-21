@@ -12,6 +12,7 @@ import numpy as np
 import torch
 
 from quadmix.utils.perf_timer import PerfTimer
+from quadmix.utils.concurrency import ConcurrencyConfig
 from quadmix.pipeline.shared_memory import shared_to_ndarray
 
 
@@ -119,19 +120,19 @@ def _tokenize_shard_parallel(
     from concurrent.futures import ProcessPoolExecutor, as_completed
     import threading
 
+    cfg = ConcurrencyConfig()
     n_shards = len(shard_tasks)
-    num_cpus = mp.cpu_count() or 8
 
-    threads_per_worker = 4
-    os.environ["RAYON_NUM_THREADS"] = str(threads_per_worker)
+    threads_per_worker = cfg.blas_threads_for(max(1, cfg.max_io_workers // 4))
+    os.environ["RAYON_NUM_THREADS"] = str(4)
     os.environ["OMP_NUM_THREADS"] = str(threads_per_worker)
+    os.environ["OPENBLAS_NUM_THREADS"] = str(threads_per_worker)
 
     env_workers = int(os.environ.get("TOKENIZE_WORKERS", "0"))
     if env_workers >= 1:
         n_workers = env_workers
     else:
-        n_workers = min(48, num_cpus)
-        n_workers = max(4, n_workers)
+        n_workers = min(cfg.max_io_workers, n_shards)
 
     print(f"  [ParallelTokenize] {n_shards} shards, {n_workers} processes "
           f"× {threads_per_worker} Rust threads = {n_workers * threads_per_worker} total threads")
