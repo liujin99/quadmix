@@ -50,6 +50,80 @@ from quadmix.pipeline.parallel_dispatch import (
     _tokenize_chunk_to_array,
 )
 
+from collections import namedtuple
+
+_PreSampleData = namedtuple("_PreSampleData", [
+    "normalized_quality_info", "domain_indices_infos",
+    "token_counts_info", "has_token_counts",
+    "num_domains", "rank_ref_size", "num_docs",
+])
+
+
+def _presample_one(args):
+    i, params, data = args
+    from quadmix.pipeline.shared_memory import shared_to_ndarray
+    normalized_quality = shared_to_ndarray(data.normalized_quality_info)
+    domain_indices = {m: shared_to_ndarray(info) for m, info in data.domain_indices_infos.items()}
+    token_counts = shared_to_ndarray(data.token_counts_info) if data.has_token_counts else None
+
+    M = data.num_domains
+    rng_eq2 = np.random.default_rng(i + 1729)
+    rng_sample = np.random.default_rng(i + 42)
+    has_tokens = token_counts is not None
+
+    domain_selected = []
+
+    for m in range(M):
+        indices = domain_indices.get(m)
+        if indices is None or len(indices) == 0:
+            continue
+        if m >= len(params.sampling_configs):
+            continue
+
+        n_m = len(indices)
+        alpha_m = params.merge_config.get_final_weights(m)
+        domain_scores = normalized_quality[indices] @ alpha_m
+
+        k = min(data.rank_ref_size, n_m)
+        ref_idx = rng_eq2.choice(n_m, k, replace=False)
+        ref_scores_unsorted = domain_scores[ref_idx]
+        sort_order = np.argsort(-ref_scores_unsorted)
+        ref_scores = ref_scores_unsorted[sort_order]
+        positions = np.searchsorted(-ref_scores, -domain_scores, side='right')
+
+        if has_tokens:
+            ref_tokens = token_counts[indices[ref_idx]][sort_order].astype(np.float64)
+            cum_tokens = np.concatenate(([0.0], np.cumsum(ref_tokens)))
+            total_ref_tokens = cum_tokens[-1]
+            if total_ref_tokens > 0:
+                domain_ranks = cum_tokens[positions] / total_ref_tokens
+            else:
+                domain_ranks = positions.astype(np.float64) / k
+        else:
+            domain_ranks = positions.astype(np.float64) / k
+
+        sc = params.sampling_configs[m]
+        within_threshold = domain_ranks <= sc.omega
+        sv = np.full(n_m, sc.epsilon, dtype=np.float64)
+        if within_threshold.any():
+            exponent = -sc.lambda_ * (sc.omega - domain_ranks[within_threshold])
+            sigmoid = 2.0 / (1.0 + np.exp(np.clip(exponent, -100, 100)))
+            sv[within_threshold] = sigmoid ** sc.eta + sc.epsilon
+
+        int_part = np.floor(sv).astype(np.int64)
+        frac_part = sv - int_part
+        random_mask = rng_sample.uniform(size=n_m) < frac_part
+        repeats = int_part + random_mask.astype(np.int64)
+        selected_local = np.repeat(np.arange(n_m), repeats)
+        if len(selected_local) > 0:
+            domain_selected.append(indices[selected_local])
+
+    if domain_selected:
+        return i, np.concatenate(domain_selected)
+    else:
+        rng2 = np.random.default_rng(i + 42)
+        return i, rng2.choice(np.arange(data.num_docs), 100, replace=False)
+
 
 class EssentialWebProxyRunner(BaseProxyRunner):
     """
@@ -1483,7 +1557,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             self, all_params: List[ParameterSet]
     ) -> List[np.ndarray]:
         """Run Eq.1-3 + fractional sampling for all experiments."""
-        from concurrent.futures import ThreadPoolExecutor
+        from quadmix.pipeline.shared_memory import ndarray_to_shared, SharedArrayInfo
 
         cfg = self._concurrency
         t0 = time.time()
@@ -1496,59 +1570,88 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             available_ram = psutil.virtual_memory().available * 0.8
         except ImportError:
             available_ram = 1.5 * 1024**3 * 0.6
-        max_threads_by_mem = max(1, int(available_ram / mem_per_thread))
-        n_workers = min(n, num_cpus, max_threads_by_mem, cfg.max_compute_workers)
+        max_by_mem = max(1, int(available_ram / (mem_per_thread * cfg.blas_threads_for(1))))
+        n_workers = min(n, num_cpus, max_by_mem, cfg.max_compute_workers)
 
         blas_threads = cfg.blas_threads_for(n_workers)
-        orig_blas = get_blas_threads()
-        set_blas_threads(blas_threads)
         print(f"[PreSample] Pre-sampling {n} experiments (Eq.1-3) "
-              f"with {n_workers} threads × {blas_threads} BLAS threads "
+              f"with {n_workers} processes × {blas_threads} BLAS threads "
               f"(={n_workers * blas_threads} effective, "
-              f"mem/thread={mem_per_thread/1024**2:.0f}MB, "
+              f"mem/process={mem_per_thread * blas_threads / 1024**2:.0f}MB, "
               f"available={available_ram/1024**3:.0f}GB)...")
 
+        shm_blocks = []
+        nq_info = ndarray_to_shared(self._normalized_quality, "presample_nq")
+        shm_blocks.append(nq_info.name)
+        di_infos = {}
+        for m, idx in self._domain_indices.items():
+            info = ndarray_to_shared(idx, f"presample_di_{m}")
+            di_infos[m] = info
+            shm_blocks.append(info.name)
+        has_tc = self._token_counts is not None
+        if has_tc:
+            tc_info = ndarray_to_shared(self._token_counts, "presample_tc")
+            shm_blocks.append(tc_info.name)
+        else:
+            tc_info = None
+
+        data = _PreSampleData(
+            normalized_quality_info=nq_info,
+            domain_indices_infos=di_infos,
+            token_counts_info=tc_info,
+            has_token_counts=has_tc,
+            num_domains=self.config.num_domains,
+            rank_ref_size=self.rank_ref_size,
+            num_docs=self._num_docs,
+        )
+
+        orig_env = {}
+        for k in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+            orig_env[k] = os.environ.get(k)
+        os.environ["OPENBLAS_NUM_THREADS"] = str(blas_threads)
+        os.environ["OMP_NUM_THREADS"] = str(blas_threads)
+        os.environ["MKL_NUM_THREADS"] = str(blas_threads)
+
         all_selected: List[Optional[np.ndarray]] = [None] * n
-        completed = [0]
-        lock = threading.Lock()
-        cancel_flag = threading.Event()
-        self._cancel_flag = cancel_flag
-
-        def worker(i: int, params: ParameterSet):
-            if cancel_flag.is_set():
-                return
-            selected = self._sample_one_experiment(params, i)
-            if cancel_flag.is_set():
-                return
-            with lock:
-                all_selected[i] = selected
-                completed[0] += 1
-                c = completed[0]
-            if c % max(1, n // 10) == 0 or c == n:
-                elapsed = time.time() - t0
-                speed = c / elapsed if elapsed > 0 else 0
-                eta = (n - c) / speed if speed > 0 else 0
-                print(f"[PreSample] {c}/{n} done ({elapsed:.1f}s, "
-                      f"{speed:.1f} exp/s, ETA: {eta:.0f}s")
-
-        executor = ThreadPoolExecutor(max_workers=n_workers)
+        completed = 0
         try:
             with PerfTimer.section("eq123_sampling", "precompute"):
-                futures = [
-                    executor.submit(worker, i, params)
+                results = Parallel(
+                    n_jobs=n_workers,
+                    backend="loky",
+                    prefer="processes",
+                    verbose=0,
+                    return_as="generator",
+                    max_nbytes=None,
+                )(
+                    delayed(_presample_one)((i, params, data))
                     for i, params in enumerate(all_params)
-                ]
-                for fut in futures:
-                    fut.result()
+                )
+                for idx, arr in results:
+                    all_selected[idx] = arr
+                    completed += 1
+                    if completed % max(1, n // 10) == 0 or completed == n:
+                        elapsed = time.time() - t0
+                        speed = completed / elapsed if elapsed > 0 else 0
+                        eta = (n - completed) / speed if speed > 0 else 0
+                        print(f"[PreSample] {completed}/{n} done ({elapsed:.1f}s, "
+                              f"{speed:.1f} exp/s, ETA: {eta:.0f}s")
         except KeyboardInterrupt:
-            cancel_flag.set()
-            print("\n[PreSample] Interrupted — cancelling remaining tasks...")
-            executor.shutdown(wait=False, cancel_futures=True)
+            print("\n[PreSample] Interrupted — loky will cancel remaining workers")
             raise
         finally:
-            executor.shutdown(wait=True)
-            set_blas_threads(orig_blas if orig_blas > 0 else num_cpus)
-            cancel_flag.clear()
+            for k, v in orig_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            for shm_name in shm_blocks:
+                try:
+                    shm = mp.shared_memory.SharedMemory(name=shm_name)
+                    shm.close()
+                    shm.unlink()
+                except Exception:
+                    pass
 
         elapsed = time.time() - t0
         total_docs = sum(len(s) for s in all_selected)

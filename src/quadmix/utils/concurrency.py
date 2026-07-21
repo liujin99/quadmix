@@ -87,8 +87,8 @@ class ConcurrencyConfig:
 
     def apply_env_vars(self):
         bt = self.blas_threads_for(self.max_compute_workers)
-        os.environ["OPENBLAS_NUM_THREADS"] = str(bt)
-        os.environ["OMP_NUM_THREADS"] = str(bt)
-        os.environ["MKL_NUM_THREADS"] = str(bt)
-        os.environ["NUMEXPR_NUM_THREADS"] = str(bt)
-        os.environ["RAYON_NUM_THREADS"] = "4"
+        os.environ.setdefault("OPENBLAS_NUM_THREADS", str(bt))
+        os.environ.setdefault("OMP_NUM_THREADS", str(bt))
+        os.environ.setdefault("MKL_NUM_THREADS", str(bt))
+        os.environ.setdefault("NUMEXPR_NUM_THREADS", str(bt))
+        os.environ.setdefault("RAYON_NUM_THREADS", "4")
