@@ -58,7 +58,21 @@ def _read_shard_metadata_pyarrow(shard_path: str, schema: DatasetSchema) -> dict
     if hasattr(domain_col_data.dtype, 'categories') or domain_col_data.dtype == object:
         import pandas as pd
         series = pd.Series(domain_col_data)
-        cat_series = series.astype("category")
+        if schema.domain_names is not None:
+            all_cats = pd.CategoricalDtype(categories=schema.domain_names, ordered=False)
+            cat_series = series.astype(all_cats)
+            unseen = set(series.unique()) - set(schema.domain_names)
+            if unseen:
+                num_missing = int(sum(series.isin(unseen)))
+                import warnings
+                warnings.warn(
+                    f"domain_col '{schema.domain_col}' 有 {num_missing} 条数据的值 "
+                    f"不在 schema.domain_names 中 ({unseen})。"
+                    f"这些值会被映射为 -1，在采样时被忽略。"
+                    f"请在 domain_names 中补充这些值。"
+                )
+        else:
+            cat_series = series.astype("category")
         domain_arr = cat_series.cat.codes.to_numpy(dtype=np.int64)
         cat_map = dict(zip(
             cat_series.cat.categories,
@@ -226,7 +240,10 @@ class ShardMetadataManager:
             )
 
             unique_domains = np.unique(self._domain_labels)
-            self._num_domains = len(unique_domains)
+            if self._schema.domain_names is not None:
+                self._num_domains = len(self._schema.domain_names)
+            else:
+                self._num_domains = len(unique_domains)
             self._num_quality_criteria = len(self._schema.quality_cols)
             self._domain_cat_map = cached_info.get("domain_label_map")
             self._detected_domain_names = self._build_domain_names(unique_domains)
@@ -235,7 +252,8 @@ class ShardMetadataManager:
                 if self._schema.quality_names is not None
                 else list(self._schema.quality_cols)
             )
-            self._domain_counts = np.bincount(self._domain_labels, minlength=self._num_domains)
+            valid_labels = self._domain_labels[self._domain_labels >= 0]
+            self._domain_counts = np.bincount(valid_labels, minlength=self._num_domains)
 
             total_time = time.time() - load_t0
             print(f"[ShardMetadataManager] Loaded {self._num_docs:,} docs "
@@ -316,7 +334,10 @@ class ShardMetadataManager:
         )
 
         unique_domains = np.unique(self._domain_labels)
-        self._num_domains = len(unique_domains)
+        if self._schema.domain_names is not None:
+            self._num_domains = len(self._schema.domain_names)
+        else:
+            self._num_domains = len(unique_domains)
         self._num_quality_criteria = len(self._schema.quality_cols)
 
         self._domain_cat_map: Optional[Dict[str, int]] = None
@@ -499,12 +520,16 @@ class ShardMetadataManager:
         mgr._shard_files = []
         mgr._shard_index = None
         mgr._schema = schema
-        mgr._num_domains = num_domains if num_domains is not None else len(np.unique(domain_labels))
+        mgr._num_domains = num_domains if num_domains is not None else (
+            len(mgr._schema.domain_names) if mgr._schema.domain_names is not None
+            else len(np.unique(domain_labels))
+        )
         mgr._num_quality_criteria = num_quality_criteria if num_quality_criteria is not None else len(mgr._schema.quality_cols)
         mgr._detected_domain_names = detected_domain_names if detected_domain_names is not None else [f"D{m}" for m in range(mgr._num_domains)]
         mgr._detected_quality_names = detected_quality_names if detected_quality_names is not None else list(mgr._schema.quality_cols)
         mgr._domain_cat_map = domain_label_map
-        mgr._domain_counts = np.bincount(domain_labels, minlength=mgr._num_domains)
+        valid_labels = domain_labels[domain_labels >= 0]
+        mgr._domain_counts = np.bincount(valid_labels, minlength=mgr._num_domains)
         mgr._has_row_in_shard = False
         return mgr
 
