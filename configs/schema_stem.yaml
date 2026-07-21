@@ -16,7 +16,6 @@ domain_names:
   - 物理
 
 quality_cols:
-  - category_score
   - stem_relevance
   - knowledge_value
   - notation_fidelity
@@ -24,7 +23,6 @@ quality_cols:
   - noise_level
 
 quality_names:
-  - category_score
   - stem_relevance
   - knowledge_value
   - notation_fidelity
