@@ -1563,22 +1563,34 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         t0 = time.time()
         n = len(all_params)
         num_cpus = cfg.cpu_count
+
+        data_copy_size = (
+            self._normalized_quality.nbytes
+            + sum(idx.nbytes for idx in self._domain_indices.values())
+        )
+        if self._token_counts is not None:
+            data_copy_size += self._token_counts.nbytes
         n_m_max = max((len(idx) for idx in self._domain_indices.values()), default=self._num_docs)
-        mem_per_thread = 6 * n_m_max * 8
+        compute_mem = 6 * n_m_max * 8
+        mem_per_process = data_copy_size + compute_mem + 50 * 1024**2
+
         try:
             import psutil
-            available_ram = psutil.virtual_memory().available * 0.8
+            available_ram = psutil.virtual_memory().available * 0.7
         except ImportError:
             available_ram = 1.5 * 1024**3 * 0.6
-        max_by_mem = max(1, int(available_ram / (mem_per_thread * cfg.blas_threads_for(1))))
+        max_by_mem = max(1, int(available_ram / mem_per_process))
         n_workers = min(n, num_cpus, max_by_mem, cfg.max_compute_workers)
 
         blas_threads = cfg.blas_threads_for(n_workers)
-        print(f"[PreSample] Pre-sampling {n} experiments (Eq.1-3) "
-              f"with {n_workers} processes × {blas_threads} BLAS threads "
-              f"(={n_workers * blas_threads} effective, "
-              f"mem/process={mem_per_thread * blas_threads / 1024**2:.0f}MB, "
-              f"available={available_ram/1024**3:.0f}GB)...")
+        print(
+            f"[PreSample] Pre-sampling {n} experiments (Eq.1-3) "
+            f"with {n_workers} processes × {blas_threads} BLAS threads "
+            f"(={n_workers * blas_threads} effective, "
+            f"mem/process={mem_per_process/1024**2:.0f}MB "
+            f"[data={data_copy_size/1024**2:.0f}MB + compute={compute_mem/1024**2:.0f}MB], "
+            f"available={available_ram/1024**3:.0f}GB)"
+        )
 
         shm_blocks = []
         nq_info = ndarray_to_shared(self._normalized_quality, "presample_nq")
