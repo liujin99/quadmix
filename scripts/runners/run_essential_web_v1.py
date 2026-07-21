@@ -1027,6 +1027,8 @@ def main():
     quality_names = metadata_manager.detected_quality_names
     quality_directions = metadata_manager.quality_directions
 
+    schema = metadata_manager.schema
+
     pipeline.run(
         data_path=args.preprocessed_dir,
         output_dir=output_dir,
@@ -1039,6 +1041,7 @@ def main():
         proxy_runner=proxy_runner,
         parallel_workers=args.npu_devices,
         val_set=args.val_set,
+        schema=schema,
     )
     return 0
 
