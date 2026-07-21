@@ -22,7 +22,7 @@ Aligned with RegMix:
   - RegMix training loop: gradient accumulation, cosine LR, AdamW
 """
 
-import os, math, time, json, glob
+import os, math, time, json, glob, ctypes, threading
 import multiprocessing as mp
 import multiprocessing.shared_memory
 from functools import partial
@@ -30,6 +30,42 @@ from typing import List, Optional, Dict, Tuple, Callable
 from joblib import Parallel, delayed
 from contextlib import contextmanager
 import pandas as pd
+
+PRECOMPUTE_MAX_WORKERS = 16
+
+
+def _get_blas_threads() -> int:
+    for lib_name in ['libopenblas.so', 'libopenblas.so.0',
+                     'libscipy_openblas64.so',
+                     'libmkl_rt.so', 'libmkl_rt.so.1',
+                     'libmkl_rt.so.2']:
+        try:
+            lib = ctypes.CDLL(lib_name)
+            if hasattr(lib, 'openblas_get_num_threads'):
+                return lib.openblas_get_num_threads()
+            if hasattr(lib, 'MKL_Get_Max_Threads'):
+                return lib.MKL_Get_Max_Threads()
+        except OSError:
+            continue
+    return 0
+
+
+def _set_blas_threads(n: int) -> bool:
+    for lib_name in ['libopenblas.so', 'libopenblas.so.0',
+                     'libscipy_openblas64.so',
+                     'libmkl_rt.so', 'libmkl_rt.so.1',
+                     'libmkl_rt.so.2']:
+        try:
+            lib = ctypes.CDLL(lib_name)
+            if hasattr(lib, 'openblas_set_num_threads'):
+                lib.openblas_set_num_threads(n)
+                return True
+            if hasattr(lib, 'MKL_Set_Num_Threads'):
+                lib.MKL_Set_Num_Threads(n)
+                return True
+        except OSError:
+            continue
+    return False
 
 import numpy as np
 import torch
@@ -887,6 +923,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             self, params: ParameterSet, experiment_id: int,
     ) -> np.ndarray:
         """Process one experiment: Eq.1-3 + sampling, domain-by-domain."""
+        cancel = getattr(self, '_cancel_flag', None)
         M = self.config.num_domains
         rng_eq2 = np.random.default_rng(experiment_id + 1729)
         rng_sample = np.random.default_rng(experiment_id + 42)
@@ -895,6 +932,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         domain_selected = []
 
         for m in range(M):
+            if cancel is not None and cancel.is_set():
+                return np.array([], dtype=np.int64)
             indices = self._domain_indices.get(m)
             if indices is None or len(indices) == 0:
                 continue
@@ -1478,8 +1517,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             self, all_params: List[ParameterSet]
     ) -> List[np.ndarray]:
         """Run Eq.1-3 + fractional sampling for all experiments."""
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        import threading
+        from concurrent.futures import ThreadPoolExecutor
 
         t0 = time.time()
         n = len(all_params)
@@ -1492,19 +1530,29 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         except ImportError:
             available_ram = 1.5 * 1024**3 * 0.6
         max_threads_by_mem = max(1, int(available_ram / mem_per_thread))
-        n_workers = min(n, num_cpus, max_threads_by_mem)
+        n_workers = min(n, num_cpus, max_threads_by_mem, PRECOMPUTE_MAX_WORKERS)
 
+        blas_threads = max(1, num_cpus // n_workers)
+        orig_blas = _get_blas_threads()
+        _set_blas_threads(blas_threads)
         print(f"[PreSample] Pre-sampling {n} experiments (Eq.1-3) "
-              f"with {n_workers} threads (domain-by-domain, "
+              f"with {n_workers} threads × {blas_threads} BLAS threads "
+              f"(={n_workers * blas_threads} effective, "
               f"mem/thread={mem_per_thread/1024**2:.0f}MB, "
               f"available={available_ram/1024**3:.0f}GB)...")
 
         all_selected: List[Optional[np.ndarray]] = [None] * n
         completed = [0]
         lock = threading.Lock()
+        cancel_flag = threading.Event()
+        self._cancel_flag = cancel_flag
 
         def worker(i: int, params: ParameterSet):
+            if cancel_flag.is_set():
+                return
             selected = self._sample_one_experiment(params, i)
+            if cancel_flag.is_set():
+                return
             with lock:
                 all_selected[i] = selected
                 completed[0] += 1
@@ -1516,14 +1564,24 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 print(f"[PreSample] {c}/{n} done ({elapsed:.1f}s, "
                       f"{speed:.1f} exp/s, ETA: {eta:.0f}s")
 
-        with PerfTimer.section("eq123_sampling", "precompute"):
-            with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        executor = ThreadPoolExecutor(max_workers=n_workers)
+        try:
+            with PerfTimer.section("eq123_sampling", "precompute"):
                 futures = [
                     executor.submit(worker, i, params)
                     for i, params in enumerate(all_params)
                 ]
                 for fut in futures:
                     fut.result()
+        except KeyboardInterrupt:
+            cancel_flag.set()
+            print("\n[PreSample] Interrupted — cancelling remaining tasks...")
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
+        finally:
+            executor.shutdown(wait=True)
+            _set_blas_threads(orig_blas if orig_blas > 0 else num_cpus)
+            cancel_flag.clear()
 
         elapsed = time.time() - t0
         total_docs = sum(len(s) for s in all_selected)

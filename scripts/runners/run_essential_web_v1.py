@@ -26,6 +26,8 @@ to use the BMK v2 set (10 BMK-like tasks, full-sequence loss), or
 """
 
 import argparse, os, sys, time, urllib.request, ssl
+os.environ.setdefault('OPENBLAS_NUM_THREADS', '16')
+os.environ.setdefault('OMP_NUM_THREADS', '16')
 try:
     import quadmix
 except ImportError:
