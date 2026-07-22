@@ -1212,7 +1212,6 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         graphed_step = None
         train_wrapper = None
         if device.type == "npu":
-            torch.npu.synchronize()
             try:
                 train_wrapper = GraphedTrainStep(model, 1024)
                 sample_inp = torch.zeros(self.micro_batch_size, self.block_size, dtype=torch.long, device=device)
@@ -1320,6 +1319,10 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 del graphed_step, train_wrapper
                 if device.type == "npu":
                     torch.npu.synchronize()
+                    try:
+                        torch.npu.graph.default_capture_stream = None
+                    except AttributeError:
+                        pass
             del flat_train, inp_buf, tgt_buf, block_starts_buf, arange_npu, optimizer, perm
             if device.type == "npu":
                 import gc as _gc
