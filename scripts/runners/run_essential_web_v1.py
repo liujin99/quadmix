@@ -25,7 +25,13 @@ to use the BMK v2 set (10 BMK-like tasks, full-sequence loss), or
 1M proxy learnability, full-sequence loss).
 """
 
-import argparse, os, sys, time, urllib.request
+import argparse, os, sys, time, urllib.request, ssl
+_cpu_count = os.cpu_count() or 4
+os.environ.setdefault('OPENBLAS_NUM_THREADS', str(max(1, _cpu_count // 4)))
+os.environ.setdefault('OMP_NUM_THREADS', str(max(1, _cpu_count // 4)))
+os.environ.setdefault('MKL_NUM_THREADS', str(max(1, _cpu_count // 4)))
+os.environ.setdefault('NUMEXPR_NUM_THREADS', str(max(1, _cpu_count // 4)))
+os.environ.setdefault('RAYON_NUM_THREADS', '4')
 try:
     import quadmix
 except ImportError:
@@ -59,8 +65,9 @@ def _hf_remote_size(repo_id: str, filename: str) -> int:
     """Get remote file size from HuggingFace via HEAD request. Returns 0 if failed."""
     url = f"{HF_ENDPOINT}/datasets/{repo_id}/resolve/main/{filename}"
     try:
+        ctx = ssl._create_unverified_context()
         req = urllib.request.Request(url, method="HEAD")
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
             return int(resp.headers.get("Content-Length", 0))
     except Exception:
         pass
@@ -781,7 +788,7 @@ def ensure_stem_v1_data(val_path: str) -> str:
         print(f"\n[Setup] {HF_STEM_V1_FILENAME} version mismatch")
         print(f"[Setup]   Local:  {local_size / 1024**2:.0f} MB")
         print(f"[Setup]   Remote: {remote_size / 1024**2:.0f} MB")
-        print("[Setup]   Re-downloading...")
+        print(f"[Setup]   Re-downloading...")
         os.remove(val_path)
     else:
         print(f"\n[Setup] STEM v1 validation set not found at:\n  {val_path}")
@@ -792,7 +799,7 @@ def ensure_stem_v1_data(val_path: str) -> str:
         print(f"[Setup] Download failed. You can manually download from:\n"
               f"  https://huggingface.co/datasets/{HF_STEM_V1_DATASET}")
     else:
-        print("[Setup] Cannot connect to HuggingFace.")
+        print(f"[Setup] Cannot connect to HuggingFace.")
         print(f"[Setup] You can manually download from:\n"
               f"  https://huggingface.co/datasets/{HF_STEM_V1_DATASET}")
 
@@ -801,19 +808,15 @@ def ensure_stem_v1_data(val_path: str) -> str:
         f"Download from: https://huggingface.co/datasets/{HF_STEM_V1_DATASET}"
     )
 
-
-from quadmix.constants import DOMAIN_NAMES, QUALITY_NAMES, QUALITY_COLUMNS, NUM_DOMAINS
+from quadmix.data.dataset_schema import DatasetSchema
 
 
 def build_parser():
     p = argparse.ArgumentParser(description="QuaDMix on essential-web-v1 (sharded mode)")
     p.add_argument("--preprocessed-dir", default=DEFAULT_PREPROCESSED_DIR,
-                   help="Directory containing input parquet shards")
-    p.add_argument("--input-format", default="preprocessed",
-                   choices=["preprocessed", "stem_raw"],
-                   help="preprocessed: QuaDMix shards; stem_raw: direct parquet_filter input")
+                   help="Directory of preprocessed parquet shards")
     p.add_argument("--shard-limit", type=int, default=None,
-                   help="Use only the first N shards in stem_raw mode (smoke testing)")
+                   help="Use only the first N shards (smoke testing)")
     p.add_argument("--quick", action="store_true", help="Quick: 200 exp, 2000 search")
     p.add_argument("--full", action="store_true", help="Full: 3000 exp, 100K search")
     p.add_argument("--output", "-o", default=None)
@@ -871,6 +874,9 @@ def build_parser():
     p.add_argument("--eval-bundle", type=str, default=DEFAULT_EVAL_BUNDLE,
                    help="Path to CORE eval bundle directory "
                         "(used when --val-set=core, default: $EVAL_BUNDLE_DIR)")
+    p.add_argument("--schema", type=str, required=True,
+                   help="YAML dataset schema config file (必填)。"
+                        "示例数据集: configs/schema_essential_web.yaml")
     return p
 
 
@@ -927,15 +933,18 @@ def create_proxy_runner(config, args, output_dir, metadata_manager):
         val_data_path=val_path,
         output_dir=proxy_dir,
         device_type=args.device_type,
-        npu_device_id=0,  # Main process uses card 0; workers use their own
+        npu_device_id=0,
         micro_batch_size=args.micro_batch_size,
         global_batch_size=args.global_batch_size,
         tiny_steps=args.tiny_steps,
-        doc_limit=None,  # Always use full data pool for proxy experiments
+        doc_limit=None,
         test_block_size=args.block_size,
         rank_ref_size=args.rank_ref_size,
         token_cache_dir=os.path.join(QUADMIX_TEMP_DIR, "token_cache"),
         checkpoint_interval=checkpoint_interval,
+        domain_names=metadata_manager.detected_domain_names,
+        quality_names=metadata_manager.detected_quality_names,
+        quality_directions=metadata_manager.quality_directions,
     )
     return runner
 
@@ -956,17 +965,26 @@ def main():
         QUADMIX_DIR, f"result/quadmix_{time.strftime('%Y%m%d_%H%M%S')}"
     )
 
+    # ── Load dataset schema ──
+    print(f"\n[Setup] Loading dataset schema from: {args.schema}")
+    schema = DatasetSchema.from_yaml(args.schema)
+    print(f"[Setup] Schema: domain_col='{schema.domain_col}', "
+          f"quality_cols={schema.quality_cols}, "
+          f"text_col='{schema.text_col}', "
+          f"char_count_col={schema.char_count_col}")
+
     # ── Load metadata manager (reads only domain + quality from all shards) ──
     print(f"\n[Setup] Loading ShardMetadataManager from: {args.preprocessed_dir}")
-    print(f"[Setup] Input format: {args.input_format}")
     metadata_manager = ShardMetadataManager(
         args.preprocessed_dir,
-        input_format=args.input_format,
+        schema=schema,
         shard_limit=args.shard_limit,
         max_workers=int(os.environ.get("STEM_METADATA_WORKERS", "8")),
     )
     print(f"[Setup] {metadata_manager.num_docs:,} docs across "
-          f"{metadata_manager.num_shards} shards")
+          f"{metadata_manager.num_shards} shards, "
+          f"{metadata_manager.num_domains} domains, "
+          f"{metadata_manager.num_quality_criteria} quality criteria")
 
     # ── Dataset size estimation ──
     total_tokens_est = metadata_manager.get_total_tokens_estimate()
@@ -1003,8 +1021,8 @@ def main():
     print(f"════════════════════════════════════════════════════════")
 
     config = QuaDMixConfig(
-        num_domains=NUM_DOMAINS,
-        num_quality_criteria=len(QUALITY_COLUMNS),
+        num_domains=metadata_manager.num_domains,
+        num_quality_criteria=metadata_manager.num_quality_criteria,
         num_proxy_experiments=n_exp, num_search_points=n_search,
         top_k_average=top_k,
         target_tokens=int(args.target_tokens * 1e9) if args.target_tokens > 0 else 0,
@@ -1019,19 +1037,25 @@ def main():
          f"val={args.val_set}"
          f"{', ' + str(args.npu_devices) + ' NPU devices' if args.npu_devices > 1 else ''}")
 
+    domain_names = metadata_manager.detected_domain_names
+    quality_names = metadata_manager.detected_quality_names
+    quality_directions = metadata_manager.quality_directions
+
+    schema = metadata_manager.schema
+
     pipeline.run(
         data_path=args.preprocessed_dir,
         output_dir=output_dir,
         precomputed=True,
-        # load_precomputed_sharded will be triggered by passing metadata_manager
-        # via **load_kwargs:
         metadata_manager=metadata_manager,
-        doc_limit=None,  # Always use full data pool
-        domain_names=DOMAIN_NAMES,
-        quality_names=QUALITY_NAMES,
+        doc_limit=None,
+        domain_names=domain_names,
+        quality_names=quality_names,
+        quality_directions=quality_directions,
         proxy_runner=proxy_runner,
         parallel_workers=args.npu_devices,
         val_set=args.val_set,
+        schema=schema,
     )
     return 0
 

@@ -37,9 +37,10 @@ import numpy as np
 from quadmix import QuaDMixConfig
 from quadmix.core.types import ParameterSet, ProxyResult
 from quadmix.data.metadata_manager import ShardMetadataManager
+from quadmix.data.dataset_schema import DatasetSchema
 from quadmix.pipeline.real_pipeline import QuaDMixPipeline
 from quadmix.constants import (
-    DOMAIN_NAMES, QUALITY_NAMES, NUM_DOMAINS, PROJECT_DIR, DEFAULT_TEMP_DIR,
+    PROJECT_DIR, DEFAULT_TEMP_DIR,
     DEFAULT_VAL_DIR, HF_ENDPOINT, HF_RESOLVE,
     HF_OPENHERMES_DATASET, HF_OPENHERMES_FILENAME,
     HF_CORE_DATASET, HF_CORE_FILENAME,
@@ -170,6 +171,8 @@ def build_parser():
     p.add_argument("--search-mode", default="equal_weight",
                    choices=["r2_weighted", "equal_weight", "r2_sigma_weighted"],
                    help="Search weighting mode (default: equal_weight)")
+    p.add_argument("--schema", default=None,
+                   help="Path to dataset schema YAML (default: Essential-Web schema)")
     return p
 
 
@@ -207,8 +210,11 @@ def main():
 
     # ── Stage 0: Load metadata ─────────────────────────────
     _t = time.time()
+    schema = DatasetSchema.from_yaml(args.schema) if args.schema else DatasetSchema()
     print(f"\n[Stage 0] Loading metadata from: {args.preprocessed_dir}")
-    mm = ShardMetadataManager(args.preprocessed_dir)
+    mm = ShardMetadataManager(args.preprocessed_dir, schema=schema)
+    domain_names = mm.detected_domain_names
+    quality_names = mm.detected_quality_names
     print(f"[Stage 0] {mm.num_docs:,} docs across {mm.num_shards} shards")
     domain_labels = mm.domain_labels
     quality_scores = mm.quality_scores
@@ -257,7 +263,7 @@ def main():
               f"{len(pending_experiments)} pending")
 
     config = QuaDMixConfig(
-        num_domains=NUM_DOMAINS, num_quality_criteria=5,
+        num_domains=mm.num_domains, num_quality_criteria=mm.num_quality_criteria,
         num_proxy_experiments=len(experiments),
         num_search_points=args.num_search,
         top_k_average=args.top_k,
@@ -433,7 +439,7 @@ def main():
     for m in range(config.num_domains):
         if orig_dist[m] > 0:
             ratio = sel_dist[m] / orig_dist[m]
-            name = DOMAIN_NAMES[m] if m < len(DOMAIN_NAMES) else f"D{m}"
+            name = domain_names[m] if m < len(domain_names) else f"D{m}"
             print(f"    [{m}] {name:>10s}: {orig_dist[m]:>7,} -> {sel_dist[m]:>7,}  ({ratio:.2f}x)")
     stage_times["stage7_final_sampling"] = time.time() - _t
     print(f"[Stage 7] Final sampling: {stage_times['stage7_final_sampling']:.1f}s")
@@ -441,7 +447,7 @@ def main():
     # ── Stage 8: Save Outputs ───────────────────────────
     _t = time.time()
     params_path = os.path.join(output_dir, "optimal_parameters.json")
-    serialized = pipeline._serialize_params(optimal_params, DOMAIN_NAMES, QUALITY_NAMES)
+    serialized = pipeline._serialize_params(optimal_params, domain_names, quality_names)
     with open(params_path, "w") as f:
         json.dump(serialized, f, indent=2)
 
@@ -529,9 +535,9 @@ def main():
 
     sampled_path = os.path.join(output_dir, "sampled_dataset.parquet")
     pd.DataFrame({
-        "text": sampled_texts,
+        schema.text_col: sampled_texts,
         "doc_id": selected_indices,
-        "domain": sel_domain,
+        schema.domain_col: sel_domain,
         "quality_rank": sel_rank,
         "sampling_weight": sel_weights,
         "sampling_value": sel_sv,
@@ -561,6 +567,9 @@ def main():
         per_task_analysis=summary.get("per_task_analysis"),
         dataset_size_prediction=summary.get("dataset_size_prediction"),
         stage_times={k: v for k, v in stage_times.items() if k != "stage9_report"},
+        domain_names=domain_names,
+        quality_names=quality_names,
+        domain_col=schema.domain_col,
     )
 
     reval_header = (
@@ -624,7 +633,7 @@ def _build_domain_dist_change(orig_dist, sel_dist, num_domains):
     change = {}
     for m in range(num_domains):
         if orig_dist[m] > 0:
-            name = DOMAIN_NAMES[m] if m < len(DOMAIN_NAMES) else f"D{m}"
+            name = domain_names[m] if m < len(domain_names) else f"D{m}"
             change[name] = {
                 "original": int(orig_dist[m]),
                 "selected": int(sel_dist[m]),

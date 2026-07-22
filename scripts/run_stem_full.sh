@@ -174,15 +174,16 @@ else
     exit 2
 fi
 
-export STEM_METADATA_WORKERS="${STEM_METADATA_WORKERS:-8}"
-export TOKENIZE_WORKERS="${TOKENIZE_WORKERS:-48}"
+export STEM_METADATA_WORKERS="${STEM_METADATA_WORKERS:-32}"
+export PRESAMPLE_MAX_WORKERS="${PRESAMPLE_MAX_WORKERS:-64}"
+export TOKENIZE_WORKERS="${TOKENIZE_WORKERS:-16}"
 export TOKENIZE_THREADS_PER_WORKER="${TOKENIZE_THREADS_PER_WORKER:-1}"
 export QUADMIX_PERF_TIMER="${QUADMIX_PERF_TIMER:-1}"
 
 echo "[3/3] Running QuaDMix directly on parquet_filter..."
 "$PYTHON_BIN" "$QUADMIX_DIR/scripts/runners/run_essential_web_v1.py" \
     --preprocessed-dir "$PARQUET_FILTER_DIR" \
-    --input-format stem_raw \
+    --schema "$QUADMIX_DIR/configs/schema_stem.yaml" \
     "${SHARD_ARGS[@]}" \
     --num-experiments "$NUM_EXPERIMENTS" \
     --num-search "$NUM_SEARCH" \

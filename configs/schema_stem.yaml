@@ -1,0 +1,34 @@
+# STEM dataset schema — 数学/化学/生物学/物理 四域数据集
+#
+# 用法:
+#   python scripts/runners/run_essential_web_v1.py --schema configs/schema_stem.yaml ...
+#
+# domain_names 顺序决定 string→int 映射: 数学=0, 化学=1, 生物学=2, 物理=3
+# quality_cols 全部 higher_better=true
+# char_count_col 直接读取预处理生成的字符数，避免首次训练扫描 text
+# row_in_shard_col: source_record_idx → 指定行号的文本读取
+
+domain_col: category_name
+domain_names:
+  - 数学
+  - 化学
+  - 生物学
+  - 物理
+
+quality_cols:
+  - stem_relevance
+  - knowledge_value
+  - notation_fidelity
+  - rigor_coherence
+  - noise_level
+
+quality_names:
+  - stem_relevance
+  - knowledge_value
+  - notation_fidelity
+  - rigor_coherence
+  - noise_level
+
+text_col: text
+char_count_col: char_count_col
+row_in_shard_col: source_record_idx

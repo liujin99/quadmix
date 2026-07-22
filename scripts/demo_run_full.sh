@@ -211,7 +211,7 @@ cat << PARAMS
   │ 代理模型                   │  tinyllama_1M│
   └────────────────────────────┴──────────────┘
 
-  ⏱ 预计耗时: ~$(( NUM_EXPERIMENTS / 8 + 1 ))h ($NUM_EXPERIMENTS exp, 8 NPU 并行)
+  ⏱ 预计耗时: precompute ~3-5 exp/s (loky 进程池), 训练取决于 NPU 数
 PARAMS
 
 if command -v npu-smi &> /dev/null; then
@@ -230,14 +230,11 @@ else
     echo ""
 fi
 
-# Tokenize parallelism: workers × threads_per_worker ≈ num_cpus
-export TOKENIZE_WORKERS="${TOKENIZE_WORKERS:-48}"
-export TOKENIZE_THREADS_PER_WORKER="${TOKENIZE_THREADS_PER_WORKER:-4}"
-
 # Performance timer: set to 1 to enable detailed timing report
 export QUADMIX_PERF_TIMER="${QUADMIX_PERF_TIMER:-1}"
 
 python3 "$QUADMIX_DIR/scripts/runners/run_essential_web_v1.py" \
+    --schema "$QUADMIX_DIR/configs/schema_essential_web.yaml" \
     --preprocessed-dir "$PREPROCESSED_DIR" \
     --num-experiments "$NUM_EXPERIMENTS" \
     --num-search 5000 \

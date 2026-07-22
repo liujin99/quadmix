@@ -30,11 +30,11 @@ import numpy as np
 from quadmix import QuaDMixConfig
 from quadmix.core.types import ParameterSet, ProxyResult
 from quadmix.data.metadata_manager import ShardMetadataManager
+from quadmix.data.dataset_schema import DatasetSchema
 from quadmix.pipeline.real_pipeline import QuaDMixPipeline
-from quadmix.constants import DOMAIN_NAMES, QUALITY_NAMES, NUM_DOMAINS
 
 
-def _build_domain_dist_change(domain_labels, selected_indices, num_domains):
+def _build_domain_dist_change(domain_labels, selected_indices, num_domains, domain_names):
     orig_dist = np.bincount(domain_labels[domain_labels >= 0], minlength=num_domains)
     sel_dist = np.bincount(
         domain_labels[selected_indices][domain_labels[selected_indices] >= 0],
@@ -42,7 +42,7 @@ def _build_domain_dist_change(domain_labels, selected_indices, num_domains):
     change = {}
     for m in range(num_domains):
         if orig_dist[m] > 0:
-            name = DOMAIN_NAMES[m] if m < len(DOMAIN_NAMES) else f"D{m}"
+            name = domain_names[m] if m < len(domain_names) else f"D{m}"
             change[name] = {
                 "original": int(orig_dist[m]),
                 "selected": int(sel_dist[m]),
@@ -129,9 +129,7 @@ def build_parser():
     p.add_argument("--proxy-dir", required=True,
                    help="Path to proxy_experiments/ directory")
     p.add_argument("--preprocessed-dir", required=True,
-                   help="Path to input parquet shards directory")
-    p.add_argument("--input-format", default="preprocessed",
-                   choices=["preprocessed", "stem_raw"])
+                   help="Path to preprocessed shards directory")
     p.add_argument("--output", "-o", default=None,
                    help="Output directory (default: <project>/result/reoptimize_<timestamp>)")
     p.add_argument("--num-search", type=int, default=5000)
@@ -141,6 +139,8 @@ def build_parser():
     p.add_argument("--search-mode", default="equal_weight",
                    choices=["r2_weighted", "equal_weight", "r2_sigma_weighted"],
                    help="Search weighting mode (default: equal_weight)")
+    p.add_argument("--schema", default=None,
+                   help="Path to dataset schema YAML (default: Essential-Web schema)")
     return p
 
 
@@ -189,8 +189,15 @@ def main():
     n_search = args.num_search
     top_k = args.top_k
 
+    schema = DatasetSchema.from_yaml(args.schema) if args.schema else DatasetSchema()
+
+    mm = ShardMetadataManager(args.preprocessed_dir, schema=schema)
+    print(f"[Resume] {mm.num_docs:,} docs across {mm.num_shards} shards")
+    domain_names = mm.detected_domain_names
+    quality_names = mm.detected_quality_names
+
     config = QuaDMixConfig(
-        num_domains=NUM_DOMAINS, num_quality_criteria=5,
+        num_domains=mm.num_domains, num_quality_criteria=mm.num_quality_criteria,
         num_proxy_experiments=n_exp, num_search_points=n_search,
         top_k_average=top_k,
         target_tokens=int(args.target_tokens * 1e9) if args.target_tokens > 0 else 0,
@@ -198,12 +205,6 @@ def main():
     )
 
     pipeline = QuaDMixPipeline(config)
-
-    print(f"\n[Resume] Loading metadata from: {args.preprocessed_dir}")
-    mm = ShardMetadataManager(
-        args.preprocessed_dir, input_format=args.input_format
-    )
-    print(f"[Resume] {mm.num_docs:,} docs across {mm.num_shards} shards")
 
     domain_labels = mm.domain_labels
     quality_scores = mm.quality_scores
@@ -271,7 +272,7 @@ def main():
     for m in range(config.num_domains):
         if orig_dist[m] > 0:
             ratio = sel_dist[m] / orig_dist[m]
-            name = DOMAIN_NAMES[m] if m < len(DOMAIN_NAMES) else f"D{m}"
+            name = domain_names[m] if m < len(domain_names) else f"D{m}"
             print(f"    [{m}] {name:>10s}: {orig_dist[m]:>7,} -> {sel_dist[m]:>7,}  ({ratio:.2f}x)")
     stage_times["stage7_final_sampling"] = time.time() - _t
     print(f"[Stage 7] Final sampling: {stage_times['stage7_final_sampling']:.1f}s")
@@ -279,7 +280,7 @@ def main():
     # ── Stage 8: Save Outputs ───────────────────────────
     _t = time.time()
     params_path = os.path.join(output_dir, "optimal_parameters.json")
-    serialized = pipeline._serialize_params(optimal_params, DOMAIN_NAMES, QUALITY_NAMES)
+    serialized = pipeline._serialize_params(optimal_params, mm.detected_domain_names, mm.detected_quality_names)
     with open(params_path, "w") as f:
         json.dump(serialized, f, indent=2)
     print(f"\n[Stage 8] Optimal parameters saved to: {params_path}")
@@ -320,7 +321,7 @@ def main():
             "num_selected_docs": len(selected_indices),
             "sampling_ratio": len(selected_indices) / n_docs,
             "domain_distribution_change": _build_domain_dist_change(
-                domain_labels, selected_indices, config.num_domains),
+                domain_labels, selected_indices, config.num_domains, domain_names),
         },
         "proxy_loss_stats": _compute_proxy_loss_stats(results),
         "per_task_loss_stats": per_task_loss_stats,
@@ -345,9 +346,9 @@ def main():
 
     sampled_path = os.path.join(output_dir, "sampled_dataset.parquet")
     pd.DataFrame({
-        "text": sampled_texts,
+        schema.text_col: sampled_texts,
         "doc_id": selected_indices,
-        "domain": sel_domain,
+        schema.domain_col: sel_domain,
         "quality_rank": sel_rank,
         "sampling_weight": sel_weights,
         "sampling_value": sel_sv,
@@ -378,6 +379,9 @@ def main():
         per_task_analysis=summary.get("per_task_analysis"),
         dataset_size_prediction=summary.get("dataset_size_prediction"),
         stage_times={k: v for k, v in stage_times.items() if k != "stage9_report"},
+        domain_names=domain_names,
+        quality_names=quality_names,
+        domain_col=schema.domain_col,
     )
     save_report(report, output_dir)
     stage_times["stage9_report"] = time.time() - _t

@@ -42,6 +42,7 @@ from quadmix.data.base import BaseDataAdapter, UnifiedData
 from quadmix.data.registry import get_adapter
 from quadmix.sampling.batch_sampler import save_sampled_dataset, sample_with_optimal_params
 from quadmix.pipeline.report import generate_report, save_report
+from quadmix.data.dataset_schema import DatasetSchema
 
 
 @dataclass
@@ -137,8 +138,8 @@ class QuaDMixPipeline:
     def load_precomputed(
         self,
         data_path: str,
-        text_col: str = "text",
-        domain_col: str = "domain",
+        text_col: Optional[str] = None,
+        domain_col: Optional[str] = None,
         quality_cols: Optional[List[str]] = None,
         doc_limit: Optional[int] = None,
     ):
@@ -146,11 +147,12 @@ class QuaDMixPipeline:
         Stage 0: Load preprocessed parquet with existing domain labels + quality scores.
         Single-file mode: loads all text upfront.
         """
+        if text_col is None:
+            text_col = self._schema.text_col
+        if domain_col is None:
+            domain_col = self._schema.domain_col
         if quality_cols is None:
-            quality_cols = [
-                "qs_dclm", "qs_fineweb_edu_approx", "qs_english",
-                "qs_eai_general_math", "qs_eai_open_web_math",
-            ]
+            quality_cols = self._schema.quality_cols
         expected_n = self.config.num_quality_criteria
         if len(quality_cols) != expected_n:
             raise ValueError(
@@ -205,7 +207,13 @@ class QuaDMixPipeline:
 
         self._domain_labels = metadata_manager.domain_labels.copy()
         self._quality_scores = metadata_manager.quality_scores.copy()
-        self._texts = None  # Signal: texts are NOT loaded upfront
+        self._texts = None
+
+        quality_directions = self._quality_directions if hasattr(self, '_quality_directions') else metadata_manager.quality_directions
+        if quality_directions:
+            for n, hb in enumerate(quality_directions):
+                if not hb:
+                    self._quality_scores[:, n] = -self._quality_scores[:, n]
 
         n = metadata_manager.num_docs
         if doc_limit and doc_limit < n:
@@ -316,14 +324,16 @@ class QuaDMixPipeline:
         proxy_runner: Optional[object] = None,
         output_format: str = "parquet",
         precomputed: bool = False,
-        text_col: str = "text",
-        domain_col: str = "domain",
+        text_col: Optional[str] = None,
+        domain_col: Optional[str] = None,
         quality_cols: Optional[List[str]] = None,
         doc_limit: Optional[int] = None,
         domain_names: Optional[List[str]] = None,
         quality_names: Optional[List[str]] = None,
+        quality_directions: Optional[List[bool]] = None,
         parallel_workers: int = 1,
         val_set: Optional[str] = None,
+        schema: Optional[DatasetSchema] = None,
         **load_kwargs,
     ) -> PipelineOutput:
         """Run the complete QuaDMix pipeline."""
@@ -337,6 +347,18 @@ class QuaDMixPipeline:
         print("=" * 70)
 
         stage_times: Dict[str, float] = {}
+
+        if schema is None:
+            schema = DatasetSchema()
+        self._schema = schema
+        if text_col is None:
+            text_col = schema.text_col
+        if domain_col is None:
+            domain_col = schema.domain_col
+        if quality_cols is None:
+            quality_cols = schema.quality_cols
+
+        self._quality_directions = quality_directions
 
         texts, domain_labels, quality_scores, token_counts, text_source, mm = \
             self._stage0_load(data_path, precomputed, text_col, domain_col,
@@ -380,7 +402,8 @@ class QuaDMixPipeline:
 
         self._stage9_report(
             output_dir, data_path, optimal_params, selected_indices,
-            domain_labels, token_counts, summary, t_start, text_source, stage_times)
+            domain_labels, token_counts, summary, t_start, text_source, stage_times,
+            domain_names=domain_names, quality_names=quality_names)
 
         elapsed = time.time() - t_start
         self._print_timing_summary(stage_times, elapsed, output_dir)
@@ -689,6 +712,7 @@ class QuaDMixPipeline:
                       default=lambda x: float(x) if isinstance(x, (np.floating,)) else x)
 
         if text_source == "sharded":
+            print(f"[Stage 8] Reading {len(selected_indices):,} sampled texts from shards...")
             sampled_texts = self._metadata_manager.read_texts(selected_indices)
             sel_domain = domain_labels[selected_indices]
             sel_rank = final_ranks[selected_indices]
@@ -697,10 +721,12 @@ class QuaDMixPipeline:
 
             sampled_path = os.path.join(output_dir, "sampled_dataset.parquet")
             os.makedirs(os.path.dirname(sampled_path) or ".", exist_ok=True)
+            schema = self._schema
+            print(f"[Stage 8] Writing sampled dataset to parquet ({len(selected_indices):,} rows)...")
             pd.DataFrame({
-                "text": sampled_texts,
+                schema.text_col: sampled_texts,
                 "doc_id": selected_indices,
-                "domain": sel_domain,
+                schema.domain_col: sel_domain,
                 "quality_rank": sel_rank,
                 "sampling_weight": sel_weights,
                 "sampling_value": sel_sv,
@@ -708,6 +734,7 @@ class QuaDMixPipeline:
             print(f"[Stage 8] Sampled dataset saved (sharded): {sampled_path}")
         else:
             sampled_path = os.path.join(output_dir, "sampled_dataset.parquet")
+            schema = self._schema
             save_sampled_dataset(
                 original_texts=texts,
                 selected_indices=selected_indices,
@@ -717,13 +744,16 @@ class QuaDMixPipeline:
                 sampling_values=sampling_values,
                 doc_ids=np.arange(len(texts)),
                 format=output_format,
+                text_col=schema.text_col,
+                domain_col=schema.domain_col,
             )
         stage_times["stage8_save"] = time.time() - _t
         print(f"[Stage 8] Save outputs: {stage_times['stage8_save']:.1f}s")
         return serialized, summary, n_docs_save
 
     def _stage9_report(self, output_dir, data_path, optimal_params, selected_indices,
-                       domain_labels, token_counts, summary, t_start, text_source, stage_times):
+                       domain_labels, token_counts, summary, t_start, text_source, stage_times,
+                       domain_names=None, quality_names=None):
         _t = time.time()
         elapsed = time.time() - t_start
         print(f"\n[Stage 9] Generating comparison report...")
@@ -745,6 +775,9 @@ class QuaDMixPipeline:
             per_task_analysis=summary.get("per_task_analysis"),
             dataset_size_prediction=summary.get("dataset_size_prediction"),
             stage_times={k: v for k, v in stage_times.items() if k != "stage9_report"},
+            domain_names=domain_names,
+            quality_names=quality_names,
+            domain_col=self._schema.domain_col,
         )
         save_report(report, output_dir)
         stage_times["stage9_report"] = time.time() - _t

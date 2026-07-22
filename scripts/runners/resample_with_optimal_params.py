@@ -29,7 +29,8 @@ import pandas as pd
 
 from quadmix.core.types import ParameterSet
 from quadmix.data.metadata_manager import ShardMetadataManager
-from quadmix.constants import DOMAIN_NAMES, QUALITY_NAMES, PROJECT_DIR
+from quadmix.data.dataset_schema import DatasetSchema
+from quadmix.constants import PROJECT_DIR
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _QUADMIX_DIR = PROJECT_DIR
@@ -56,9 +57,6 @@ def build_parser():
     p.add_argument("--preprocessed-dir", default=None,
                    help="Preprocessed shards output dir "
                         "(default: ~/.cache/QuaDMix/resample/preprocessed)")
-    p.add_argument("--input-format", default="preprocessed",
-                   choices=["preprocessed", "stem_raw"],
-                   help="Use stem_raw to resample parquet_filter directly")
     p.add_argument("--output", "-o", default=None,
                    help="Output directory (default: result/resample_<timestamp>)")
     p.add_argument("--target-tokens", type=float, default=0.0,
@@ -69,6 +67,8 @@ def build_parser():
                    help="Force re-preprocess even if output exists")
     p.add_argument("--workers", type=int, default=64,
                    help="Number of parallel preprocessing workers")
+    p.add_argument("--schema", default=None,
+                   help="Path to dataset schema YAML (default: Essential-Web schema)")
     return p
 
 
@@ -93,8 +93,7 @@ def main():
     print("  QuaDMix Resample with Optimal Parameters")
     print(f"  Data:       {args.data_dir}")
     print(f"  Params:     {args.params_file}")
-    metadata_dir = args.data_dir if args.input_format == "stem_raw" else preprocessed_dir
-    print(f"  Metadata:   {metadata_dir}")
+    print(f"  Cache:      {preprocessed_dir}")
     print(f"  Output:     {output_dir}")
     print(f"  Seed:       {args.seed}")
     if args.target_tokens > 0:
@@ -106,32 +105,31 @@ def main():
 
     # ── Stage 0: Preprocess ──────────────────────────────────
     _t = time.time()
-    if args.input_format == "stem_raw":
-        print(f"\n[Stage 0] Direct STEM mode: preprocessing skipped")
-    else:
-        print(f"\n[Stage 0] Preprocessing raw shards...")
-        preprocess_cmd = [
-            sys.executable,
-            os.path.join(_SCRIPT_DIR, "preprocess_essential_web_v1_sharded.py"),
-            "--input-dir", args.data_dir,
-            "--output-dir", preprocessed_dir,
-            "--workers", str(args.workers),
-        ]
-        if args.force:
-            preprocess_cmd.append("--force")
+    print(f"\n[Stage 0] Preprocessing raw shards...")
+    preprocess_cmd = [
+        sys.executable,
+        os.path.join(_SCRIPT_DIR, "preprocess_essential_web_v1_sharded.py"),
+        "--input-dir", args.data_dir,
+        "--output-dir", preprocessed_dir,
+        "--workers", str(args.workers),
+    ]
+    if args.force:
+        preprocess_cmd.append("--force")
 
-        print(f"  Command: {' '.join(preprocess_cmd)}")
-        result = subprocess.run(preprocess_cmd)
-        if result.returncode != 0:
-            print(f"[Error] Preprocessing failed with exit code {result.returncode}")
-            return 1
+    print(f"  Command: {' '.join(preprocess_cmd)}")
+    result = subprocess.run(preprocess_cmd)
+    if result.returncode != 0:
+        print(f"[Error] Preprocessing failed with exit code {result.returncode}")
+        return 1
     stage_times["stage0_preprocess"] = time.time() - _t
     print(f"[Stage 0] Preprocess: {stage_times['stage0_preprocess']:.1f}s")
 
     # ── Stage 1: Load metadata ───────────────────────────────
     _t = time.time()
-    print(f"\n[Stage 1] Loading metadata from: {metadata_dir}")
-    mm = ShardMetadataManager(metadata_dir, input_format=args.input_format)
+    print(f"\n[Stage 1] Loading metadata from: {preprocessed_dir}")
+    schema = DatasetSchema.from_yaml(args.schema) if args.schema else DatasetSchema()
+    mm = ShardMetadataManager(preprocessed_dir, schema=schema)
+    domain_names = mm.detected_domain_names
     print(f"[Stage 1] {mm.num_docs:,} docs across {mm.num_shards} shards")
     domain_labels = mm.domain_labels
     quality_scores = mm.quality_scores
@@ -146,7 +144,7 @@ def main():
     print(f"  Domains: {optimal_params.num_domains}, "
           f"Criteria: {optimal_params.num_criteria}")
     for m, sc in enumerate(optimal_params.sampling_configs):
-        name = DOMAIN_NAMES[m] if m < len(DOMAIN_NAMES) else f"D{m}"
+        name = domain_names[m] if m < len(domain_names) else f"D{m}"
         print(f"    [{m}] {name}: λ={sc.lambda_:.2f}, ω={sc.omega:.6f}, "
               f"η={sc.eta:.4f}, ε={sc.epsilon:.6f}")
     stage_times["stage2_params"] = time.time() - _t
@@ -222,7 +220,7 @@ def main():
     for m in range(num_domains):
         if orig_dist[m] > 0:
             ratio = sel_dist[m] / orig_dist[m]
-            name = DOMAIN_NAMES[m] if m < len(DOMAIN_NAMES) else f"D{m}"
+            name = domain_names[m] if m < len(domain_names) else f"D{m}"
             print(f"    [{m}] {name:>10s}: {orig_dist[m]:>7,} → {sel_dist[m]:>7,}  ({ratio:.2f}x)")
 
     # ── Stage 7: Save outputs ────────────────────────────────
@@ -237,9 +235,9 @@ def main():
 
     sampled_path = os.path.join(output_dir, "sampled_dataset.parquet")
     pd.DataFrame({
-        "text": sampled_texts,
+        schema.text_col: sampled_texts,
         "doc_id": selected_indices,
-        "domain": sel_domain,
+        schema.domain_col: sel_domain,
         "quality_rank": sel_rank,
         "sampling_weight": sel_weights,
         "sampling_value": sel_sv,
@@ -253,7 +251,7 @@ def main():
     summary = {
         "params_file": args.params_file,
         "data_dir": args.data_dir,
-        "preprocessed_dir": metadata_dir,
+        "preprocessed_dir": preprocessed_dir,
         "seed": args.seed,
         "target_tokens_billions": args.target_tokens,
         "num_original_docs": n_docs,
@@ -263,7 +261,7 @@ def main():
         "estimated_tokens": total_tokens_est,
         "estimated_tokens_billions": round(total_tokens_est / 1e9, 3),
         "domain_distribution": {
-            DOMAIN_NAMES[m] if m < len(DOMAIN_NAMES) else f"D{m}": {
+            domain_names[m] if m < len(domain_names) else f"D{m}": {
                 "original": int(orig_dist[m]),
                 "selected": int(sel_dist[m]),
                 "ratio": round(sel_dist[m] / orig_dist[m], 4) if orig_dist[m] > 0 else 0,

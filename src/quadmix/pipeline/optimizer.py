@@ -16,6 +16,7 @@ import numpy as np
 import numpy.typing as npt
 from quadmix.core.types import ParameterSet, QuaDMixConfig, ProxyResult
 from quadmix.pipeline.param_sampler import ParameterSampler
+from quadmix.utils.concurrency import ConcurrencyConfig
 
 
 def _train_single_task_cv_fold(
@@ -441,6 +442,8 @@ class QuaDMixOptimizer:
         regression_params: Optional[Dict[str, Any]] = None,
     ):
         self.config = config
+        self._concurrency = ConcurrencyConfig()
+        self._concurrency.apply_env_vars()
         self.regression_params = regression_params or {}
         self._regressor: Optional[RegressionModel] = None
         self._proxy_results: List[ProxyResult] = []
@@ -609,7 +612,8 @@ class QuaDMixOptimizer:
             print(f"[QuaDMixOptimizer] Training {len(valid_tasks)} per-task models (single split, parallel)...")
         
         # Parallel training across tasks
-        n_jobs = min(os.cpu_count() or 4, len(valid_tasks))
+        n_jobs = min(self._concurrency.max_compute_workers, len(valid_tasks))
+        regression_params_nested = {**self.regression_params, "n_jobs": self._concurrency.model_n_jobs_nested}
         results = Parallel(n_jobs=n_jobs, prefer="processes")(
             delayed(_train_single_task)(
                 task=task,
@@ -619,7 +623,7 @@ class QuaDMixOptimizer:
                 val_idx=val_idx,
                 folds=folds,
                 n_folds=n_folds,
-                regression_params=self.regression_params,
+                regression_params=regression_params_nested,
                 num_domains=self.config.num_domains,
                 num_quality_criteria=self.config.num_quality_criteria,
             )
@@ -826,8 +830,7 @@ class QuaDMixOptimizer:
 
         print(f"[QuaDMixOptimizer] Bootstrap: {n_bootstrap} iterations (parallel, full resampling, OOB evaluation)...")
         from joblib import Parallel, delayed
-        import os
-        n_jobs = min(os.cpu_count() or 4, n_bootstrap)
+        n_jobs = min(self._concurrency.max_compute_workers, n_bootstrap)
         seeds = np.random.default_rng(42).integers(0, 2**31, size=n_bootstrap).tolist()
 
         results = Parallel(n_jobs=n_jobs, prefer="processes")(
@@ -838,7 +841,7 @@ class QuaDMixOptimizer:
                 n_features=n_features,
                 num_domains=self.config.num_domains,
                 num_criteria=self.config.num_quality_criteria,
-                regression_params=self.regression_params,
+                regression_params=regression_params_nested,
             )
             for i in range(n_bootstrap)
         )

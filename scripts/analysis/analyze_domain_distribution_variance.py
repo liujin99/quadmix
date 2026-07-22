@@ -7,6 +7,7 @@ how much (or how little) the domain mix varies across experiments.
 
 Usage:
     python scripts/analysis/analyze_domain_distribution_variance.py \
+        --schema configs/schema_essential_web.yaml \
         --exp-dir result/quadmix_20250620_120000/proxy_experiments \
         --preprocessed-dir /path/to/preprocessed \
         --output-dir result/analysis
@@ -25,9 +26,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
-from quadmix.constants import DOMAIN_NAMES, DOMAIN_SHORT_NAMES
-
-DOMAIN_SHORT = DOMAIN_SHORT_NAMES
+from quadmix.data.dataset_schema import DatasetSchema
 
 COLOR_ORIG = "#5B9BD5"
 COLOR_OPT = "#ED7D31"
@@ -57,17 +56,20 @@ def _save_fig(fig, output_dir, filename):
     print(f"  [Figure] Saved: {path}")
 
 
-def load_domain_labels(preprocessed_dir: str) -> np.ndarray:
+def load_domain_labels(preprocessed_dir: str, domain_col: str) -> np.ndarray:
     print(f"[Load] Reading domain labels from {preprocessed_dir}")
     shard_files = sorted(Path(preprocessed_dir).glob("preprocessed_*.parquet"))
     if not shard_files:
-        print(f"ERROR: No preprocessed_*.parquet found in {preprocessed_dir}")
-        sys.exit(1)
+        all_files = sorted(Path(preprocessed_dir).glob("*.parquet"))
+        if not all_files:
+            print(f"ERROR: No .parquet files found in {preprocessed_dir}")
+            sys.exit(1)
+        shard_files = all_files
 
     domain_chunks = []
     for sf in shard_files:
-        df = pd.read_parquet(sf, columns=["domain"])
-        domain_chunks.append(df["domain"].to_numpy(dtype=np.int64))
+        df = pd.read_parquet(sf, columns=[domain_col])
+        domain_chunks.append(df[domain_col].to_numpy(dtype=np.int64))
 
     labels = np.concatenate(domain_chunks)
     print(f"[Load] {len(labels):,} domain labels from {len(shard_files)} shards")
@@ -125,14 +127,14 @@ def compute_domain_distributions(results, domain_labels, num_domains):
     return dist_matrix, count_matrix, val_losses, doc_counts
 
 
-def plot_boxplot_domain_ratios(dist_matrix, output_dir):
+def plot_boxplot_domain_ratios(dist_matrix, domain_short, output_dir):
     fig, ax = plt.subplots(figsize=(12, 6))
     data = [dist_matrix[:, d] * 100 for d in range(dist_matrix.shape[1])]
     bp = ax.boxplot(data, patch_artist=True, widths=0.6)
     for i, patch in enumerate(bp["boxes"]):
         patch.set_facecolor(PALETTE[i % len(PALETTE)])
         patch.set_alpha(0.7)
-    ax.set_xticklabels(DOMAIN_SHORT[:dist_matrix.shape[1]], rotation=45, ha="right")
+    ax.set_xticklabels([domain_short[d] if d < len(domain_short) else f"D{d}" for d in range(dist_matrix.shape[1])], rotation=45, ha="right")
     ax.set_ylabel("Domain Ratio (%)")
     ax.set_title("Domain Distribution Across All Experiments (Boxplot)")
     ax.grid(axis="y", alpha=0.3)
@@ -140,7 +142,7 @@ def plot_boxplot_domain_ratios(dist_matrix, output_dir):
     stats_text = []
     for d in range(dist_matrix.shape[1]):
         col = dist_matrix[:, d] * 100
-        stats_text.append(f"{DOMAIN_SHORT[d]}: {col.mean():.1f}% ± {col.std():.2f}%")
+        stats_text.append(f"{domain_short[d] if d < len(domain_short) else f'D{d}'}: {col.mean():.1f}% ± {col.std():.2f}%")
     ax.text(1.02, 0.98, "\n".join(stats_text), transform=ax.transAxes,
             fontsize=8, verticalalignment="top", fontfamily="monospace",
             bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5))
@@ -148,7 +150,7 @@ def plot_boxplot_domain_ratios(dist_matrix, output_dir):
     _save_fig(fig, output_dir, "fig_domain_boxplot.png")
 
 
-def plot_heatmap_top_experiments(dist_matrix, val_losses, output_dir):
+def plot_heatmap_top_experiments(dist_matrix, val_losses, domain_short, output_dir):
     sorted_idx = np.argsort(val_losses)
     n_show = min(50, len(sorted_idx))
     top_idx = sorted_idx[:n_show]
@@ -160,7 +162,7 @@ def plot_heatmap_top_experiments(dist_matrix, val_losses, output_dir):
     fig, ax = plt.subplots(figsize=(12, 10))
     im = ax.imshow(heatmap_data, aspect="auto", cmap="YlOrRd", interpolation="nearest")
     ax.set_xticks(range(heatmap_data.shape[1]))
-    ax.set_xticklabels(DOMAIN_SHORT[:heatmap_data.shape[1]], rotation=45, ha="right")
+    ax.set_xticklabels([domain_short[d] if d < len(domain_short) else f"D{d}" for d in range(heatmap_data.shape[1])], rotation=45, ha="right")
     ax.set_xlabel("Domain")
     ax.set_ylabel("Experiment (sorted by val_loss)")
     ax.set_title(f"Domain Distribution Heatmap (Top {n_show} best + Bottom {n_show} worst)")
@@ -175,7 +177,7 @@ def plot_heatmap_top_experiments(dist_matrix, val_losses, output_dir):
     _save_fig(fig, output_dir, "fig_domain_heatmap.png")
 
 
-def plot_std_across_domains(dist_matrix, output_dir):
+def plot_std_across_domains(dist_matrix, domain_short, output_dir):
     stds = dist_matrix.std(axis=0) * 100
     means = dist_matrix.mean(axis=0) * 100
     cv = stds / np.where(means > 0, means, 1) * 100
@@ -183,8 +185,9 @@ def plot_std_across_domains(dist_matrix, output_dir):
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
 
     bars1 = ax1.bar(range(len(stds)), stds, color=PALETTE[:len(stds)], alpha=0.8)
+    ds = [domain_short[d] if d < len(domain_short) else f"D{d}" for d in range(len(stds))]
     ax1.set_xticks(range(len(stds)))
-    ax1.set_xticklabels(DOMAIN_SHORT[:len(stds)], rotation=45, ha="right")
+    ax1.set_xticklabels(ds, rotation=45, ha="right")
     ax1.set_ylabel("Std Dev (%)")
     ax1.set_title("Domain Ratio Std Dev Across Experiments")
     ax1.grid(axis="y", alpha=0.3)
@@ -193,8 +196,9 @@ def plot_std_across_domains(dist_matrix, output_dir):
                  f"{val:.3f}", ha="center", va="bottom", fontsize=8)
 
     bars2 = ax2.bar(range(len(cv)), cv, color=PALETTE[:len(cv)], alpha=0.8)
+    dc = [domain_short[d] if d < len(domain_short) else f"D{d}" for d in range(len(cv))]
     ax2.set_xticks(range(len(cv)))
-    ax2.set_xticklabels(DOMAIN_SHORT[:len(cv)], rotation=45, ha="right")
+    ax2.set_xticklabels(dc, rotation=45, ha="right")
     ax2.set_ylabel("CV (%)")
     ax2.set_title("Coefficient of Variation (Std/Mean × 100%)")
     ax2.grid(axis="y", alpha=0.3)
@@ -248,7 +252,7 @@ def plot_doc_count_distribution(doc_counts, output_dir):
     _save_fig(fig, output_dir, "fig_doc_count_distribution.png")
 
 
-def plot_sampling_rate_per_domain(count_matrix, dist_matrix, output_dir):
+def plot_sampling_rate_per_domain(count_matrix, dist_matrix, domain_short, output_dir):
     mean_counts = count_matrix.mean(axis=0)
     mean_ratios = dist_matrix.mean(axis=0)
 
@@ -262,7 +266,7 @@ def plot_sampling_rate_per_domain(count_matrix, dist_matrix, output_dir):
                    color=COLOR_ORIG, alpha=0.4, hatch="//")
 
     ax.set_xticks(x)
-    ax.set_xticklabels(DOMAIN_SHORT[:len(x)], rotation=45, ha="right")
+    ax.set_xticklabels([domain_short[d] if d < len(domain_short) else f"D{d}" for d in x], rotation=45, ha="right")
     ax.set_ylabel("Ratio (%)")
     ax.set_title("Mean Selected Domain Ratio vs Original Domain Ratio")
     ax.legend()
@@ -271,14 +275,14 @@ def plot_sampling_rate_per_domain(count_matrix, dist_matrix, output_dir):
     _save_fig(fig, output_dir, "fig_selected_vs_original_ratio.png")
 
 
-def plot_pairwise_correlation(dist_matrix, output_dir):
+def plot_pairwise_correlation(dist_matrix, domain_short, output_dir):
     fig, ax = plt.subplots(figsize=(10, 8))
     corr = np.corrcoef(dist_matrix.T)
     im = ax.imshow(corr, cmap="RdBu_r", vmin=-1, vmax=1)
     ax.set_xticks(range(corr.shape[1]))
     ax.set_yticks(range(corr.shape[0]))
-    ax.set_xticklabels(DOMAIN_SHORT[:corr.shape[1]], rotation=45, ha="right")
-    ax.set_yticklabels(DOMAIN_SHORT[:corr.shape[0]])
+    ax.set_xticklabels([domain_short[d] if d < len(domain_short) else f"D{d}" for d in range(corr.shape[1])], rotation=45, ha="right")
+    ax.set_yticklabels([domain_short[d] if d < len(domain_short) else f"D{d}" for d in range(corr.shape[0])])
     ax.set_title("Pairwise Correlation of Domain Ratios Across Experiments")
 
     for i in range(corr.shape[0]):
@@ -290,7 +294,7 @@ def plot_pairwise_correlation(dist_matrix, output_dir):
     _save_fig(fig, output_dir, "fig_pairwise_correlation.png")
 
 
-def print_pca_analysis(dist_matrix):
+def print_pca_analysis(dist_matrix, domain_short):
     from sklearn.decomposition import PCA
 
     print("\n=== PCA Analysis ===")
@@ -309,12 +313,12 @@ def print_pca_analysis(dist_matrix):
         loadings = pca.components_[pc_idx]
         sorted_idx = np.argsort(np.abs(loadings))[::-1]
         for d in sorted_idx[:5]:
-            name = DOMAIN_SHORT[d] if d < len(DOMAIN_SHORT) else f"D{d}"
+            name = domain_short[d] if d < len(domain_short) else f"D{d}"
             direction = "+" if loadings[d] > 0 else "-"
             print(f"    {direction} {name:<15} {loadings[d]:+.3f}")
 
 
-def print_correlation_summary(dist_matrix):
+def print_correlation_summary(dist_matrix, domain_short):
     print("\n=== Pairwise Correlation Summary ===")
     corr = np.corrcoef(dist_matrix.T)
 
@@ -326,19 +330,19 @@ def print_correlation_summary(dist_matrix):
     pairs.sort(key=lambda x: x[2])
 
     for i, j, c in pairs[:10]:
-        name_i = DOMAIN_SHORT[i] if i < len(DOMAIN_SHORT) else f"D{i}"
-        name_j = DOMAIN_SHORT[j] if j < len(DOMAIN_SHORT) else f"D{j}"
+        name_i = domain_short[i] if i < len(domain_short) else f"D{i}"
+        name_j = domain_short[j] if j < len(domain_short) else f"D{j}"
         print(f"  {name_i:<15} vs {name_j:<15} : {c:+.3f}")
 
     print("\nStrongest positive correlations (domains that move together):")
     pairs.sort(key=lambda x: -x[2])
     for i, j, c in pairs[:10]:
-        name_i = DOMAIN_SHORT[i] if i < len(DOMAIN_SHORT) else f"D{i}"
-        name_j = DOMAIN_SHORT[j] if j < len(DOMAIN_SHORT) else f"D{j}"
+        name_i = domain_short[i] if i < len(domain_short) else f"D{i}"
+        name_j = domain_short[j] if j < len(domain_short) else f"D{j}"
         print(f"  {name_i:<15} vs {name_j:<15} : {c:+.3f}")
 
 
-def print_distribution_modes(dist_matrix, val_losses):
+def print_distribution_modes(dist_matrix, val_losses, domain_short):
     print("\n=== Distribution Mode Analysis ===")
 
     sorted_idx = np.argsort(val_losses)
@@ -349,7 +353,7 @@ def print_distribution_modes(dist_matrix, val_losses):
         loss = val_losses[idx]
         dist = dist_matrix[idx] * 100
         top3 = np.argsort(dist)[::-1][:3]
-        top3_str = ", ".join([f"{DOMAIN_SHORT[d]}:{dist[d]:.1f}%" for d in top3])
+        top3_str = ", ".join([f"{domain_short[d] if d < len(domain_short) else f'D{d}'}:{dist[d]:.1f}%" for d in top3])
         print(f"  #{rank+1} loss={loss:.4f} | Top-3: {top3_str}")
 
     print("\nBottom 10 worst experiments (highest val_loss):")
@@ -357,11 +361,11 @@ def print_distribution_modes(dist_matrix, val_losses):
         loss = val_losses[idx]
         dist = dist_matrix[idx] * 100
         top3 = np.argsort(dist)[::-1][:3]
-        top3_str = ", ".join([f"{DOMAIN_SHORT[d]}:{dist[d]:.1f}%" for d in top3])
+        top3_str = ", ".join([f"{domain_short[d] if d < len(domain_short) else f'D{d}'}:{dist[d]:.1f}%" for d in top3])
         print(f"  #{rank+1} loss={loss:.4f} | Top-3: {top3_str}")
 
 
-def save_summary_json(dist_matrix, count_matrix, val_losses, doc_counts, output_dir):
+def save_summary_json(dist_matrix, count_matrix, val_losses, doc_counts, domain_short, output_dir):
     num_domains = dist_matrix.shape[1]
     summary = {
         "num_experiments": len(val_losses),
@@ -386,7 +390,7 @@ def save_summary_json(dist_matrix, count_matrix, val_losses, doc_counts, output_
 
     for d in range(num_domains):
         col = dist_matrix[:, d] * 100
-        name = DOMAIN_SHORT[d] if d < len(DOMAIN_SHORT) else f"D{d}"
+        name = domain_short[d] if d < len(domain_short) else f"D{d}"
         summary["domain_distribution"][name] = {
             "mean_percent": float(col.mean()),
             "std_percent": float(col.std()),
@@ -403,10 +407,17 @@ def save_summary_json(dist_matrix, count_matrix, val_losses, doc_counts, output_
 
 def main():
     parser = argparse.ArgumentParser(description="Analyze domain distribution variance across proxy experiments")
+    parser.add_argument("--schema", type=str, required=True,
+                       help="YAML dataset schema config file (必填)")
     parser.add_argument("--exp-dir", required=True, help="Path to proxy_experiments directory")
     parser.add_argument("--preprocessed-dir", required=True, help="Path to preprocessed parquet shards")
     parser.add_argument("--output-dir", default=None, help="Output directory (default: <exp-dir>/../analysis)")
     args = parser.parse_args()
+
+    schema = DatasetSchema.from_yaml(args.schema)
+    domain_names = schema.domain_names or [f"D{i}" for i in range(100)]
+    domain_short = [n.replace("_and_", " & ")[:12] if "_" in n else n[:12] for n in domain_names]
+    domain_col = schema.domain_col
 
     if args.output_dir is None:
         args.output_dir = os.path.dirname(args.exp_dir)
@@ -414,8 +425,11 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     _setup_style()
 
-    domain_labels = load_domain_labels(args.preprocessed_dir)
+    domain_labels = load_domain_labels(args.preprocessed_dir, domain_col)
     num_domains = int(domain_labels.max()) + 1
+    if num_domains > len(domain_names):
+        domain_names = list(domain_names) + [f"D{i}" for i in range(len(domain_names), num_domains)]
+        domain_short = [n[:12] for n in domain_names]
     print(f"[Info] {num_domains} domains detected")
 
     results = load_experiment_results(args.exp_dir)
@@ -426,7 +440,7 @@ def main():
     print("\n=== Domain Distribution Summary ===")
     for d in range(num_domains):
         col = dist_matrix[:, d] * 100
-        name = DOMAIN_SHORT[d] if d < len(DOMAIN_SHORT) else f"D{d}"
+        name = domain_short[d] if d < len(domain_short) else f"D{d}"
         print(f"  {name:<15} {col.mean():6.2f}% ± {col.std():.3f}%  "
               f"[{col.min():.2f}%, {col.max():.2f}%]  CV={col.std()/col.mean()*100:.1f}%")
 
@@ -434,20 +448,20 @@ def main():
           f"[{doc_counts.min():,}, {doc_counts.max():,}]")
     print(f"  Doc count CV: {doc_counts.std()/doc_counts.mean()*100:.1f}%")
 
-    print_pca_analysis(dist_matrix)
-    print_correlation_summary(dist_matrix)
-    print_distribution_modes(dist_matrix, val_losses)
+    print_pca_analysis(dist_matrix, domain_short)
+    print_correlation_summary(dist_matrix, domain_short)
+    print_distribution_modes(dist_matrix, val_losses, domain_short)
 
     print("\n=== Generating Figures ===")
-    plot_boxplot_domain_ratios(dist_matrix, args.output_dir)
-    plot_heatmap_top_experiments(dist_matrix, val_losses, args.output_dir)
-    plot_std_across_domains(dist_matrix, args.output_dir)
+    plot_boxplot_domain_ratios(dist_matrix, domain_short, args.output_dir)
+    plot_heatmap_top_experiments(dist_matrix, val_losses, domain_short, args.output_dir)
+    plot_std_across_domains(dist_matrix, domain_short, args.output_dir)
     plot_variance_vs_val_loss(dist_matrix, val_losses, args.output_dir)
     plot_doc_count_distribution(doc_counts, args.output_dir)
-    plot_sampling_rate_per_domain(count_matrix, dist_matrix, args.output_dir)
-    plot_pairwise_correlation(dist_matrix, args.output_dir)
+    plot_sampling_rate_per_domain(count_matrix, dist_matrix, domain_short, args.output_dir)
+    plot_pairwise_correlation(dist_matrix, domain_short, args.output_dir)
 
-    save_summary_json(dist_matrix, count_matrix, val_losses, doc_counts, args.output_dir)
+    save_summary_json(dist_matrix, count_matrix, val_losses, doc_counts, domain_short, args.output_dir)
     print("\nDone.")
 
 

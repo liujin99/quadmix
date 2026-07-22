@@ -5,13 +5,18 @@ Standalone functions used by EssentialWebProxyRunner for multi-NPU parallel trai
 
 import os
 import time
+import gc
+import warnings
 import multiprocessing as mp
 from typing import Dict, List, Optional, Tuple
+
+warnings.filterwarnings("ignore", message=".*owner does not match.*")
 
 import numpy as np
 import torch
 
 from quadmix.utils.perf_timer import PerfTimer
+from quadmix.utils.concurrency import ConcurrencyConfig
 from quadmix.pipeline.shared_memory import shared_to_ndarray
 
 
@@ -41,13 +46,26 @@ def _io_read_shard(
         sid: int,
         shard_path: str,
         miss_rows: List[int],
+        text_col: str = "text",
+        row_in_shard_col: str = "row_in_shard",
+        has_row_in_shard: bool = True,
 ) -> Tuple[int, np.ndarray, List[str], float]:
     """Stage 1 worker: read one shard's parquet, return (sid, rows, texts, io_time)."""
+    import pandas as pd
     io_t0 = time.time()
-    from quadmix.data.metadata_manager import read_parquet_text_rows
-    parsed_rows, texts = read_parquet_text_rows(
-        shard_path, np.asarray(miss_rows, dtype=np.int64)
-    )
+    if has_row_in_shard:
+        df_shard = pd.read_parquet(
+            shard_path,
+            columns=[row_in_shard_col, text_col],
+            filters=[(row_in_shard_col, "in", miss_rows)],
+        )
+        df_shard = df_shard.sort_values(row_in_shard_col)
+        texts = df_shard[text_col].astype(str).tolist()
+        parsed_rows = df_shard[row_in_shard_col].to_numpy(dtype=np.int64)
+    else:
+        df_shard = pd.read_parquet(shard_path, columns=[text_col])
+        texts = df_shard[text_col].astype(str).tolist()
+        parsed_rows = np.arange(len(texts), dtype=np.int64)
     io_time = time.time() - io_t0
     return (sid, parsed_rows, texts, io_time)
 
@@ -59,6 +77,9 @@ def _process_shard_full(
         tokenizer_path: str,
         block_size: int,
         threads_per_worker: int = 4,
+        text_col: str = "text",
+        row_in_shard_col: str = "row_in_shard",
+        has_row_in_shard: bool = True,
 ) -> Tuple[int, np.ndarray, np.ndarray, float, float, float]:
     """Process one shard: IO + tokenize in sequence.
 
@@ -68,10 +89,20 @@ def _process_shard_full(
     Returns (sid, parsed_rows, tokens_array, io_time, tok_time, total_time).
     """
     io_t0 = time.time()
-    from quadmix.data.metadata_manager import read_parquet_text_rows
-    parsed_rows, texts = read_parquet_text_rows(
-        shard_path, np.asarray(miss_rows, dtype=np.int64)
-    )
+    import pandas as pd
+    if has_row_in_shard:
+        df_shard = pd.read_parquet(
+            shard_path,
+            columns=[row_in_shard_col, text_col],
+            filters=[(row_in_shard_col, "in", miss_rows)],
+        )
+        df_shard = df_shard.sort_values(row_in_shard_col)
+        texts = df_shard[text_col].astype(str).tolist()
+        parsed_rows = df_shard[row_in_shard_col].to_numpy(dtype=np.int64)
+    else:
+        df_shard = pd.read_parquet(shard_path, columns=[text_col])
+        texts = df_shard[text_col].astype(str).tolist()
+        parsed_rows = np.arange(len(texts), dtype=np.int64)
     io_time = time.time() - io_t0
 
     tok_t0 = time.time()
@@ -86,6 +117,9 @@ def _tokenize_shard_parallel(
         shard_tasks: List[Tuple[int, str, List[int]]],
         tokenizer_path: str,
         block_size: int,
+        text_col: str = "text",
+        row_in_shard_col: Optional[str] = "row_in_shard",
+        has_row_in_shard: bool = True,
 ) -> List[Tuple[int, np.ndarray, np.ndarray, float, float, float]]:
     """Parallel tokenize using ProcessPoolExecutor to bypass GIL.
 
@@ -101,21 +135,19 @@ def _tokenize_shard_parallel(
     from concurrent.futures import ProcessPoolExecutor, as_completed
     import threading
 
+    cfg = ConcurrencyConfig()
     n_shards = len(shard_tasks)
-    num_cpus = mp.cpu_count() or 8
 
-    threads_per_worker = max(
-        1, int(os.environ.get("TOKENIZE_THREADS_PER_WORKER", "4"))
-    )
-    os.environ["RAYON_NUM_THREADS"] = str(threads_per_worker)
+    threads_per_worker = cfg.blas_threads_for(max(1, cfg.max_io_workers // 4))
+    os.environ["RAYON_NUM_THREADS"] = str(4)
     os.environ["OMP_NUM_THREADS"] = str(threads_per_worker)
+    os.environ["OPENBLAS_NUM_THREADS"] = str(threads_per_worker)
 
     env_workers = int(os.environ.get("TOKENIZE_WORKERS", "0"))
     if env_workers >= 1:
         n_workers = env_workers
     else:
-        n_workers = min(48, num_cpus)
-        n_workers = max(4, n_workers)
+        n_workers = min(cfg.max_io_workers, n_shards)
 
     print(f"  [ParallelTokenize] {n_shards} shards, {n_workers} processes "
           f"× {threads_per_worker} Rust threads = {n_workers * threads_per_worker} total threads")
@@ -148,6 +180,7 @@ def _tokenize_shard_parallel(
                     _worker_process_shard,
                     sid, shard_path, miss_rows,
                     tokenizer_path, block_size, threads_per_worker,
+                    text_col, row_in_shard_col if row_in_shard_col is not None else "row_in_shard", has_row_in_shard,
                 )
                 fut.add_done_callback(on_done)
                 futs.append(fut)
@@ -280,15 +313,19 @@ def _worker_dynamic_loop(
                 per_shard_info=per_shard_info,
                 shard_starts=shard_starts_arr,
                 preprocessed_dir=config_dict.get("preprocessed_dir", ""),
+                schema=config_dict.get("schema"),
+                num_domains=config_dict.get("num_domains"),
+                num_quality_criteria=config_dict.get("num_quality_criteria"),
+                detected_domain_names=config_dict.get("detected_domain_names"),
+                detected_quality_names=config_dict.get("detected_quality_names"),
+                quality_directions=config_dict.get("quality_directions"),
+                domain_label_map=config_dict.get("domain_label_map"),
             )
             print(f"[Worker {worker_id}] Mapped {len(domain_labels):,} docs from shared memory "
                   f"({time.time() - t0:.1f}s vs ~60s disk reload)")
         else:
             if config_dict.get("preprocessed_dir"):
-                mgr = ShardMetadataManager(
-                    config_dict["preprocessed_dir"],
-                    input_format=config_dict.get("metadata_input_format", "preprocessed"),
-                )
+                mgr = ShardMetadataManager(config_dict["preprocessed_dir"], schema=config_dict.get("schema"))
             else:
                 mgr = None
 
@@ -313,6 +350,9 @@ def _worker_dynamic_loop(
             rank_ref_size=config_dict["rank_ref_size"],
             token_cache_dir=config_dict["token_cache_dir"],
             checkpoint_interval=config_dict.get("checkpoint_interval", 1000),
+            domain_names=config_dict.get("domain_names"),
+            quality_names=config_dict.get("quality_names"),
+            quality_directions=config_dict.get("quality_directions"),
         )
 
         completed = 0
@@ -334,7 +374,6 @@ def _worker_dynamic_loop(
             result_queue.put(r)
             completed += 1
 
-            import gc
             gc.collect()
             if device_type == "npu":
                 torch.npu.empty_cache()
@@ -383,7 +422,6 @@ def _worker_dynamic_loop(
         except:
             pass
         try:
-            import torch
             if device_type == "npu":
                 torch.npu.empty_cache()
         except:
@@ -408,7 +446,7 @@ def _reval_worker(
     import sys
     try:
         from quadmix.core.proxy_model import ProxyModel, ProxyConfig
-        from quadmix.pipeline.loss_utils import chunked_loss_per_token_from_hidden
+        from quadmix.pipeline.loss_utils import chunked_loss_per_token_from_hidden, compute_val_batch_size
 
         device = torch.device(device_str)
 
@@ -435,7 +473,10 @@ def _reval_worker(
 
             model.eval()
             with torch.no_grad():
-                val_bs = min(8, val_n)
+                val_bs, val_chunk_size = compute_val_batch_size(
+                    device, model.config.vocab_size, block_size - 1, max_val_bs=128,
+                )
+                val_bs = min(val_bs, val_n, 8)
                 per_doc_losses = []
                 for start in range(0, len(val_tokens), val_bs):
                     end = min(start + val_bs, len(val_tokens))
@@ -444,7 +485,7 @@ def _reval_worker(
                     mask_tgt = val_mask[start:end, 1:]
                     hidden = model(ids_in, return_hidden=True)
                     loss = chunked_loss_per_token_from_hidden(
-                        model, hidden, ids_tgt, chunk_size=2048,
+                        model, hidden, ids_tgt, chunk_size=val_chunk_size,
                     )
                     assistant_count = mask_tgt.float().sum(dim=1).clamp(min=1)
                     per_doc = (loss * mask_tgt.float()).sum(dim=1) / assistant_count
