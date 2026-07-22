@@ -399,8 +399,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         cache_path = self._get_shard_token_path(sid)
         if not os.path.exists(cache_path):
             return set()
-        data = np.load(cache_path)
-        rows = set(data['rows'].tolist())
+        with np.load(cache_path) as data:
+            rows = set(data['rows'].tolist())
         return rows
 
     def _cache_add_rows(self, sid: int, new_rows: np.ndarray, new_tokens: torch.Tensor):
@@ -424,10 +424,9 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
             try:
                 if os.path.exists(cache_path):
-                    old = np.load(cache_path)
-                    old_rows = old['rows']
-                    old_tokens = old['tokens']
-                    del old
+                    with np.load(cache_path) as old:
+                        old_rows = old['rows'].copy()
+                        old_tokens = old['tokens'].copy()
                 else:
                     old_rows = np.array([], dtype=np.int64)
                     old_tokens = np.zeros((0, new_np.shape[1]), dtype=np.int32)
@@ -560,13 +559,13 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
             if hit_in_disk:
                 cache_path = self._get_shard_token_path(sid)
-                data = np.load(cache_path)
-                disk_rows = data['rows']
-                disk_tokens = data['tokens']
+                with np.load(cache_path) as data:
+                    disk_rows = data['rows']
+                    disk_tokens = data['tokens']
 
-                row_to_pos = {int(r): i for i, r in enumerate(disk_rows)}
-                positions = np.array([row_to_pos[int(r)] for r in hit_in_disk], dtype=np.int64)
-                hit_tokens = disk_tokens[positions]
+                    row_to_pos = {int(r): i for i, r in enumerate(disk_rows)}
+                    positions = np.array([row_to_pos[int(r)] for r in hit_in_disk], dtype=np.int64)
+                    hit_tokens = disk_tokens[positions]
 
                 self._memory_cache_add_rows(sid, np.array(hit_in_disk, dtype=np.int64), hit_tokens)
 
@@ -709,27 +708,25 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             row_col_int = [int(v) for v in row_col_vals]
 
             if os.path.exists(cache_path):
-                data = np.load(cache_path)
-                token_data = data['tokens']
-                row_index = data['rows']
-                row_to_pos = {int(r): i for i, r in enumerate(row_index)}
+                with np.load(cache_path) as data:
+                    token_data = data['tokens']
+                    row_index = data['rows']
+                    row_to_pos = {int(r): i for i, r in enumerate(row_index)}
 
-                hit_rcv = [v for v in row_col_int if v in row_to_pos]
-                miss_rcv = [v for v in row_col_int if v not in row_to_pos]
+                    hit_rcv = [v for v in row_col_int if v in row_to_pos]
+                    miss_rcv = [v for v in row_col_int if v not in row_to_pos]
 
-                hit_tokens = None
-                miss_tokens = None
+                    hit_tokens = None
+                    miss_tokens = None
 
-                if hit_rcv:
-                    positions = np.array(
-                        [row_to_pos[v] for v in hit_rcv], dtype=np.int64
-                    )
-                    hit_tokens = torch.from_numpy(
-                        token_data[positions].astype(np.int64)
-                    )
-                    self._cache_hits += len(hit_rcv)
-
-                del data, token_data, row_index
+                    if hit_rcv:
+                        positions = np.array(
+                            [row_to_pos[v] for v in hit_rcv], dtype=np.int64
+                        )
+                        hit_tokens = torch.from_numpy(
+                            token_data[positions].astype(np.int64).copy()
+                        )
+                        self._cache_hits += len(hit_rcv)
 
                 if miss_rcv:
                     self._cache_misses += len(miss_rcv)
@@ -2165,25 +2162,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                     if completed_count % 50 == 0 or completed_count == n_exp:
                         print(f"[Collector] {completed_count}/{n_exp} done ({elapsed:.0f}s, ETA: {eta:.0f}s)")
                 except thread_queue.Empty:
-                    if time.time() - last_progress_time > 60:
-                        all_dead = (len(worker_processes) > 0 and
-                                    all(not p.is_alive() for p in worker_processes))
-                        if all_dead:
-                            missing = [i for i in range(n_exp) if all_results[i] is None]
-                            print(f"[Collector] All workers dead; {completed_count}/{n_exp} results, "
-                                  f"{len(missing)} missing")
-                            for eid in missing:
-                                all_results[eid] = ProxyResult(
-                                    parameters=params_list[eid],
-                                    validation_loss=float('inf'),
-                                    metadata={"experiment_id": eid, "error": "worker_crash"}
-                                )
-                                completed_count += 1
-                            break
-                        alive_count = sum(1 for p in worker_processes if p.is_alive())
-                        print(f"[Collector] No progress for 60s; {alive_count}/{len(worker_processes)} workers alive, "
-                              f"{completed_count}/{n_exp} results")
-                        last_progress_time = time.time()
+                    pass
                 except Exception as e:
                     print(f"[Collector] Unexpected error: {e}")
 
