@@ -1233,7 +1233,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         val_tokens = self._val_token_ids[:val_n, :bs].to(device)
         val_mask = self._val_loss_mask[:val_n, :bs].to(device)
         with torch.no_grad():
-            val_bs = min(96, val_n)
+            val_bs = min(8, val_n)
             per_doc_losses = []
             for start in range(0, len(val_tokens), val_bs):
                 end = min(start + val_bs, len(val_tokens))
@@ -1905,6 +1905,25 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                             missing = [i for i in range(n_exp) if all_results[i] is None]
                             print(f"[Collector] Workers exited; {completed_count}/{n_exp} results, "
                                   f"{len(missing)} missing (exps: {missing})")
+                            for eid in missing:
+                                all_results[eid] = ProxyResult(
+                                    parameters=params_list[eid],
+                                    validation_loss=float('inf'),
+                                    metadata={"experiment_id": eid, "error": "worker_crash"}
+                                )
+                                completed_count += 1
+                            break
+                        continue
+                    eid = result.metadata.get("experiment_id", -1)
+                    if result.metadata.get("is_worker_crash"):
+                        worker_id = result.metadata.get("worker_id", "?")
+                        tb = result.metadata.get("traceback", "")
+                        print(f"\n[Collector] Worker {worker_id} CRASHED:\n{tb}", flush=True)
+                        alive_workers["count"] -= 1
+                        if alive_workers["count"] <= 0 and completed_count < n_exp:
+                            missing = [i for i in range(n_exp) if all_results[i] is None]
+                            print(f"[Collector] All workers crashed; {completed_count}/{n_exp} results, "
+                                  f"{len(missing)} missing")
                             for eid in missing:
                                 all_results[eid] = ProxyResult(
                                     parameters=params_list[eid],

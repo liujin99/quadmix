@@ -358,16 +358,34 @@ def _worker_dynamic_loop(
 
     except Exception as top_err:
         import sys, traceback
+        from quadmix.core.types import ProxyResult, ParameterSet
         err_path = f"/tmp/worker_{worker_id}_error.log"
+        tb_str = traceback.format_exc()
         try:
             with open(err_path, "w") as ef:
                 ef.write(f"[Worker {worker_id}] CRASH: {top_err}\n")
-                ef.write(traceback.format_exc())
+                ef.write(tb_str)
             print(f"[Worker {worker_id}] ERROR -> {err_path}", flush=True)
         except:
             pass
         try:
-            result_queue.put(None)
+            result_queue.put(ProxyResult(
+                parameters=ParameterSet(),
+                validation_loss=float('inf'),
+                metadata={
+                    "experiment_id": -1,
+                    "worker_id": worker_id,
+                    "error": str(top_err),
+                    "traceback": tb_str,
+                    "is_worker_crash": True,
+                },
+            ))
+        except:
+            pass
+        try:
+            import torch
+            if device_type == "npu":
+                torch.npu.empty_cache()
         except:
             pass
         sys.exit(1)
@@ -417,7 +435,7 @@ def _reval_worker(
 
             model.eval()
             with torch.no_grad():
-                val_bs = min(128, val_n)
+                val_bs = min(8, val_n)
                 per_doc_losses = []
                 for start in range(0, len(val_tokens), val_bs):
                     end = min(start + val_bs, len(val_tokens))
