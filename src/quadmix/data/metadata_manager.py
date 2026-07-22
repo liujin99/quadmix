@@ -94,8 +94,12 @@ def _read_shard_metadata_pyarrow(shard_path: str, schema: DatasetSchema) -> dict
         if len(unique_vals) > 0 and (unique_vals.min() != 0 or
             unique_vals.max() != len(unique_vals) - 1 or
             not np.all(unique_vals == np.arange(len(unique_vals)))):
-            remap = {int(v): i for i, v in enumerate(unique_vals)}
-            domain_arr = np.array([remap[v] for v in domain_arr], dtype=np.int64)
+            sort_idx = np.argsort(unique_vals)
+            sorted_vals = unique_vals[sort_idx]
+            positions = np.searchsorted(sorted_vals, domain_arr)
+            inv_order = np.empty_like(sort_idx)
+            inv_order[sort_idx] = np.arange(len(sort_idx))
+            domain_arr = inv_order[positions].astype(np.int64)
             cat_map = {str(v): i for i, v in enumerate(unique_vals)}
         else:
             cat_map = None
@@ -173,6 +177,13 @@ def _read_one_shard_texts(
     select_ratio = n_requested / max(shard_total_rows, 1)
 
     if row_col is None or is_row_col_sequential:
+        if row_col is None and n_requested < shard_total_rows * 0.05 and shard_total_rows > 1000:
+            import logging
+            logging.getLogger(__name__).warning(
+                f"Reading {shard_total_rows} rows from shard for only {n_requested} "
+                f"requested rows (ratio {n_requested/max(shard_total_rows,1):.2%}). "
+                f"Consider adding row_in_shard_col to schema for efficient filtering."
+            )
         table = pq.read_table(
             shard_path, columns=[text_col], use_threads=False
         )
@@ -417,6 +428,7 @@ class ShardMetadataManager:
 
             self._is_row_col_sequential = self._check_row_col_sequential()
             self._row_in_shard_col_sorted_cache = {}
+            self._row_in_shard_reverse_map_cache: Dict[int, dict] = {}
 
             unique_domains = np.unique(self._domain_labels)
             if self._schema.domain_names is not None:
@@ -522,6 +534,7 @@ class ShardMetadataManager:
             self._row_in_shard_cols[i] = data["row_in_shard_col"]
         self._is_row_col_sequential = self._check_row_col_sequential()
         self._row_in_shard_col_sorted_cache: Dict[int, bool] = {}
+        self._row_in_shard_reverse_map_cache: Dict[int, dict] = {}
 
         unique_domains = np.unique(self._domain_labels)
         if self._schema.domain_names is not None:
@@ -567,12 +580,14 @@ class ShardMetadataManager:
         try:
             row_in_shard_cols_concat = np.concatenate(row_col_list)
             row_in_shard_boundaries = np.array(row_col_boundaries, dtype=np.int64)
-            np.savez(cache_path,
+            tmp_npz = cache_path + ".tmp"
+            np.savez(tmp_npz,
                      domain_labels=self._domain_labels,
                      quality_scores=self._quality_scores,
                      doc_char_counts=self._doc_char_counts,
                      row_in_shard_cols_concat=row_in_shard_cols_concat,
                      row_in_shard_boundaries=row_in_shard_boundaries)
+            os.replace(tmp_npz, cache_path)
             schema_key = (
                 f"{self._schema.domain_col}"
                 f":{','.join(self._schema.quality_cols)}"
@@ -589,8 +604,10 @@ class ShardMetadataManager:
                 "domain_label_map": self._domain_cat_map,
                 "schema_key": schema_key,
             }
-            with open(shard_info_path, "w") as f:
+            tmp_json = shard_info_path + ".tmp"
+            with open(tmp_json, "w") as f:
                 json.dump(cache_meta, f)
+            os.replace(tmp_json, shard_info_path)
             cache_size = os.path.getsize(cache_path) / (1024 ** 3)
             print(f"[ShardMetadataManager] Saved metadata cache: {cache_path} "
                   f"({cache_size:.2f} GB)")
@@ -598,20 +615,16 @@ class ShardMetadataManager:
             print(f"[ShardMetadataManager] Failed to save cache: {e}")
 
     def _validate_first_shard(self) -> None:
-        """Validate schema against first shard's columns and dtypes."""
+        """Validate schema against first and last shard's columns and dtypes."""
         import pyarrow.parquet as pq
-        first_path = self._shard_files[0]
-        pf = pq.ParquetFile(first_path)
-        schema_arrow = pf.schema_arrow
-        columns = [f.name for f in schema_arrow]
-        dtypes = {}
-        import pandas as pd
-        sample_df = pd.read_parquet(first_path, columns=[])
-        # Use pyarrow schema for dtypes
-        for f in schema_arrow:
-            dtypes[f.name] = str(f.type)
-
-        self._schema._validate(columns, dtypes)
+        check_indices = [0, len(self._shard_files) - 1]
+        for idx in check_indices:
+            path = self._shard_files[idx]
+            pf = pq.ParquetFile(path)
+            schema_arrow = pf.schema_arrow
+            columns = [f.name for f in schema_arrow]
+            dtypes = {f.name: str(f.type) for f in schema_arrow}
+            self._schema._validate(columns, dtypes)
 
         if self._schema.needs_text_for_char_count() and self._schema.text_col not in columns:
             raise ValueError(
@@ -678,7 +691,11 @@ class ShardMetadataManager:
                     f"{n_miss} unmatched row_in_shard_col values"
                 )
             return positions.astype(np.int64)
-        reverse_map = {int(v): i for i, v in enumerate(col_arr)}
+        if sid not in self._row_in_shard_reverse_map_cache:
+            self._row_in_shard_reverse_map_cache[sid] = {
+                int(v): i for i, v in enumerate(col_arr)
+            }
+        reverse_map = self._row_in_shard_reverse_map_cache[sid]
         return np.array([reverse_map[int(v)] for v in row_col_values], dtype=np.int64)
 
     # ── Properties ──
@@ -786,10 +803,11 @@ class ShardMetadataManager:
         mgr._domain_cat_map = domain_label_map
         valid_labels = domain_labels[domain_labels >= 0]
         mgr._domain_counts = np.bincount(valid_labels, minlength=mgr._num_domains)
-        mgr._has_row_in_shard = False
+        mgr._has_row_in_shard = (schema is not None and schema.row_in_shard_col is not None)
         mgr._row_in_shard_cols = {}
         mgr._is_row_col_sequential = True
         mgr._row_in_shard_col_sorted_cache = {}
+        mgr._row_in_shard_reverse_map_cache = {}
         return mgr
 
     # ── Token estimation ──

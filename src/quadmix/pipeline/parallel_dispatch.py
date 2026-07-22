@@ -132,77 +132,78 @@ def _tokenize_shard_parallel(
     os.environ["OMP_NUM_THREADS"] = str(threads_per_worker)
     os.environ["OPENBLAS_NUM_THREADS"] = str(threads_per_worker)
 
-    env_workers = int(os.environ.get("TOKENIZE_WORKERS", "0"))
-    if env_workers >= 1:
-        n_workers = env_workers
-    else:
-        n_workers = min(cfg.max_io_workers, n_shards)
+    try:
+        env_workers = int(os.environ.get("TOKENIZE_WORKERS", "0"))
+        if env_workers >= 1:
+            n_workers = env_workers
+        else:
+            n_workers = min(cfg.max_io_workers, n_shards)
 
-    print(f"  [ParallelTokenize] {n_shards} shards, {n_workers} processes "
-          f"× {threads_per_worker} Rust threads = {n_workers * threads_per_worker} total threads")
+        print(f"  [ParallelTokenize] {n_shards} shards, {n_workers} processes "
+              f"× {threads_per_worker} Rust threads = {n_workers * threads_per_worker} total threads")
 
-    results = []
-    t0 = time.time()
+        results = []
+        t0 = time.time()
 
-    completed = [0]
-    lock = threading.Lock()
+        completed = [0]
+        lock = threading.Lock()
 
-    def on_done(fut):
-        with lock:
-            completed[0] += 1
-            c = completed[0]
-        if c % 10 == 0 or c == n_shards:
-            elapsed = time.time() - t0
-            speed = c / elapsed if elapsed > 0 else 0
-            eta = (n_shards - c) / speed if speed > 0 else 0
-            print(f"  [Tokenize Progress] {c}/{n_shards} shards "
-                  f"({c*100//n_shards}%), "
-                  f"{speed:.1f} shards/s, ETA {eta:.0f}s")
+        def on_done(fut):
+            with lock:
+                completed[0] += 1
+                c = completed[0]
+            if c % 10 == 0 or c == n_shards:
+                elapsed = time.time() - t0
+                speed = c / elapsed if elapsed > 0 else 0
+                eta = (n_shards - c) / speed if speed > 0 else 0
+                print(f"  [Tokenize Progress] {c}/{n_shards} shards "
+                      f"({c*100//n_shards}%), "
+                      f"{speed:.1f} shards/s, ETA {eta:.0f}s")
 
-    with PerfTimer.section("parallel_tokenize", "parallel_tokenize"):
-        from quadmix.pipeline.tokenize_worker import _process_shard_full as _worker_process_shard
-        ctx = mp.get_context("spawn")
-        with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as executor:
-            futs = []
-            for task in shard_tasks:
-                sid = task[0]
-                shard_path = task[1]
-                miss_rows = task[2]
-                task_seq = task[3] if len(task) > 3 else is_row_col_sequential
-                task_total = task[4] if len(task) > 4 else 0
-                fut = executor.submit(
-                    _worker_process_shard,
-                    sid, shard_path, miss_rows,
-                    tokenizer_path, block_size, threads_per_worker,
-                    text_col, row_in_shard_col if row_in_shard_col is not None else "row_in_shard",
-                    has_row_in_shard, task_seq, task_total,
-                )
-                fut.add_done_callback(on_done)
-                futs.append(fut)
+        with PerfTimer.section("parallel_tokenize", "parallel_tokenize"):
+            from quadmix.pipeline.tokenize_worker import _process_shard_full as _worker_process_shard
+            ctx = mp.get_context("spawn")
+            with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as executor:
+                futs = []
+                for sid, shard_path, miss_rows in shard_tasks:
+                    fut = executor.submit(
+                        _worker_process_shard,
+                        sid, shard_path, miss_rows,
+                        tokenizer_path, block_size, threads_per_worker,
+                        text_col, row_in_shard_col if row_in_shard_col is not None else "row_in_shard", has_row_in_shard,
+                    )
+                    fut.add_done_callback(on_done)
+                    futs.append(fut)
 
-            failed_shards = []
-            for fut in futs:
-                try:
-                    sid, parsed_rows, tokens_array, io_time, tok_time, total_time = fut.result()
-                    results.append((sid, parsed_rows, tokens_array, io_time, tok_time, total_time))
-                except Exception as e:
-                    print(f"  [Tokenize Error] {e}")
-                    import traceback
-                    traceback.print_exc()
-                    failed_shards.append(str(e))
+                failed_shards = []
+                for fut in futs:
+                    try:
+                        sid, parsed_rows, tokens_array, io_time, tok_time, total_time = fut.result()
+                        results.append((sid, parsed_rows, tokens_array, io_time, tok_time, total_time))
+                    except Exception as e:
+                        print(f"  [Tokenize Error] {e}")
+                        import traceback
+                        traceback.print_exc()
+                        failed_shards.append(str(e))
 
-    if failed_shards:
-        raise RuntimeError(
-            f"[ParallelTokenize] {len(failed_shards)} shard(s) failed to tokenize. "
-            f"First error: {failed_shards[0]}"
-        )
+        if failed_shards:
+            raise RuntimeError(
+                f"[ParallelTokenize] {len(failed_shards)} shard(s) failed to tokenize. "
+                f"First error: {failed_shards[0]}"
+            )
 
-    total_time = time.time() - t0
-    total_docs = sum(len(r[1]) for r in results)
-    print(f"  [ParallelTokenize] {total_docs:,} docs in {total_time:.1f}s "
-          f"({total_docs / total_time:.0f} docs/s)")
+        total_time = time.time() - t0
+        total_docs = sum(len(r[1]) for r in results)
+        print(f"  [ParallelTokenize] {total_docs:,} docs in {total_time:.1f}s "
+              f"({total_docs / total_time:.0f} docs/s)")
 
-    return results
+        return results
+    finally:
+        for _k, _v in _saved_env.items():
+            if _v is None:
+                os.environ.pop(_k, None)
+            else:
+                os.environ[_k] = _v
 
 
 def _tokenize_chunk_with_meta(
@@ -241,25 +242,34 @@ def _tokenize_chunk_to_array(
 
     Returns ((sid, idx) pairs, np.array[N x block_size, dtype=int32]).
     """
+    _saved_env = {}
+    for _k in ("RAYON_NUM_THREADS", "OMP_NUM_THREADS"):
+        _saved_env[_k] = os.environ.get(_k)
     os.environ["RAYON_NUM_THREADS"] = str(threads_per_worker)
     os.environ["OMP_NUM_THREADS"] = str(threads_per_worker)
+    try:
+        tok = _get_tokenizer(tokenizer_path)
+        texts = [item[2] for item in chunk]
+        encodings = tok.encode_batch(texts)
 
-    tok = _get_tokenizer(tokenizer_path)
-    texts = [item[2] for item in chunk]
-    encodings = tok.encode_batch(texts)
+        PAD_TOKEN = 50256
+        N = len(chunk)
+        tokens_array = np.full((N, block_size), PAD_TOKEN, dtype=np.int32)
 
-    PAD_TOKEN = 50256
-    N = len(chunk)
-    tokens_array = np.full((N, block_size), PAD_TOKEN, dtype=np.int32)
+        meta = []
+        for (i, (sid, idx, _)), enc in zip(enumerate(chunk), encodings):
+            ids = list(enc.ids)
+            n = min(len(ids), block_size)
+            tokens_array[i, :n] = ids[:n]
+            meta.append((sid, idx))
 
-    meta = []
-    for (i, (sid, idx, _)), enc in zip(enumerate(chunk), encodings):
-        ids = list(enc.ids)
-        n = min(len(ids), block_size)
-        tokens_array[i, :n] = ids[:n]
-        meta.append((sid, idx))
-
-    return meta, tokens_array
+        return meta, tokens_array
+    finally:
+        for _k, _v in _saved_env.items():
+            if _v is None:
+                os.environ.pop(_k, None)
+            else:
+                os.environ[_k] = _v
 
 
 def _worker_dynamic_loop(
@@ -351,6 +361,7 @@ def _worker_dynamic_loop(
         )
 
         completed = 0
+        current_shm_info = None
         while True:
             task = task_queue.get()
 
@@ -359,6 +370,7 @@ def _worker_dynamic_loop(
                 break
 
             exp_id, params, selected_idx, shm_info = task[:4]
+            current_shm_info = shm_info
             sampled_doc_count = task[4] if len(task) > 4 else None
             print(f"[Worker {worker_id}] Running exp {exp_id}")
 
@@ -400,7 +412,7 @@ def _worker_dynamic_loop(
                 ef.write(f"[Worker {worker_id}] CRASH: {top_err}\n")
                 ef.write(tb_str)
             print(f"[Worker {worker_id}] ERROR -> {err_path}", flush=True)
-        except:
+        except Exception:
             pass
         try:
             result_queue.put(ProxyResult(
@@ -414,12 +426,12 @@ def _worker_dynamic_loop(
                     "is_worker_crash": True,
                 },
             ))
-        except:
+        except Exception:
             pass
         try:
             if device_type == "npu":
                 torch.npu.empty_cache()
-        except:
+        except Exception:
             pass
         sys.exit(1)
 

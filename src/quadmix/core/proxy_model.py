@@ -205,8 +205,10 @@ class ProxyModel(nn.Module):
 
     def forward(self, input_ids: torch.Tensor, return_hidden: bool = False):
         B, T = input_ids.shape
-        assert T <= self.config.block_size, \
-            f"Sequence length {T} exceeds block_size {self.config.block_size}"
+        if T > self.config.block_size:
+            raise ValueError(
+                f"Sequence length {T} exceeds block_size {self.config.block_size}"
+            )
 
         x = self.embed(input_ids)  # (B, T, C)
 
