@@ -248,7 +248,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             raise ValueError("Either metadata_manager or data_path must be provided")
 
         print(f"[ProxyRunner] Loading validation set: {self.val_data_path}")
-        val_data = torch.load(self.val_data_path, map_location="cpu", weights_only=False)
+        val_data = torch.load(self.val_data_path, map_location="cpu", weights_only=True)
         self._val_token_ids = val_data["token_ids"]
         self._val_loss_mask = val_data["loss_mask"]
         self._val_task_labels = val_data.get("task_labels", None)
@@ -884,7 +884,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         )
         if os.path.exists(cache):
             print(f"[ProxyRunner] (legacy) Loading cached tokens: {cache}")
-            cached = torch.load(cache, map_location="cpu", weights_only=False)
+            cached = torch.load(cache, map_location="cpu", weights_only=True)
             self._token_ids = cached["token_ids"]
             self._token_counts = cached["token_counts"].numpy()
             print(f"[ProxyRunner] (legacy) Cached: {self._token_ids.shape}")

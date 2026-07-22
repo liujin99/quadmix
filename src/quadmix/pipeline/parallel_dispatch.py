@@ -459,7 +459,7 @@ def _reval_worker(
 
         device = torch.device(device_str)
 
-        val_data = torch.load(val_data_path, map_location="cpu", weights_only=False)
+        val_data = torch.load(val_data_path, map_location="cpu", weights_only=True)
         val_token_ids = val_data["token_ids"]
         val_loss_mask = val_data["loss_mask"]
         val_task_labels = val_data.get("task_labels", None)
