@@ -815,6 +815,8 @@ def build_parser():
     p = argparse.ArgumentParser(description="QuaDMix on essential-web-v1 (sharded mode)")
     p.add_argument("--preprocessed-dir", default=DEFAULT_PREPROCESSED_DIR,
                    help="Directory of preprocessed parquet shards")
+    p.add_argument("--shard-limit", type=int, default=None,
+                   help="Use only the first N shards (smoke testing)")
     p.add_argument("--quick", action="store_true", help="Quick: 200 exp, 2000 search")
     p.add_argument("--full", action="store_true", help="Full: 3000 exp, 100K search")
     p.add_argument("--output", "-o", default=None)
@@ -973,7 +975,12 @@ def main():
 
     # ── Load metadata manager (reads only domain + quality from all shards) ──
     print(f"\n[Setup] Loading ShardMetadataManager from: {args.preprocessed_dir}")
-    metadata_manager = ShardMetadataManager(args.preprocessed_dir, schema=schema)
+    metadata_manager = ShardMetadataManager(
+        args.preprocessed_dir,
+        schema=schema,
+        shard_limit=args.shard_limit,
+        max_workers=int(os.environ.get("STEM_METADATA_WORKERS", "8")),
+    )
     print(f"[Setup] {metadata_manager.num_docs:,} docs across "
           f"{metadata_manager.num_shards} shards, "
           f"{metadata_manager.num_domains} domains, "

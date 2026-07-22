@@ -172,6 +172,7 @@ class ShardMetadataManager:
         schema: DatasetSchema,
         index_file: Optional[str] = None,
         max_workers: Optional[int] = None,
+        shard_limit: Optional[int] = None,
     ):
         self._dir = preprocessed_dir
         self._schema = schema
@@ -179,6 +180,10 @@ class ShardMetadataManager:
         self._shard_files: List[str] = sorted(
             glob.glob(os.path.join(preprocessed_dir, "*.parquet"))
         )
+        if shard_limit is not None:
+            if shard_limit < 1:
+                raise ValueError("shard_limit must be positive")
+            self._shard_files = self._shard_files[:shard_limit]
         if not self._shard_files:
             raise FileNotFoundError(
                 f"No .parquet files found in {preprocessed_dir}"
@@ -206,8 +211,13 @@ class ShardMetadataManager:
         total_shards = len(self._shard_files)
         load_t0 = time.time()
 
-        cache_path = os.path.join(preprocessed_dir, _CACHE_FILENAME)
-        shard_info_path = os.path.join(preprocessed_dir, "metadata_shard_info.json")
+        cache_dir = preprocessed_dir
+        external_cache_root = os.environ.get("STEM_METADATA_CACHE_DIR", "").strip()
+        if external_cache_root:
+            cache_dir = os.path.join(external_cache_root, f"{total_shards}_shards")
+            os.makedirs(cache_dir, exist_ok=True)
+        cache_path = os.path.join(cache_dir, _CACHE_FILENAME)
+        shard_info_path = os.path.join(cache_dir, "metadata_shard_info.json")
 
         current_shard_stats = {
             os.path.basename(f): {"size": os.path.getsize(f), "mtime": os.path.getmtime(f)}

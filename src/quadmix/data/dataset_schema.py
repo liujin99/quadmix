@@ -76,7 +76,7 @@ class DatasetSchema:
     @classmethod
     def from_yaml(cls, path: str) -> "DatasetSchema":
         """Load DatasetSchema from a YAML file."""
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             data = yaml.safe_load(f)
 
         if data is None:

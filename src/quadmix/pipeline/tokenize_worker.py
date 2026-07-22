@@ -8,10 +8,16 @@ def _get_tokenizer(tokenizer_path: str):
     """Lazy load tokenizer."""
     from tokenizers import Tokenizer
     import os
-    if os.path.exists(tokenizer_path):
+    if os.path.isdir(tokenizer_path):
+        tokenizer_file = os.path.join(tokenizer_path, "tokenizer.json")
+        if not os.path.isfile(tokenizer_file):
+            raise FileNotFoundError(
+                f"local tokenizer.json not found: {tokenizer_file}"
+            )
+        return Tokenizer.from_file(tokenizer_file)
+    if os.path.isfile(tokenizer_path):
         return Tokenizer.from_file(tokenizer_path)
-    else:
-        return Tokenizer.from_pretrained(tokenizer_path)
+    return Tokenizer.from_pretrained(tokenizer_path)
 
 
 def _tokenize_chunk_to_array(

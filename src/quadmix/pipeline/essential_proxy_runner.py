@@ -44,7 +44,12 @@ from quadmix.core.quality_rank import compute_quality_ranks
 from quadmix.core.sampler import compute_sampling_values
 from quadmix.pipeline.proxy_runner import BaseProxyRunner
 from quadmix.utils.perf_timer import PerfTimer
-from quadmix.utils.concurrency import ConcurrencyConfig, get_blas_threads, set_blas_threads
+from quadmix.utils.concurrency import (
+    ConcurrencyConfig,
+    get_available_memory_bytes,
+    get_blas_threads,
+    set_blas_threads,
+)
 from quadmix.pipeline.loss_utils import (
     chunked_loss_from_hidden, chunked_loss_per_token_from_hidden, compute_val_batch_size,
 )
@@ -210,11 +215,20 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         self.gradient_accumulation_steps = max(1, self.batch_size // micro_batch_size)
 
         from transformers import AutoTokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-neox-20b")
+        tokenizer_source = os.environ.get(
+            "QUADMIX_TOKENIZER_PATH",
+            "EleutherAI/gpt-neox-20b",
+        )
+        tokenizer_is_local = os.path.exists(tokenizer_source)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_source,
+            local_files_only=tokenizer_is_local,
+        )
         self.tokenizer.pad_token = self.tokenizer.eos_token
         assert self.tokenizer.vocab_size <= self.model_config.vocab_size, \
             f"Tokenizer vocab ({self.tokenizer.vocab_size}) > model vocab ({self.model_config.vocab_size})"
-        print(f"[ProxyRunner] GPT-NeoX tokenizer: vocab={self.tokenizer.vocab_size}")
+        print(f"[ProxyRunner] GPT-NeoX tokenizer: {tokenizer_source}, "
+              f"vocab={self.tokenizer.vocab_size}")
         print(f"[ProxyRunner] Model config: {model_variant}, "
               f"block={self.block_size}, model_vocab={self.model_config.vocab_size}")
         print(f"[ProxyRunner] Training: batch={self.batch_size}, "
@@ -1368,7 +1382,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         val_bs, val_chunk_size = compute_val_batch_size(
             device, model.config.vocab_size, bs - 1, max_val_bs=96,
         )
-        val_bs = min(val_bs, val_n)
+        val_bs = min(val_bs, val_n, 8)
 
         if val_bs < 96 or val_chunk_size < 2048:
             if device.type in ("npu", "cuda"):
@@ -1602,15 +1616,12 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         compute_mem = 6 * n_m_max * 8
         mem_per_process = compute_mem + 50 * 1024**2
 
-        try:
-            import psutil
-            available_ram = psutil.virtual_memory().available * 0.7
-        except ImportError:
-            available_ram = 1.5 * 1024**3 * 0.6
+        available_ram = get_available_memory_bytes() * 0.7
         shm_reserved = min(shm_data_size, available_ram * 0.1)
         compute_budget = available_ram - shm_reserved
         max_by_mem = max(1, int(compute_budget / mem_per_process))
-        n_workers = min(n, num_cpus, max_by_mem, cfg.max_compute_workers)
+        worker_cap = max(1, int(os.environ.get("PRESAMPLE_MAX_WORKERS", "64")))
+        n_workers = min(n, num_cpus, max_by_mem, worker_cap)
 
         blas_threads = cfg.blas_threads_for(n_workers)
         print(

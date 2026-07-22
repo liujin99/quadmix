@@ -30,6 +30,49 @@ _BLAS_LIB_NAMES = [
 ]
 
 
+def get_available_memory_bytes() -> int:
+    """Return usable RAM, respecting both host and cgroup limits."""
+    candidates = []
+    try:
+        import psutil
+        available = int(psutil.virtual_memory().available)
+        if available > 0:
+            candidates.append(available)
+    except (ImportError, OSError, ValueError):
+        pass
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    candidates.append(int(line.split()[1]) * 1024)
+                    break
+    except (OSError, ValueError, IndexError):
+        pass
+    for limit_path, current_path in (
+        ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.current"),
+        ("/sys/fs/cgroup/memory/memory.limit_in_bytes",
+         "/sys/fs/cgroup/memory/memory.usage_in_bytes"),
+    ):
+        try:
+            with open(limit_path, encoding="utf-8") as f:
+                limit_text = f.read().strip()
+            if limit_text == "max":
+                continue
+            with open(current_path, encoding="utf-8") as f:
+                current = int(f.read().strip())
+            limit = int(limit_text)
+            if 0 < limit < (1 << 60):
+                candidates.append(max(0, limit - current))
+        except (OSError, ValueError):
+            continue
+    if candidates:
+        return min(candidates)
+    try:
+        return int(os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE"))
+    except (AttributeError, OSError, ValueError):
+        return 1024 ** 3
+
+
 def _probe_blas_lib():
     for lib_name in _BLAS_LIB_NAMES:
         try:

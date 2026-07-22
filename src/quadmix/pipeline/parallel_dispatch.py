@@ -27,7 +27,18 @@ def _get_tokenizer(tokenizer_path: str) -> "Tokenizer":
     """Get or create a cached tokenizer instance (per-process cache)."""
     if tokenizer_path not in _tokenizer_cache:
         from tokenizers import Tokenizer
-        _tokenizer_cache[tokenizer_path] = Tokenizer.from_pretrained(tokenizer_path)
+        if os.path.isdir(tokenizer_path):
+            tokenizer_file = os.path.join(tokenizer_path, "tokenizer.json")
+            if not os.path.isfile(tokenizer_file):
+                raise FileNotFoundError(
+                    f"local tokenizer.json not found: {tokenizer_file}"
+                )
+            tokenizer = Tokenizer.from_file(tokenizer_file)
+        elif os.path.isfile(tokenizer_path):
+            tokenizer = Tokenizer.from_file(tokenizer_path)
+        else:
+            tokenizer = Tokenizer.from_pretrained(tokenizer_path)
+        _tokenizer_cache[tokenizer_path] = tokenizer
     return _tokenizer_cache[tokenizer_path]
 
 
@@ -465,7 +476,7 @@ def _reval_worker(
                 val_bs, val_chunk_size = compute_val_batch_size(
                     device, model.config.vocab_size, block_size - 1, max_val_bs=128,
                 )
-                val_bs = min(val_bs, val_n)
+                val_bs = min(val_bs, val_n, 8)
                 per_doc_losses = []
                 for start in range(0, len(val_tokens), val_bs):
                     end = min(start + val_bs, len(val_tokens))
