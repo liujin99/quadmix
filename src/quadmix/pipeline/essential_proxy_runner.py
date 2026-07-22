@@ -1267,10 +1267,10 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         with PerfTimer.section("save_metadata", _timer_prefix):
             avg_train = (loss_accum / iter_ct).item() if iter_ct > 0 else 0
 
-            domain_names = self._domain_names or [f"domain_{m}" for m in range(M)]
-            quality_names = self._quality_names or [f"criterion_{n}" for n in range(N)]
             M = params.num_domains
             N = params.num_criteria
+            domain_names = self._domain_names or [f"domain_{m}" for m in range(M)]
+            quality_names = self._quality_names or [f"criterion_{n}" for n in range(N)]
             dw = params.merge_config.domain_weights
 
             quality_weights = {}

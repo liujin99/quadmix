@@ -126,7 +126,7 @@ def _make_fig2(domain_weights, num_domains, num_criteria, output_dir,
         max_val = row[max_idx]
         if max_val > 0.20:
             prefix = sum(row[:max_idx])
-            ax.text(i, prefix + max_val / 2, QUALITY_SHORT[max_idx],
+            ax.text(i, prefix + max_val / 2, _DEFAULT_QUALITY_SHORT[max_idx % len(_DEFAULT_QUALITY_SHORT)],
                     ha="center", va="center", fontsize=7,
                     fontweight="bold", color="white")
     plt.tight_layout()

@@ -499,7 +499,7 @@ def main():
             "num_selected_docs": len(selected_indices),
             "sampling_ratio": len(selected_indices) / n_docs,
             "domain_distribution_change": _build_domain_dist_change(
-                orig_dist, sel_dist, config.num_domains),
+                orig_dist, sel_dist, config.num_domains, domain_names=domain_names),
         },
         "per_task_loss_stats": per_task_loss_stats,
         "per_task_analysis": pipeline._optimizer.per_task_analysis,
@@ -629,11 +629,11 @@ def main():
     return 0
 
 
-def _build_domain_dist_change(orig_dist, sel_dist, num_domains):
+def _build_domain_dist_change(orig_dist, sel_dist, num_domains, domain_names=None):
     change = {}
     for m in range(num_domains):
         if orig_dist[m] > 0:
-            name = domain_names[m] if m < len(domain_names) else f"D{m}"
+            name = domain_names[m] if domain_names and m < len(domain_names) else f"D{m}"
             change[name] = {
                 "original": int(orig_dist[m]),
                 "selected": int(sel_dist[m]),

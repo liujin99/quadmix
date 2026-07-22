@@ -76,7 +76,13 @@ def _read_shard_metadata_pyarrow(shard_path: str, schema: DatasetSchema) -> dict
                     f"请在 domain_names 中补充这些值。"
                 )
         else:
-            cat_series = series.astype("category")
+            raise ValueError(
+                f"domain_col '{schema.domain_col}' is string/object type but "
+                f"schema.domain_names is not provided. String domain columns "
+                f"require domain_names in schema.yaml to ensure consistent "
+                f"cross-shard categorical encoding. "
+                f"Add domain_names to your schema config."
+            )
         domain_arr = cat_series.cat.codes.to_numpy(dtype=np.int64)
         cat_map = dict(zip(
             cat_series.cat.categories,
@@ -400,7 +406,8 @@ class ShardMetadataManager:
             else list(self._schema.quality_cols)
         )
 
-        self._domain_counts = np.bincount(self._domain_labels, minlength=self._num_domains)
+        valid_domain_labels = self._domain_labels[self._domain_labels >= 0]
+        self._domain_counts = np.bincount(valid_domain_labels, minlength=self._num_domains)
         for m in range(self._num_domains):
             if self._domain_counts[m] < 100:
                 pct = self._domain_counts[m] / self._num_docs * 100

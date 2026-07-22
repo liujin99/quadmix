@@ -23,6 +23,8 @@
 
 set -euo pipefail
 
+export PYTHONWARNINGS="${PYTHONWARNINGS:-ignore::UserWarning:torch_npu.utils._path_manager}"
+
 # ── 使用 conda nano 环境（包含 pyarrow 等依赖）─────────────
 if command -v conda &>/dev/null; then
     eval "$(conda shell.bash hook 2>/dev/null)" && conda activate nano
@@ -60,6 +62,7 @@ NUM_EXPERIMENTS="${NUM_EXPERIMENTS:-200}"
 
 # ── 扫描 --val-set 参数（默认 cap_v1）──────────────────
 VAL_SET="stem_v1"
+prev_arg=""
 for arg in "$@"; do
     if [[ "$prev_arg" == "--val-set" ]]; then
         VAL_SET="$arg"
