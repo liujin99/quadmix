@@ -31,6 +31,9 @@ from joblib import Parallel, delayed
 from contextlib import contextmanager
 import pandas as pd
 
+import warnings
+warnings.filterwarnings("ignore", message=".*owner does not match.*")
+
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -61,8 +64,6 @@ _PreSampleData = namedtuple("_PreSampleData", [
 
 def _presample_one(args):
     i, params, data = args
-    import warnings
-    warnings.filterwarnings("ignore", message=".*owner does not match.*")
     from quadmix.pipeline.shared_memory import shared_to_ndarray
     normalized_quality = shared_to_ndarray(data.normalized_quality_info)
     domain_indices = {m: shared_to_ndarray(info) for m, info in data.domain_indices_infos.items()}

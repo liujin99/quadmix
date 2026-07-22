@@ -5,8 +5,11 @@ Standalone functions used by EssentialWebProxyRunner for multi-NPU parallel trai
 
 import os
 import time
+import warnings
 import multiprocessing as mp
 from typing import Dict, List, Optional, Tuple
+
+warnings.filterwarnings("ignore", message=".*owner does not match.*")
 
 import numpy as np
 import torch
