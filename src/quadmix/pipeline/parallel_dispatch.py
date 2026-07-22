@@ -359,6 +359,7 @@ def _worker_dynamic_loop(
             domain_names=config_dict.get("domain_names"),
             quality_names=config_dict.get("quality_names"),
             quality_directions=config_dict.get("quality_directions"),
+            worker_mode=True,
         )
 
         completed = 0

@@ -166,6 +166,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             domain_names: Optional[List[str]] = None,
             quality_names: Optional[List[str]] = None,
             quality_directions: Optional[List[bool]] = None,
+            worker_mode: bool = False,
     ):
         from quadmix.constants import DEFAULT_TOKEN_CACHE_DIR
         if token_cache_dir is None:
@@ -190,6 +191,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         self._domain_names = domain_names
         self._quality_names = quality_names
         self._quality_directions = quality_directions
+        self._worker_mode = worker_mode
 
         self.global_batch_size = global_batch_size
         self.micro_batch_size = micro_batch_size
@@ -262,30 +264,36 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         print(f"[ProxyRunner] Sharded mode: {self._num_docs:,} docs "
               f"(metadata only, {mgr.num_shards} shards) ({time.time() - t0:.0f}s)")
 
-        from quadmix.utils.normalization import get_normalizer
-        self._normalizer_name = "rank"
-        normalize_fn = get_normalizer(self._normalizer_name)
+        if self._worker_mode:
+            self._normalized_quality = None
+            self._domain_indices: Dict[int, np.ndarray] = {}
+            print(f"[ProxyRunner] Worker mode: skipped normalization + domain indices "
+                  f"(selected_idx pre-computed by main process)")
+        else:
+            from quadmix.utils.normalization import get_normalizer
+            self._normalizer_name = "rank"
+            normalize_fn = get_normalizer(self._normalizer_name)
 
-        t1 = time.time()
-        num_criteria = self._quality_scores.shape[1]
-        n_jobs = min(num_criteria, os.cpu_count()) if self._num_docs > 50000 else 1
-        normalized_cols = Parallel(n_jobs=n_jobs, prefer="threads")(
-            delayed(normalize_fn)(self._quality_scores[:, n]) for n in range(num_criteria)
-        )
-        self._normalized_quality = np.column_stack(normalized_cols).astype(self._quality_scores.dtype)
-        print(f"[ProxyRunner] Pre-normalized {num_criteria} quality criteria "
-              f"({time.time() - t1:.1f}s) — Eq.1 now ~5x faster per experiment")
+            t1 = time.time()
+            num_criteria = self._quality_scores.shape[1]
+            n_jobs = min(num_criteria, os.cpu_count()) if self._num_docs > 50000 else 1
+            normalized_cols = Parallel(n_jobs=n_jobs, prefer="threads")(
+                delayed(normalize_fn)(self._quality_scores[:, n]) for n in range(num_criteria)
+            )
+            self._normalized_quality = np.column_stack(normalized_cols).astype(self._quality_scores.dtype)
+            print(f"[ProxyRunner] Pre-normalized {num_criteria} quality criteria "
+                  f"({time.time() - t1:.1f}s) — Eq.1 now ~5x faster per experiment")
 
-        t2 = time.time()
-        sort_idx = np.argsort(self._domain_labels)
-        sorted_labels = self._domain_labels[sort_idx]
-        boundaries = np.concatenate([[0], np.where(sorted_labels[:-1] != sorted_labels[1:])[0] + 1, [self._num_docs]])
-        self._domain_indices: Dict[int, np.ndarray] = {}
-        for i in range(len(boundaries) - 1):
-            domain_id = int(sorted_labels[boundaries[i]])
-            self._domain_indices[domain_id] = sort_idx[boundaries[i]:boundaries[i + 1]]
-        print(f"[ProxyRunner] Pre-computed domain indices for {len(self._domain_indices)} domains "
-              f"({time.time() - t2:.1f}s) — Eq.1 mask elimination")
+            t2 = time.time()
+            sort_idx = np.argsort(self._domain_labels)
+            sorted_labels = self._domain_labels[sort_idx]
+            boundaries = np.concatenate([[0], np.where(sorted_labels[:-1] != sorted_labels[1:])[0] + 1, [self._num_docs]])
+            self._domain_indices: Dict[int, np.ndarray] = {}
+            for i in range(len(boundaries) - 1):
+                domain_id = int(sorted_labels[boundaries[i]])
+                self._domain_indices[domain_id] = sort_idx[boundaries[i]:boundaries[i + 1]]
+            print(f"[ProxyRunner] Pre-computed domain indices for {len(self._domain_indices)} domains "
+                  f"({time.time() - t2:.1f}s) — Eq.1 mask elimination")
 
         os.makedirs(self.token_cache_dir, exist_ok=True)
         self._cache_hits = 0
