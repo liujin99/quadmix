@@ -58,7 +58,7 @@ if [ "$NUM_SHARDS" -eq 0 ]; then
 fi
 echo "  [配置] 发现 $NUM_SHARDS shards in $STEM_DATA_DIR"
 
-NUM_EXPERIMENTS="${NUM_EXPERIMENTS:-200}"
+NUM_EXPERIMENTS="${NUM_EXPERIMENTS:-8}"
 
 # ── 扫描 --val-set 参数（默认 cap_v1）──────────────────
 VAL_SET="stem_v1"
