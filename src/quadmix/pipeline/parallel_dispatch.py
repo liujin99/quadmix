@@ -165,12 +165,13 @@ def _tokenize_shard_parallel(
             ctx = mp.get_context("spawn")
             with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as executor:
                 futs = []
-                for sid, shard_path, miss_rows in shard_tasks:
+                for sid, shard_path, miss_rows, is_seq, total_rows in shard_tasks:
                     fut = executor.submit(
                         _worker_process_shard,
                         sid, shard_path, miss_rows,
                         tokenizer_path, block_size, threads_per_worker,
                         text_col, row_in_shard_col if row_in_shard_col is not None else "row_in_shard", has_row_in_shard,
+                        is_seq, total_rows,
                     )
                     fut.add_done_callback(on_done)
                     futs.append(fut)
