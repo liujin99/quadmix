@@ -84,7 +84,7 @@ fi
 OUTPUT_DIR="${OUTPUT_DIR:-$QUADMIX_DIR/result/demo_stem_$(date +%Y%m%d_%H%M%S)}"
 
 echo "═══════════════════════════════════════════"
-echo "  QuaDMix Demo — STEM (4 域, 6 质量指标)"
+echo "  QuaDMix Demo — STEM (4 域, 5 质量指标)"
 echo "  $NUM_SHARDS shards, $NUM_EXPERIMENTS 实验, 5000 步"
 echo "  数学/化学/生物学/物理, $VAL_SET 验证集"
 echo "═══════════════════════════════════════════"
@@ -109,7 +109,7 @@ cat << PARAMS
   │ 代理模型                   │  tinyllama_1M│
   │ 数据集                     │  STEM        │
   │ 域                         │  4 (数学/化学/生物学/物理) │
-  │ 质量指标                   │  6           │
+   │ 质量指标                   │  5           │
   └────────────────────────────┴──────────────┘
 
   ⏱ 预计耗时: precompute ~3-5 exp/s (loky 进程池), 训练取决于 NPU 数

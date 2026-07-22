@@ -1,4 +1,6 @@
-"""Chunked loss utilities for memory-efficient training."""
+"""Chunked loss utilities for memory-efficient training and adaptive val_bs."""
+
+from typing import Tuple
 
 import torch
 import torch.nn.functional as F
@@ -39,3 +41,39 @@ def chunked_loss_per_token_from_hidden(model, hidden, targets, chunk_size=2048):
         ).view(chunk_tgt.shape)
         del chunk_logits
     return per_token
+
+
+def compute_val_batch_size(
+    device: torch.device,
+    vocab_size: int,
+    seq_len: int,
+    max_val_bs: int = 96,
+) -> Tuple[int, int]:
+    """Compute safe (val_bs, chunk_size) based on available device memory.
+
+    Strategy: try large chunk_size first; if val_bs < 8, reduce chunk_size
+    to lower per-sample peak memory, then recompute val_bs.
+
+    Returns:
+        (val_bs, chunk_size) — both guaranteed >= 1.
+    """
+    if device.type not in ("npu", "cuda"):
+        return min(max_val_bs, 8), min(seq_len, 2048)
+
+    api = torch.npu if device.type == "npu" else torch.cuda
+    total_mem = api.get_device_properties(device).total_memory
+    allocated = api.memory_allocated(device)
+    safe_available = total_mem - allocated - 8 * 1024 ** 3
+
+    if safe_available <= 0:
+        return 4, 256
+
+    for cs in (2048, 1024, 512, 256):
+        if cs > seq_len:
+            continue
+        per_sample_peak = 6 * cs * vocab_size
+        bs = max(4, min(max_val_bs, int(safe_available / per_sample_peak)))
+        if bs >= 8:
+            return bs, cs
+
+    return 4, 256

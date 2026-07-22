@@ -436,7 +436,7 @@ def _reval_worker(
     import sys
     try:
         from quadmix.core.proxy_model import ProxyModel, ProxyConfig
-        from quadmix.pipeline.loss_utils import chunked_loss_per_token_from_hidden
+        from quadmix.pipeline.loss_utils import chunked_loss_per_token_from_hidden, compute_val_batch_size
 
         device = torch.device(device_str)
 
@@ -463,7 +463,10 @@ def _reval_worker(
 
             model.eval()
             with torch.no_grad():
-                val_bs = min(128, val_n)
+                val_bs, val_chunk_size = compute_val_batch_size(
+                    device, model.config.vocab_size, block_size - 1, max_val_bs=128,
+                )
+                val_bs = min(val_bs, val_n)
                 per_doc_losses = []
                 for start in range(0, len(val_tokens), val_bs):
                     end = min(start + val_bs, len(val_tokens))
@@ -472,7 +475,7 @@ def _reval_worker(
                     mask_tgt = val_mask[start:end, 1:]
                     hidden = model(ids_in, return_hidden=True)
                     loss = chunked_loss_per_token_from_hidden(
-                        model, hidden, ids_tgt, chunk_size=2048,
+                        model, hidden, ids_tgt, chunk_size=val_chunk_size,
                     )
                     assistant_count = mask_tgt.float().sum(dim=1).clamp(min=1)
                     per_doc = (loss * mask_tgt.float()).sum(dim=1) / assistant_count

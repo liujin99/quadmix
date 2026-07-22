@@ -45,7 +45,9 @@ from quadmix.core.sampler import compute_sampling_values
 from quadmix.pipeline.proxy_runner import BaseProxyRunner
 from quadmix.utils.perf_timer import PerfTimer
 from quadmix.utils.concurrency import ConcurrencyConfig, get_blas_threads, set_blas_threads
-from quadmix.pipeline.loss_utils import chunked_loss_from_hidden, chunked_loss_per_token_from_hidden
+from quadmix.pipeline.loss_utils import (
+    chunked_loss_from_hidden, chunked_loss_per_token_from_hidden, compute_val_batch_size,
+)
 from quadmix.pipeline.shared_memory import SharedArrayInfo, ndarray_to_shared, shared_to_ndarray
 from quadmix.pipeline.parallel_dispatch import (
     _worker_dynamic_loop,
@@ -1357,14 +1359,27 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         Returns:
             Tuple of (aggregate_loss, per_task_losses or None)
         """
-        import torch.nn.functional as F
         model.eval()
         bs = self.block_size
         val_n = len(self._val_token_ids)
         val_tokens = self._val_token_ids[:val_n, :bs].to(device)
         val_mask = self._val_loss_mask[:val_n, :bs].to(device)
+
+        val_bs, val_chunk_size = compute_val_batch_size(
+            device, model.config.vocab_size, bs - 1, max_val_bs=96,
+        )
+        val_bs = min(val_bs, val_n)
+
+        if val_bs < 96 or val_chunk_size < 2048:
+            if device.type in ("npu", "cuda"):
+                api = torch.npu if device.type == "npu" else torch.cuda
+                total_mem = api.get_device_properties(device).total_memory
+                allocated = api.memory_allocated(device)
+                print(f"    [Validation] val_bs={val_bs}, chunk_size={val_chunk_size} "
+                      f"(auto: {device.type}, {total_mem / 1e9:.1f}GB total, "
+                      f"{allocated / 1e9:.2f}GB used)")
+
         with torch.no_grad():
-            val_bs = min(96, val_n)
             per_doc_losses = []
             for start in range(0, len(val_tokens), val_bs):
                 end = min(start + val_bs, len(val_tokens))
@@ -1372,7 +1387,9 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 ids_tgt = val_tokens[start:end, 1:]
                 mask_tgt = val_mask[start:end, 1:]
                 hidden = model(ids_in, return_hidden=True)
-                loss = chunked_loss_per_token_from_hidden(model, hidden, ids_tgt, chunk_size=2048)
+                loss = chunked_loss_per_token_from_hidden(
+                    model, hidden, ids_tgt, chunk_size=val_chunk_size,
+                )
                 assistant_count = mask_tgt.float().sum(dim=1).clamp(min=1)
                 per_doc = (loss * mask_tgt.float()).sum(dim=1) / assistant_count
                 per_doc_losses.append(per_doc)
