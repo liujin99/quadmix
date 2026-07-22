@@ -39,6 +39,7 @@ import numpy as np
 import numpy.typing as npt
 
 from quadmix.data.dataset_schema import DatasetSchema, _parse_quality_cols
+from quadmix.utils.json_utils import sanitize_for_json
 
 
 def _parse_shard_idx(basename: str) -> Optional[int]:
@@ -606,7 +607,7 @@ class ShardMetadataManager:
             }
             tmp_json = shard_info_path + ".tmp"
             with open(tmp_json, "w") as f:
-                json.dump(cache_meta, f)
+                json.dump(sanitize_for_json(cache_meta), f)
             os.replace(tmp_json, shard_info_path)
             cache_size = os.path.getsize(cache_path) / (1024 ** 3)
             print(f"[ShardMetadataManager] Saved metadata cache: {cache_path} "

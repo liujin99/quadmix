@@ -44,6 +44,7 @@ from quadmix.core.sampler import compute_sampling_values
 from quadmix.pipeline.proxy_runner import BaseProxyRunner
 from quadmix.utils.perf_timer import PerfTimer
 from quadmix.utils.concurrency import ConcurrencyConfig, get_blas_threads, set_blas_threads
+from quadmix.utils.json_utils import sanitize_for_json
 from quadmix.pipeline.loss_utils import (
     chunked_loss_from_hidden, chunked_loss_per_token_from_hidden, compute_val_batch_size,
 )
@@ -61,6 +62,18 @@ _PreSampleData = namedtuple("_PreSampleData", [
     "token_counts_info", "has_token_counts",
     "num_domains", "rank_ref_size", "num_docs",
 ])
+
+
+class GraphedTrainStep(torch.nn.Module):
+    def __init__(self, model, chunk_size):
+        super().__init__()
+        self.model = model
+        self.chunk_size = chunk_size
+
+    def forward(self, inp, tgt):
+        hidden = self.model(inp, return_hidden=True)
+        loss = chunked_loss_from_hidden(self.model, hidden, tgt, chunk_size=self.chunk_size)
+        return loss
 
 
 def _presample_one(args):
@@ -1127,8 +1140,6 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 print(f"  [Exp {experiment_id:04d}] Model compiled with torch.compile")
             except Exception as e:
                 print(f"  [Exp {experiment_id:04d}] torch.compile failed: {e}, using eager mode")
-        elif self.device_type == "npu":
-            print(f"  [Exp {experiment_id:04d}] Skipping torch.compile (NPU not supported)")
 
         non_emb = model.count_params(non_embedding_only=True)
         print(f"  [Exp {experiment_id:04d}] Model on {device}: "
@@ -1184,6 +1195,24 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         if device.type == "npu":
             torch.npu.empty_cache()
 
+        use_npu_graph = False
+        graphed_step = None
+        if device.type == "npu":
+            try:
+                train_wrapper = GraphedTrainStep(model, 1024)
+                sample_inp = torch.zeros(self.micro_batch_size, self.block_size, dtype=torch.long, device=device)
+                sample_tgt = torch.zeros(self.micro_batch_size, self.block_size, dtype=torch.long, device=device)
+                graphed_step = torch.npu.make_graphed_callables(
+                    train_wrapper, sample_args=(sample_inp, sample_tgt), num_warmup_iters=3,
+                )
+                use_npu_graph = True
+                print(f"  [Exp {experiment_id:04d}] NPUGraph enabled (forward+backward captured)")
+                del sample_inp, sample_tgt
+            except Exception as e:
+                use_npu_graph = False
+                graphed_step = None
+                print(f"  [Exp {experiment_id:04d}] NPUGraph failed: {e}, using eager mode")
+
         _train_t0 = time.perf_counter()
         model.train()
         loss_accum = torch.tensor(0.0, device=device)
@@ -1229,8 +1258,11 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             inp = inp_buf[mb_start:mb_end]
             tgt = tgt_buf[mb_start:mb_end]
 
-            hidden = model(inp, return_hidden=True)
-            loss = chunked_loss_from_hidden(model, hidden, tgt, chunk_size=1024)
+            if use_npu_graph:
+                loss = graphed_step(inp, tgt)
+            else:
+                hidden = model(inp, return_hidden=True)
+                loss = chunked_loss_from_hidden(model, hidden, tgt, chunk_size=1024)
 
             is_acc = (iter_ct + 1) % grad_acc != 0
             (loss / grad_acc).backward()
@@ -1241,7 +1273,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                     pg["lr"] = lr
                 torch.nn.utils.clip_grad_norm_(model.parameters(), self.grad_clip)
                 optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
+                optimizer.zero_grad(set_to_none=not use_npu_graph)
                 step_ct += 1
 
                 if checkpoint_interval > 0 and step_ct % checkpoint_interval == 0 and step_ct < num_steps:
@@ -1269,6 +1301,14 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         PerfTimer._timings.setdefault(f"{_timer_prefix}.training_loop", []).append(_train_elapsed)
 
         with PerfTimer.section("free_resources", _timer_prefix):
+            if use_npu_graph and graphed_step is not None:
+                for g in (graphed_step.fwd_graph, graphed_step.bwd_graph):
+                    if g is not None:
+                        try:
+                            g.reset()
+                        except Exception:
+                            pass
+                del graphed_step
             del flat_train, inp_buf, tgt_buf, block_starts_buf, arange_npu, optimizer, perm
             if device.type == "npu":
                 import gc as _gc
@@ -1344,7 +1384,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 meta["per_task_losses"] = per_task_losses
             np.save(os.path.join(exp_dir, "selected_indices.npy"), selected_idx_out)
             with open(os.path.join(exp_dir, "meta.json"), "w") as f:
-                json.dump(meta, f, indent=2)
+                json.dump(sanitize_for_json(meta), f, indent=2)
             torch.save(model.state_dict(), os.path.join(exp_dir, "model.pt"))
 
             ckpt_results = dict(self._ckpt_results) if hasattr(self, '_ckpt_results') else {}
@@ -1358,7 +1398,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 }
                 ckpt_path = os.path.join(exp_dir, "checkpoint_trajectory.json")
                 with open(ckpt_path, "w") as f:
-                    json.dump(ckpt_trajectory, f, indent=2)
+                    json.dump(sanitize_for_json(ckpt_trajectory), f, indent=2)
 
         print(f"  [Exp {experiment_id:04d}] Done. train_loss={avg_train:.4f}, "
               f"val_loss={val_loss:.4f} (ppl={np.exp(val_loss):.1f})")
@@ -1596,7 +1636,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             "std_val_loss": float(np.std([r.validation_loss for r in results])),
         }
         with open(path, "w") as f:
-            json.dump(summary, f, indent=2)
+            json.dump(sanitize_for_json(summary), f, indent=2)
         print(f"[ProxyRunner] Summary: {path}")
 
     def precompute_samples(
