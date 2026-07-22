@@ -295,6 +295,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         self._memory_cache: Dict[int, dict] = {}
         self._memory_cache_bytes: int = 0
         self._memory_cache_lru: List[int] = []
+        self._memory_cache_lock = threading.Lock()
 
     def _tokenize_texts(self, texts: List[str]) -> torch.Tensor:
         """Tokenize a list of texts into [M, block_size] int64 tensor."""
@@ -312,80 +313,85 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
     def _memory_cache_get_rows(self, sid: int) -> set:
         """Return set of row_in_shard already in memory cache for this shard."""
-        if sid not in self._memory_cache:
-            return set()
-        if sid in self._memory_cache_lru:
-            self._memory_cache_lru.remove(sid)
-            self._memory_cache_lru.append(sid)
-        return set(int(r) for r in self._memory_cache[sid]["rows"])
+        with self._memory_cache_lock:
+            if sid not in self._memory_cache:
+                return set()
+            if sid in self._memory_cache_lru:
+                self._memory_cache_lru.remove(sid)
+                self._memory_cache_lru.append(sid)
+            return set(int(r) for r in self._memory_cache[sid]["rows"])
 
     def _memory_cache_add_rows(self, sid: int, new_rows: np.ndarray, new_tokens: np.ndarray,
                                 skip_eviction: bool = False):
         """Add new rows to memory cache. LRU eviction when over limit."""
-        old_bytes = 0
-        if sid in self._memory_cache:
-            old_data = self._memory_cache[sid]
-            old_bytes = old_data["rows"].nbytes + old_data["tokens"].nbytes
+        with self._memory_cache_lock:
+            old_bytes = 0
+            if sid in self._memory_cache:
+                old_data = self._memory_cache[sid]
+                old_bytes = old_data["rows"].nbytes + old_data["tokens"].nbytes
 
-        if sid not in self._memory_cache:
-            self._memory_cache[sid] = {
-                "rows": np.array([], dtype=np.int64),
-                "tokens": np.zeros((0, new_tokens.shape[1]), dtype=np.int32),
-            }
+            if sid not in self._memory_cache:
+                self._memory_cache[sid] = {
+                    "rows": np.array([], dtype=np.int64),
+                    "tokens": np.zeros((0, new_tokens.shape[1]), dtype=np.int32),
+                }
 
-        old = self._memory_cache[sid]
-        old_rows = old["rows"]
-        old_tokens = old["tokens"]
+            old = self._memory_cache[sid]
+            old_rows = old["rows"]
+            old_tokens = old["tokens"]
 
-        combined_rows = np.concatenate([old_rows, new_rows])
-        combined_tokens = np.concatenate([old_tokens, new_tokens])
+            combined_rows = np.concatenate([old_rows, new_rows])
+            combined_tokens = np.concatenate([old_tokens, new_tokens])
 
-        row_to_idx = {}
-        for i, r in enumerate(combined_rows):
-            row_to_idx[int(r)] = i
+            row_to_idx = {}
+            for i, r in enumerate(combined_rows):
+                row_to_idx[int(r)] = i
 
-        unique_rows = np.array(sorted(row_to_idx.keys()), dtype=np.int64)
-        final_tokens = combined_tokens[[row_to_idx[int(r)] for r in unique_rows]]
+            unique_rows = np.array(sorted(row_to_idx.keys()), dtype=np.int64)
+            final_tokens = combined_tokens[[row_to_idx[int(r)] for r in unique_rows]]
 
-        new_bytes = unique_rows.nbytes + final_tokens.nbytes
-        self._memory_cache[sid] = {"rows": unique_rows, "tokens": final_tokens}
+            new_bytes = unique_rows.nbytes + final_tokens.nbytes
+            self._memory_cache[sid] = {"rows": unique_rows, "tokens": final_tokens}
 
-        self._memory_cache_bytes += new_bytes - old_bytes
-        if sid in self._memory_cache_lru:
-            self._memory_cache_lru.remove(sid)
-        self._memory_cache_lru.append(sid)
+            self._memory_cache_bytes += new_bytes - old_bytes
+            if sid in self._memory_cache_lru:
+                self._memory_cache_lru.remove(sid)
+            self._memory_cache_lru.append(sid)
 
-        if skip_eviction:
-            return
+            if skip_eviction:
+                return
 
-        max_bytes = int(self.memory_cache_max_gb * 1024 ** 3)
-        while self._memory_cache_bytes > max_bytes and self._memory_cache_lru:
-            victim_sid = self._memory_cache_lru.pop(0)
-            if victim_sid in self._memory_cache:
-                victim = self._memory_cache.pop(victim_sid)
-                self._memory_cache_bytes -= (victim["rows"].nbytes + victim["tokens"].nbytes)
+            max_bytes = int(self.memory_cache_max_gb * 1024 ** 3)
+            while self._memory_cache_bytes > max_bytes and self._memory_cache_lru:
+                victim_sid = self._memory_cache_lru.pop(0)
+                if victim_sid in self._memory_cache:
+                    victim = self._memory_cache.pop(victim_sid)
+                    self._memory_cache_bytes -= (victim["rows"].nbytes + victim["tokens"].nbytes)
 
     def _memory_cache_query(self, sid: int, requested_rows: List[int]) -> Tuple[np.ndarray, List[int], List[int]]:
         """Query memory cache for requested rows."""
-        cached_rows = self._memory_cache_get_rows(sid)
-        hit_rows_set = [r for r in requested_rows if int(r) in cached_rows]
-        miss_rows = [r for r in requested_rows if int(r) not in cached_rows]
+        with self._memory_cache_lock:
+            if sid not in self._memory_cache:
+                return np.zeros((0, self.block_size), dtype=np.int32), [], requested_rows
+            cache_data = self._memory_cache[sid]
+            cache_rows_set = set(int(r) for r in cache_data["rows"])
+            hit_rows_set = [r for r in requested_rows if int(r) in cache_rows_set]
+            miss_rows = [r for r in requested_rows if int(r) not in cache_rows_set]
 
-        if not hit_rows_set:
-            return np.zeros((0, self.block_size), dtype=np.int32), [], miss_rows
+            if not hit_rows_set:
+                return np.zeros((0, self.block_size), dtype=np.int32), [], miss_rows
 
-        cache_data = self._memory_cache[sid]
-        cache_rows = cache_data["rows"]
-        cache_tokens = cache_data["tokens"]
+            cache_rows_arr = cache_data["rows"]
+            cache_tokens = cache_data["tokens"]
 
-        sorted_hit_rows = sorted(hit_rows_set)
-        positions = np.searchsorted(cache_rows, sorted_hit_rows)
+            sorted_hit_rows = sorted(hit_rows_set)
+            positions = np.searchsorted(cache_rows_arr, sorted_hit_rows)
 
-        valid_mask = positions < len(cache_rows)
-        assert valid_mask.all(), f"Some hit rows not in cache: {sorted_hit_rows}"
+            valid_mask = positions < len(cache_rows_arr)
+            assert valid_mask.all(), f"Some hit rows not in cache: {sorted_hit_rows}"
 
-        tokens = cache_tokens[positions]
-        return tokens, sorted_hit_rows, miss_rows
+            tokens = cache_tokens[positions].copy()
+            return tokens, sorted_hit_rows, miss_rows
 
     def _get_shard_token_path(self, shard_idx: int) -> str:
         """Path to disk cache for a shard's selected tokens (npz, mmap-compatible)."""
@@ -461,6 +467,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             batch_exp_ids: List[int],
             async_write_queue: Optional["Queue"] = None,
             shm_store: Optional[Dict[int, tuple]] = None,
+            shm_lock: Optional[threading.Lock] = None,
     ) -> Dict[int, str]:
         """NPU Parallel Mode: Batch tokenize union miss rows across all experiments."""
         t0 = time.time()
@@ -494,9 +501,13 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                     shm = SharedMemory(create=True, size=result.nbytes)
                     shm_array = np.ndarray(result.shape, dtype=result.dtype, buffer=shm.buf)
                     shm_array[:] = result[:]
-                    shm_store[exp_id] = (shm.name, result.shape, result.dtype.str)
+                    if shm_lock:
+                        with shm_lock:
+                            shm_store[exp_id] = (shm.name, result.shape, result.dtype.str)
+                    else:
+                        shm_store[exp_id] = (shm.name, result.shape, result.dtype.str)
                     shm.close()
-                    exp_token_paths[exp_id] = f"shm://{shm_store[exp_id][0]}"
+                    exp_token_paths[exp_id] = f"shm://{shm.name}"
                 else:
                     exp_token_path = self._get_exp_token_path(exp_id)
                     np.save(exp_token_path, result)
@@ -610,7 +621,9 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             shard_starts = mgr._shard_starts
             global_ids_list = []
             tokens_list = []
-            for sid, cache_data in self._memory_cache.items():
+            with self._memory_cache_lock:
+                cache_snapshot = list(self._memory_cache.items())
+            for sid, cache_data in cache_snapshot:
                 rows = cache_data["rows"]
                 tokens = cache_data["tokens"]
                 seq_positions = mgr.row_col_to_local(sid, rows)
@@ -644,9 +657,13 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 shm = SharedMemory(create=True, size=result.nbytes)
                 shm_array = np.ndarray(result.shape, dtype=result.dtype, buffer=shm.buf)
                 shm_array[:] = result[:]
-                shm_store[exp_id] = (shm.name, result.shape, result.dtype.str)
+                if shm_lock:
+                    with shm_lock:
+                        shm_store[exp_id] = (shm.name, result.shape, result.dtype.str)
+                else:
+                    shm_store[exp_id] = (shm.name, result.shape, result.dtype.str)
                 shm.close()
-                exp_token_paths[exp_id] = f"shm://{shm_store[exp_id][0]}"
+                exp_token_paths[exp_id] = f"shm://{shm.name}"
             else:
                 exp_token_path = self._get_exp_token_path(exp_id)
                 np.save(exp_token_path, result)
@@ -1805,9 +1822,11 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         pack_t0 = time.time()
         shard_starts = mgr._shard_starts
+        with self._memory_cache_lock:
+            cache_snapshot2 = list(self._memory_cache.items())
         global_ids_list = []
         tokens_list = []
-        for sid, cache_data in self._memory_cache.items():
+        for sid, cache_data in cache_snapshot2:
             rows = cache_data["rows"]
             tokens = cache_data["tokens"]
             seq_positions = mgr.row_col_to_local(sid, rows)
@@ -1823,8 +1842,9 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         del global_ids_list, tokens_list
 
         freed_gb = self._memory_cache_bytes / (1024 ** 3)
-        self._memory_cache.clear()
-        self._memory_cache_bytes = 0
+        with self._memory_cache_lock:
+            self._memory_cache.clear()
+            self._memory_cache_bytes = 0
         print(f"[TokenizeAll] Concatenated, freed {freed_gb:.1f} GB from memory cache. "
               f"Sorting global IDs...", flush=True)
 
@@ -1972,6 +1992,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         completed_count = 0
 
         exp_shm_info: Dict[int, tuple] = {}
+        exp_shm_lock = threading.Lock()
 
         all_selected_train = getattr(self, '_all_selected_train', all_selected)
 
@@ -2008,7 +2029,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 try:
                     exp_token_paths = self._tokenize_batch_union(
                         batch_selected, batch_ids, async_write_queue,
-                        shm_store=exp_shm_info,
+                        shm_store=exp_shm_info, shm_lock=exp_shm_lock,
                     )
                     batch_count += 1
 
@@ -2072,7 +2093,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 with ready_cond:
                     is_ready = ready_events.get(pos, None)
                     if is_ready is True:
-                        shm_info = exp_shm_info.get(pos)
+                        with exp_shm_lock:
+                            shm_info = exp_shm_info.get(pos)
                         task_item = (
                             pos, params_list[pos],
                             all_selected_train[pos], shm_info,
@@ -2218,7 +2240,9 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             print(f"[SharedMem] Cleaned up {len(shared_meta)} metadata blocks")
 
         leaked = 0
-        for exp_id, (shm_name, shape, dtype_str) in exp_shm_info.items():
+        with exp_shm_lock:
+            items = list(exp_shm_info.items())
+        for exp_id, (shm_name, shape, dtype_str) in items:
             try:
                 shm = mp.shared_memory.SharedMemory(name=shm_name)
                 shm.close()
