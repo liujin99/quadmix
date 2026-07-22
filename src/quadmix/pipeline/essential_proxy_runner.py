@@ -1144,6 +1144,10 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 real_tokens_list.append(eos_buf)
             flat_train = torch.cat(real_tokens_list)
             del train_tokens, real_tokens_list, real_mask, non_empty, eos_buf
+
+        with PerfTimer.section("data_to_device", _timer_prefix):
+            flat_train = flat_train.to(device)
+
         num_steps = self.tiny_steps if self.tiny_steps > 0 else self.max_step
         grad_acc = self.gradient_accumulation_steps
         max_iters = num_steps * grad_acc
@@ -1164,10 +1168,10 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         epoch = 0
 
         accum_bs = self.micro_batch_size * grad_acc
-        batch_buf = torch.empty(accum_bs, self.block_size + 1, dtype=torch.long, device=device)
+        inp_buf = torch.empty(accum_bs, self.block_size, dtype=torch.long, device=device)
+        tgt_buf = torch.empty(accum_bs, self.block_size, dtype=torch.long, device=device)
         block_starts_buf = torch.empty(accum_bs, dtype=torch.long, device=device)
-        arange_buf = torch.arange(self.block_size + 1, dtype=torch.long, device=device)
-        arange_cpu = torch.arange(self.block_size + 1, dtype=torch.long)
+        arange_npu = torch.arange(self.block_size, dtype=torch.long, device=device)
 
         if device.type == "npu":
             torch.npu.empty_cache()
@@ -1210,17 +1214,15 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                         filled += chunk
                         epoch_pos = chunk
 
-                block_starts_cpu_tensor = torch.from_numpy(block_starts_cpu)
-                idx_cpu = block_starts_cpu_tensor.unsqueeze(1) + arange_cpu.unsqueeze(0)
-                batch_cpu = flat_train[idx_cpu]
-                batch_buf.copy_(batch_cpu.to(device))
+                block_starts_buf.copy_(torch.from_numpy(block_starts_cpu))
+                inp_buf.copy_(flat_train[block_starts_buf.unsqueeze(1) + arange_npu.unsqueeze(0)])
+                tgt_buf.copy_(flat_train[(block_starts_buf + 1).unsqueeze(1) + arange_npu.unsqueeze(0)])
 
-            batch = batch_buf[mb_start:mb_end]
-            inp = batch[:, :self.block_size].contiguous()
-            tgt = batch[:, 1:self.block_size + 1].contiguous()
+            inp = inp_buf[mb_start:mb_end]
+            tgt = tgt_buf[mb_start:mb_end]
 
             hidden = model(inp, return_hidden=True)
-            loss = chunked_loss_from_hidden(model, hidden, tgt, chunk_size=2048)
+            loss = chunked_loss_from_hidden(model, hidden, tgt, chunk_size=1024)
 
             is_acc = (iter_ct + 1) % grad_acc != 0
             (loss / grad_acc).backward()
@@ -1259,7 +1261,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         PerfTimer._timings.setdefault(f"{_timer_prefix}.training_loop", []).append(_train_elapsed)
 
         with PerfTimer.section("free_resources", _timer_prefix):
-            del flat_train, batch_buf, block_starts_buf, arange_buf, optimizer, perm
+            del flat_train, inp_buf, tgt_buf, block_starts_buf, arange_npu, optimizer, perm
             if device.type == "npu":
                 import gc as _gc
                 _gc.collect()
