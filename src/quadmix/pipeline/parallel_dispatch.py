@@ -38,23 +38,23 @@ def _io_read_shard(
         text_col: str = "text",
         row_in_shard_col: str = "row_in_shard",
         has_row_in_shard: bool = True,
+        is_row_col_sequential: bool = False,
+        shard_total_rows: int = 0,
 ) -> Tuple[int, np.ndarray, List[str], float]:
-    """Stage 1 worker: read one shard's parquet, return (sid, rows, texts, io_time)."""
-    import pandas as pd
+    """Stage 1 worker: read one shard's parquet, return (sid, rows, texts, io_time).
+
+    Uses pyarrow with adaptive strategy instead of pd.read_parquet.
+    """
     io_t0 = time.time()
-    if has_row_in_shard:
-        df_shard = pd.read_parquet(
-            shard_path,
-            columns=[row_in_shard_col, text_col],
-            filters=[(row_in_shard_col, "in", miss_rows)],
-        )
-        df_shard = df_shard.sort_values(row_in_shard_col)
-        texts = df_shard[text_col].astype(str).tolist()
-        parsed_rows = df_shard[row_in_shard_col].to_numpy(dtype=np.int64)
-    else:
-        df_shard = pd.read_parquet(shard_path, columns=[text_col])
-        texts = df_shard[text_col].astype(str).tolist()
-        parsed_rows = np.arange(len(texts), dtype=np.int64)
+    from quadmix.data.metadata_manager import _read_one_shard_texts_with_rows
+
+    row_col = row_in_shard_col if has_row_in_shard else None
+    row_col_values = np.array(miss_rows, dtype=np.int64) if has_row_in_shard else None
+
+    texts, parsed_rows = _read_one_shard_texts_with_rows(
+        shard_path, text_col, row_col, row_col_values,
+        has_row_in_shard, is_row_col_sequential, shard_total_rows,
+    )
     io_time = time.time() - io_t0
     return (sid, parsed_rows, texts, io_time)
 
@@ -69,29 +69,25 @@ def _process_shard_full(
         text_col: str = "text",
         row_in_shard_col: str = "row_in_shard",
         has_row_in_shard: bool = True,
+        is_row_col_sequential: bool = False,
+        shard_total_rows: int = 0,
 ) -> Tuple[int, np.ndarray, np.ndarray, float, float, float]:
-    """Process one shard: IO + tokenize in sequence.
+    """Process one shard: IO (pyarrow) + tokenize in sequence.
 
-    This enables pipelining: as soon as one shard's IO completes, its tokenize starts
-    immediately without waiting for other shards.
+    Uses pyarrow with adaptive strategy instead of pd.read_parquet.
 
     Returns (sid, parsed_rows, tokens_array, io_time, tok_time, total_time).
     """
     io_t0 = time.time()
-    import pandas as pd
-    if has_row_in_shard:
-        df_shard = pd.read_parquet(
-            shard_path,
-            columns=[row_in_shard_col, text_col],
-            filters=[(row_in_shard_col, "in", miss_rows)],
-        )
-        df_shard = df_shard.sort_values(row_in_shard_col)
-        texts = df_shard[text_col].astype(str).tolist()
-        parsed_rows = df_shard[row_in_shard_col].to_numpy(dtype=np.int64)
-    else:
-        df_shard = pd.read_parquet(shard_path, columns=[text_col])
-        texts = df_shard[text_col].astype(str).tolist()
-        parsed_rows = np.arange(len(texts), dtype=np.int64)
+    from quadmix.data.metadata_manager import _read_one_shard_texts_with_rows
+
+    row_col = row_in_shard_col if has_row_in_shard else None
+    row_col_values = np.array(miss_rows, dtype=np.int64) if has_row_in_shard else None
+
+    texts, parsed_rows = _read_one_shard_texts_with_rows(
+        shard_path, text_col, row_col, row_col_values,
+        has_row_in_shard, is_row_col_sequential, shard_total_rows,
+    )
     io_time = time.time() - io_t0
 
     tok_t0 = time.time()
@@ -103,12 +99,13 @@ def _process_shard_full(
 
 
 def _tokenize_shard_parallel(
-        shard_tasks: List[Tuple[int, str, List[int]]],
+        shard_tasks: List[Tuple],
         tokenizer_path: str,
         block_size: int,
         text_col: str = "text",
         row_in_shard_col: Optional[str] = "row_in_shard",
         has_row_in_shard: bool = True,
+        is_row_col_sequential: bool = False,
 ) -> List[Tuple[int, np.ndarray, np.ndarray, float, float, float]]:
     """Parallel tokenize using ProcessPoolExecutor to bypass GIL.
 
@@ -128,6 +125,9 @@ def _tokenize_shard_parallel(
     n_shards = len(shard_tasks)
 
     threads_per_worker = cfg.blas_threads_for(max(1, cfg.max_io_workers // 4))
+    _saved_env = {}
+    for _k in ("RAYON_NUM_THREADS", "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+        _saved_env[_k] = os.environ.get(_k)
     os.environ["RAYON_NUM_THREADS"] = str(4)
     os.environ["OMP_NUM_THREADS"] = str(threads_per_worker)
     os.environ["OPENBLAS_NUM_THREADS"] = str(threads_per_worker)
@@ -164,12 +164,18 @@ def _tokenize_shard_parallel(
         ctx = mp.get_context("spawn")
         with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as executor:
             futs = []
-            for sid, shard_path, miss_rows in shard_tasks:
+            for task in shard_tasks:
+                sid = task[0]
+                shard_path = task[1]
+                miss_rows = task[2]
+                task_seq = task[3] if len(task) > 3 else is_row_col_sequential
+                task_total = task[4] if len(task) > 4 else 0
                 fut = executor.submit(
                     _worker_process_shard,
                     sid, shard_path, miss_rows,
                     tokenizer_path, block_size, threads_per_worker,
-                    text_col, row_in_shard_col if row_in_shard_col is not None else "row_in_shard", has_row_in_shard,
+                    text_col, row_in_shard_col if row_in_shard_col is not None else "row_in_shard",
+                    has_row_in_shard, task_seq, task_total,
                 )
                 fut.add_done_callback(on_done)
                 futs.append(fut)

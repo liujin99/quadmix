@@ -211,6 +211,83 @@ def _read_one_shard_texts(
     return [chunk_map.get(int(rv), "") for rv in row_col_values]
 
 
+def _read_one_shard_texts_with_rows(
+    shard_path: str,
+    text_col: str,
+    row_col: Optional[str],
+    row_col_values: Optional[np.ndarray],
+    has_row_in_shard: bool,
+    is_row_col_sequential: bool,
+    shard_total_rows: int,
+) -> Tuple[List[str], np.ndarray]:
+    """Read texts from a single shard using pyarrow, returning (texts, parsed_rows).
+
+    texts[i] corresponds to parsed_rows[i].  parsed_rows is sorted ascending
+    (matching the current df.sort_values(row_col) convention used by tokenize
+    pipeline).  The caller maps parsed_rows to token array positions.
+
+    Same adaptive strategy as _read_one_shard_texts:
+      1. No row_col or sequential: read text column directly, numpy index
+      2. High select ratio (>0.3): read full shard, filter in memory
+      3. Low select ratio (≤0.3): pyarrow filter pushdown
+    """
+    import pyarrow.parquet as pq
+
+    if not has_row_in_shard or row_col is None:
+        table = pq.read_table(
+            shard_path, columns=[text_col], use_threads=False
+        )
+        text_arr = table.column(text_col).to_numpy(zero_copy_only=False)
+        texts = [str(v) if v is not None else "" for v in text_arr]
+        parsed_rows = np.arange(len(texts), dtype=np.int64)
+        return texts, parsed_rows
+
+    n_requested = len(row_col_values)
+    select_ratio = n_requested / max(shard_total_rows, 1)
+
+    if is_row_col_sequential:
+        table = pq.read_table(
+            shard_path, columns=[text_col], use_threads=False
+        )
+        text_arr = table.column(text_col).to_numpy(zero_copy_only=False)
+        texts = []
+        for rv in row_col_values:
+            idx = int(rv)
+            if 0 <= idx < len(text_arr):
+                val = text_arr[idx]
+                texts.append(str(val) if val is not None else "")
+            else:
+                texts.append("")
+        parsed_rows = row_col_values.astype(np.int64)
+        return texts, parsed_rows
+
+    if select_ratio > 0.3:
+        table = pq.read_table(
+            shard_path, columns=[row_col, text_col], use_threads=False
+        )
+        row_arr = table.column(row_col).to_numpy(zero_copy_only=False)
+        text_arr = table.column(text_col).to_numpy(zero_copy_only=False)
+        chunk_map: Dict = {}
+        for k, v in zip(row_arr, text_arr):
+            chunk_map[int(k)] = str(v) if v is not None else ""
+        texts = [chunk_map.get(int(rv), "") for rv in row_col_values]
+        parsed_rows = row_col_values.astype(np.int64)
+        return texts, parsed_rows
+
+    table = pq.read_table(
+        shard_path,
+        columns=[row_col, text_col],
+        filters=[(row_col, "in", row_col_values.tolist())],
+        use_threads=False,
+    )
+    row_arr = table.column(row_col).to_numpy(zero_copy_only=False)
+    text_arr = table.column(text_col).to_numpy(zero_copy_only=False)
+    sort_idx = np.argsort(row_arr)
+    texts = [str(text_arr[i]) if text_arr[i] is not None else "" for i in sort_idx]
+    parsed_rows = row_arr[sort_idx].astype(np.int64)
+    return texts, parsed_rows
+
+
 _CACHE_FILENAME = "metadata_cache.npz"
 
 

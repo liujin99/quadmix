@@ -29,7 +29,6 @@ from functools import partial
 from typing import List, Optional, Dict, Tuple, Callable
 from joblib import Parallel, delayed
 from contextlib import contextmanager
-import pandas as pd
 
 import warnings
 warnings.filterwarnings("ignore", message=".*owner does not match.*")
@@ -565,7 +564,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             if miss_row_col:
                 shard_path = mgr._per_shard_info[sid]["path"]
                 miss_arr = np.array(sorted(miss_row_col), dtype=np.int64)
-                shard_miss_info[sid] = (shard_path, miss_arr)
+                shard_total_rows = mgr._per_shard_info[sid]["num_docs"]
+                shard_miss_info[sid] = (shard_path, miss_arr, mgr._is_row_col_sequential, shard_total_rows)
                 total_miss_rows += len(miss_row_col)
 
             if hit_in_disk:
@@ -586,15 +586,20 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             print(f"[BatchTokenize] {total_miss_rows:,} miss rows across {len(shard_miss_info)} shards")
 
         if shard_miss_info:
+            schema = self.metadata_manager.schema
             read_t0 = time.time()
 
             shard_tasks = [
-                (sid, shard_path, miss_rows_arr.tolist())
-                for sid, (shard_path, miss_rows_arr) in shard_miss_info.items()
+                (sid, shard_path, miss_rows_arr.tolist(), is_seq, total_rows)
+                for sid, (shard_path, miss_rows_arr, is_seq, total_rows) in shard_miss_info.items()
             ]
 
             parallel_results = _tokenize_shard_parallel(
-                shard_tasks, self.tokenizer.name_or_path, self.block_size
+                shard_tasks, self.tokenizer.name_or_path, self.block_size,
+                text_col=schema.text_col,
+                row_in_shard_col=schema.row_in_shard_col,
+                has_row_in_shard=self.metadata_manager._has_row_in_shard,
+                is_row_col_sequential=self.metadata_manager._is_row_col_sequential,
             )
 
             for sid, parsed_rows, miss_tokens, io_time, tokenize_time, total_time in parallel_results:
@@ -749,23 +754,17 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                     self._cache_misses += len(miss_rcv)
                     miss_rcv_arr = np.array(miss_rcv, dtype=np.int64)
 
+                    from quadmix.data.metadata_manager import _read_one_shard_texts_with_rows
                     schema = self.metadata_manager.schema
                     text_col = schema.text_col
                     row_col = schema.row_in_shard_col if self.metadata_manager._has_row_in_shard else None
+                    shard_total_rows = mgr._per_shard_info[sid]["num_docs"]
 
-                    if row_col is not None:
-                        df_shard = pd.read_parquet(
-                            shard_path,
-                            columns=[row_col, text_col],
-                            filters=[(row_col, "in", miss_rcv_arr.tolist())],
-                        )
-                        df_shard = df_shard.sort_values(row_col)
-                        selected_texts = df_shard[text_col].astype(str).tolist()
-                        parsed_rows = df_shard[row_col].to_numpy(dtype=np.int64)
-                    else:
-                        df_shard = pd.read_parquet(shard_path, columns=[text_col])
-                        selected_texts = df_shard[text_col].astype(str).tolist()
-                        parsed_rows = np.arange(len(selected_texts), dtype=np.int64)
+                    selected_texts, parsed_rows = _read_one_shard_texts_with_rows(
+                        shard_path, text_col, row_col, miss_rcv_arr,
+                        self.metadata_manager._has_row_in_shard,
+                        mgr._is_row_col_sequential, shard_total_rows,
+                    )
 
                     print(f"    [Partial miss] shard {sid}: "
                           f"tokenizing {len(miss_rcv):,} docs "
@@ -797,23 +796,18 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                     shard_tokens = hit_tokens
             else:
                 self._cache_misses += len(local_rows)
+                from quadmix.data.metadata_manager import _read_one_shard_texts_with_rows
                 schema = self.metadata_manager.schema
                 text_col = schema.text_col
                 row_col = schema.row_in_shard_col if self.metadata_manager._has_row_in_shard else None
+                row_col_arr = np.array(row_col_int, dtype=np.int64) if row_col is not None else None
+                shard_total_rows = mgr._per_shard_info[sid]["num_docs"]
 
-                if row_col is not None:
-                    df_shard = pd.read_parquet(
-                        shard_path,
-                        columns=[row_col, text_col],
-                        filters=[(row_col, "in", row_col_int)],
-                    )
-                    df_shard = df_shard.sort_values(row_col)
-                    selected_texts = df_shard[text_col].astype(str).tolist()
-                    parsed_rows = df_shard[row_col].to_numpy(dtype=np.int64)
-                else:
-                    df_shard = pd.read_parquet(shard_path, columns=[text_col])
-                    selected_texts = df_shard[text_col].astype(str).tolist()
-                    parsed_rows = np.arange(len(selected_texts), dtype=np.int64)
+                selected_texts, parsed_rows = _read_one_shard_texts_with_rows(
+                    shard_path, text_col, row_col, row_col_arr,
+                    self.metadata_manager._has_row_in_shard,
+                    mgr._is_row_col_sequential, shard_total_rows,
+                )
 
                 print(f"    [Cache miss] shard {sid}: "
                       f"tokenizing {len(selected_texts):,} docs...")
@@ -1794,7 +1788,9 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
                 if miss_row_col:
                     miss_row_col_arr = np.array(sorted(miss_row_col), dtype=np.int64)
-                    shard_miss_info.append((sid, shard_path, miss_row_col_arr.tolist()))
+                    shard_total_rows = mgr._per_shard_info[sid]["num_docs"]
+                    shard_miss_info.append((sid, shard_path, miss_row_col_arr.tolist(),
+                                           mgr._is_row_col_sequential, shard_total_rows))
                     shard_miss_meta[sid] = len(miss_row_col)
 
         if shard_miss_info:
@@ -1807,6 +1803,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                     text_col=schema.text_col,
                     row_in_shard_col=schema.row_in_shard_col,
                     has_row_in_shard=self.metadata_manager._has_row_in_shard,
+                    is_row_col_sequential=self.metadata_manager._is_row_col_sequential,
                 )
 
             with PerfTimer.section("cache_results", "tokenize_all"):
