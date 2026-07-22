@@ -1212,6 +1212,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         graphed_step = None
         train_wrapper = None
         if device.type == "npu":
+            torch.npu.synchronize()
             try:
                 train_wrapper = GraphedTrainStep(model, 1024)
                 sample_inp = torch.zeros(self.micro_batch_size, self.block_size, dtype=torch.long, device=device)
@@ -1317,6 +1318,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         with PerfTimer.section("free_resources", _timer_prefix):
             if use_npu_graph:
                 del graphed_step, train_wrapper
+                if device.type == "npu":
+                    torch.npu.synchronize()
             del flat_train, inp_buf, tgt_buf, block_starts_buf, arange_npu, optimizer, perm
             if device.type == "npu":
                 import gc as _gc

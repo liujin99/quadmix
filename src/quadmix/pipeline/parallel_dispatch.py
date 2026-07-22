@@ -383,6 +383,8 @@ def _worker_dynamic_loop(
             result_queue.put(r)
             completed += 1
 
+            if device_type == "npu":
+                torch.npu.synchronize()
             gc.collect()
             if device_type == "npu":
                 try:
