@@ -17,14 +17,33 @@
 
 set -euo pipefail
 
-if command -v conda &>/dev/null; then
-    eval "$(conda shell.bash hook 2>/dev/null)"
-    conda activate "${CONDA_ENV:-nano}"
+NANO_ENV_PATH="${CONDA_ENV_PATH:-/home/ma-user/miniforge3/envs/nano}"
+if [[ "${CONDA_PREFIX:-}" == "$NANO_ENV_PATH" ]]; then
+    echo "  Using active Conda environment: $NANO_ENV_PATH"
+else
+    if [[ ! -f /home/ma-user/miniforge3/etc/profile.d/conda.sh ]]; then
+        echo "ERROR: Miniforge initialization script not found." >&2
+        exit 2
+    fi
+    if [[ ! -d "$NANO_ENV_PATH" ]]; then
+        echo "ERROR: Conda environment not found: $NANO_ENV_PATH" >&2
+        exit 2
+    fi
+    source /home/ma-user/miniforge3/etc/profile.d/conda.sh
+    conda activate "$NANO_ENV_PATH"
 fi
+
+PYTHON_BIN="$NANO_ENV_PATH/bin/python"
+if [[ ! -x "$PYTHON_BIN" ]]; then
+    echo "ERROR: Python not found: $PYTHON_BIN" >&2
+    exit 2
+fi
+export LD_LIBRARY_PATH="$NANO_ENV_PATH/lib:${LD_LIBRARY_PATH:-}"
 
 QUADMIX_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 DATA_MIXING_DIR="${DATA_MIXING_DIR:-$(cd "$QUADMIX_DIR/.." && pwd)}"
-PARQUET_FILTER_DIR="${PARQUET_FILTER_DIR:-/home/ma-user/work/data-mixing/parquet_filter}"
+PARQUET_FILTER_DIR="${PARQUET_FILTER_DIR:-/data/l00916525/parquet_filter——v3}"
+export STEM_METADATA_CACHE_DIR="${STEM_METADATA_CACHE_DIR:-$PARQUET_FILTER_DIR/.quadmix_metadata_cache}"
 
 export PYTHONPATH="${QUADMIX_DIR}/src:${PYTHONPATH:-}"
 export PATH="$HOME/.local/bin:$PATH"
@@ -91,8 +110,21 @@ if [[ -n "${STEM_SHARD_LIMIT:-}" ]]; then
 fi
 echo "═══════════════════════════════════════════"
 
+echo "[0/3] Validating nano Python and torch_npu..."
+"$PYTHON_BIN" - <<'PY'
+import sqlite3
+import torch
+import torch_npu
+
+if not torch.npu.is_available():
+    raise SystemExit("torch_npu imported, but torch.npu.is_available() is False")
+print(f"  Python: {__import__('sys').executable}")
+print(f"  torch: {torch.__version__}")
+print("  NPU runtime OK")
+PY
+
 echo "[1/3] Validating source parquet schemas..."
-python3 - "$PARQUET_FILTER_DIR" "${STEM_SHARD_LIMIT:-}" <<'PY'
+"$PYTHON_BIN" - "$PARQUET_FILTER_DIR" "${STEM_SHARD_LIMIT:-}" <<'PY'
 import glob
 import os
 import sys
@@ -107,7 +139,7 @@ files = sorted(
 if limit is not None:
     files = files[:limit]
 required = {
-    "text", "category_name", "category_score", "stem_relevance",
+    "text", "char_count_col", "category_name", "category_score", "stem_relevance",
     "knowledge_value", "notation_fidelity", "rigor_coherence", "noise_level",
 }
 for path in files:
@@ -142,12 +174,13 @@ else
     exit 2
 fi
 
+export STEM_METADATA_WORKERS="${STEM_METADATA_WORKERS:-8}"
 export TOKENIZE_WORKERS="${TOKENIZE_WORKERS:-48}"
 export TOKENIZE_THREADS_PER_WORKER="${TOKENIZE_THREADS_PER_WORKER:-1}"
 export QUADMIX_PERF_TIMER="${QUADMIX_PERF_TIMER:-1}"
 
 echo "[3/3] Running QuaDMix directly on parquet_filter..."
-python3 "$QUADMIX_DIR/scripts/runners/run_essential_web_v1.py" \
+"$PYTHON_BIN" "$QUADMIX_DIR/scripts/runners/run_essential_web_v1.py" \
     --preprocessed-dir "$PARQUET_FILTER_DIR" \
     --input-format stem_raw \
     "${SHARD_ARGS[@]}" \

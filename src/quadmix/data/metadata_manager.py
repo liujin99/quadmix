@@ -10,10 +10,10 @@ Usage:
     tx  = mgr.read_texts(indices)  # List[str] for selected docs
 """
 
-import json, os, glob, time, re
+import json, os, glob, re, time
 import multiprocessing as mp
 from typing import Dict, List, Optional, Tuple
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
 import numpy as np
 import pandas as pd
@@ -24,7 +24,8 @@ import pyarrow.parquet as pq
 
 from quadmix.constants import QUALITY_COLUMNS
 
-CHAR_COUNT_COL = "doc_char_count"
+CHAR_COUNT_COL = "char_count_col"
+PREPROCESSED_CHAR_COUNT_COL = "doc_char_count"
 STEM_DOMAIN_TO_ID = {"数学": 0, "化学": 1, "生物学": 2, "物理": 3}
 
 
@@ -99,7 +100,9 @@ def read_parquet_text_rows(
         raise ValueError(f"Null or non-string text found in selected rows of {shard_path}")
     return parsed, texts
 
-_METADATA_COLUMNS = ["domain", *QUALITY_COLUMNS, CHAR_COUNT_COL]
+
+_METADATA_COLUMNS = ["domain", *QUALITY_COLUMNS, PREPROCESSED_CHAR_COUNT_COL]
+_STEM_METADATA_CACHE_VERSION = 2
 
 
 def _read_shard_metadata_pyarrow(shard_path: str) -> dict:
@@ -126,6 +129,118 @@ def _read_shard_metadata_pyarrow(shard_path: str) -> dict:
 
 
 _CACHE_FILENAME = "metadata_cache.npz"
+
+
+def _read_stem_raw_shard(
+    shard_idx: int,
+    shard_path: str,
+    batch_size: int,
+) -> dict:
+    required = ["category_name", CHAR_COUNT_COL, *QUALITY_COLUMNS]
+    parquet_file = pq.ParquetFile(shard_path)
+    missing = [
+        name for name in required if name not in parquet_file.schema_arrow.names
+    ]
+    if missing:
+        raise ValueError(f"{shard_path}: missing required columns {missing}")
+
+    shard_domains: List[np.ndarray] = []
+    shard_quality: List[np.ndarray] = []
+    shard_chars: List[np.ndarray] = []
+    source_offset = 0
+
+    for batch in parquet_file.iter_batches(
+        batch_size=batch_size,
+        columns=required,
+    ):
+        frame = batch.to_pandas()
+        n = len(frame)
+
+        domains = frame["category_name"].map(STEM_DOMAIN_TO_ID)
+        domain_valid = domains.notna().to_numpy()
+
+        char_numeric = pd.to_numeric(frame[CHAR_COUNT_COL], errors="coerce")
+        char_values = char_numeric.to_numpy(dtype=np.float64, na_value=np.nan)
+        char_valid = (
+            np.isfinite(char_values)
+            & (char_values >= 0)
+            & (char_values == np.floor(char_values))
+        )
+
+        quality = np.empty((n, len(QUALITY_COLUMNS)), dtype=np.float64)
+        quality_valid = np.ones(n, dtype=bool)
+        for column_idx, name in enumerate(QUALITY_COLUMNS):
+            values = pd.to_numeric(frame[name], errors="coerce").to_numpy(
+                dtype=np.float64,
+                na_value=np.nan,
+            )
+            quality[:, column_idx] = values
+            quality_valid &= np.isfinite(values)
+
+        valid = domain_valid & char_valid & quality_valid
+        if not np.all(valid):
+            bad = int(np.flatnonzero(~valid)[0])
+            reasons = []
+            if not domain_valid[bad]:
+                reasons.append(
+                    f"invalid category_name={frame.iloc[bad]['category_name']!r}"
+                )
+            if not char_valid[bad]:
+                reasons.append(
+                    f"invalid {CHAR_COUNT_COL}={frame.iloc[bad][CHAR_COUNT_COL]!r}"
+                )
+            if not quality_valid[bad]:
+                bad_columns = [
+                    name
+                    for idx, name in enumerate(QUALITY_COLUMNS)
+                    if not np.isfinite(quality[bad, idx])
+                ]
+                reasons.append(f"invalid quality columns={bad_columns}")
+            raise ValueError(
+                f"{shard_path}: invalid record at physical row "
+                f"{source_offset + bad}: {'; '.join(reasons)}. "
+                "Direct mode does not filter rows; fix parquet_filter first."
+            )
+
+        shard_domains.append(domains.to_numpy(dtype=np.int64))
+        shard_quality.append(quality)
+        shard_chars.append(char_values.astype(np.int64, copy=False))
+        source_offset += n
+
+    n_docs = parquet_file.metadata.num_rows
+    domains_array = (
+        np.concatenate(shard_domains)
+        if shard_domains
+        else np.empty(0, dtype=np.int64)
+    )
+    quality_array = (
+        np.concatenate(shard_quality)
+        if shard_quality
+        else np.empty((0, len(QUALITY_COLUMNS)), dtype=np.float64)
+    )
+    char_count_array = (
+        np.concatenate(shard_chars)
+        if shard_chars
+        else np.empty(0, dtype=np.int64)
+    )
+    if not (
+        len(domains_array) == n_docs
+        and len(quality_array) == n_docs
+        and len(char_count_array) == n_docs
+    ):
+        raise RuntimeError(
+            f"{shard_path}: metadata row count does not match parquet footer "
+            f"({len(domains_array)} vs {n_docs})"
+        )
+
+    return {
+        "shard_idx": shard_idx,
+        "path": shard_path,
+        "num_docs": n_docs,
+        "domain": domains_array,
+        "quality": quality_array,
+        "char_count": char_count_array,
+    }
 
 
 class ShardMetadataManager:
@@ -158,9 +273,14 @@ class ShardMetadataManager:
                 "expected 'preprocessed' or 'stem_raw'"
             )
         if input_format == "stem_raw":
-            self._init_stem_raw(batch_size=batch_size, shard_limit=shard_limit)
+            self._init_stem_raw(
+                batch_size=batch_size,
+                shard_limit=shard_limit,
+                max_workers=max_workers,
+            )
             return
 
+        # Discover shards (sorted by filename for deterministic ordering)
         self._shard_files: List[str] = sorted(
             glob.glob(os.path.join(preprocessed_dir, "*.parquet"))
         )
@@ -169,6 +289,7 @@ class ShardMetadataManager:
                 f"No .parquet files found in {preprocessed_dir}"
             )
 
+        # Load index for validation
         self._shard_index: Optional[dict] = None
         if index_file is None:
             index_candidate = os.path.join(preprocessed_dir, "shard_index.json")
@@ -178,6 +299,7 @@ class ShardMetadataManager:
             with open(index_file, encoding="utf-8") as f:
                 self._shard_index = json.load(f)
 
+        # Validate: check if shard_index matches discovered files
         if self._shard_index:
             expected_shards = self._shard_index.get("num_shards", 0)
             actual_shards = len(self._shard_files)
@@ -326,7 +448,192 @@ class ShardMetadataManager:
         except Exception as e:
             print(f"[ShardMetadataManager] Failed to save cache: {e}")
 
-    def _init_stem_raw(self, batch_size: int, shard_limit: Optional[int]) -> None:
+    def _stem_cache_manifest(self, indexed: List[Tuple[int, str]]) -> dict:
+        return {
+            "version": _STEM_METADATA_CACHE_VERSION,
+            "source_dir": os.path.realpath(self._dir),
+            "quality_columns": list(QUALITY_COLUMNS),
+            "char_count_column": CHAR_COUNT_COL,
+            "domain_mapping": STEM_DOMAIN_TO_ID,
+            "shards": [
+                {
+                    "shard_idx": shard_idx,
+                    "name": os.path.basename(shard_path),
+                    "size": os.stat(shard_path).st_size,
+                    "mtime_ns": os.stat(shard_path).st_mtime_ns,
+                }
+                for shard_idx, shard_path in indexed
+            ],
+        }
+
+    def _load_stem_metadata_cache(
+        self,
+        indexed: List[Tuple[int, str]],
+        cache_dir: str,
+    ) -> bool:
+        manifest_path = os.path.join(cache_dir, "manifest.json")
+        if not os.path.isfile(manifest_path):
+            return False
+
+        load_t0 = time.time()
+        try:
+            with open(manifest_path, encoding="utf-8") as handle:
+                cached_manifest = json.load(handle)
+            expected_manifest = self._stem_cache_manifest(indexed)
+            if cached_manifest != expected_manifest:
+                print("[ShardMetadataManager] STEM metadata cache is stale; rebuilding")
+                return False
+
+            domain_labels = np.load(
+                os.path.join(cache_dir, "domain_labels.npy"),
+                allow_pickle=False,
+            )
+            quality_scores = np.load(
+                os.path.join(cache_dir, "quality_scores.npy"),
+                allow_pickle=False,
+            )
+            doc_char_counts = np.load(
+                os.path.join(cache_dir, "doc_char_counts.npy"),
+                allow_pickle=False,
+            )
+            shard_starts = np.load(
+                os.path.join(cache_dir, "shard_starts.npy"),
+                allow_pickle=False,
+            )
+            with open(
+                os.path.join(cache_dir, "shard_info.json"),
+                encoding="utf-8",
+            ) as handle:
+                cached_shard_info = json.load(handle)
+
+            num_docs = len(domain_labels)
+            if quality_scores.shape != (num_docs, len(QUALITY_COLUMNS)):
+                raise ValueError(
+                    f"invalid cached quality shape {quality_scores.shape}"
+                )
+            if len(doc_char_counts) != num_docs:
+                raise ValueError("cached character counts have the wrong length")
+            if len(shard_starts) != len(indexed):
+                raise ValueError("cached shard starts have the wrong length")
+            if len(cached_shard_info) != len(indexed):
+                raise ValueError("cached shard info has the wrong length")
+
+            per_shard_info: List[dict] = []
+            for position, ((shard_idx, shard_path), info) in enumerate(
+                zip(indexed, cached_shard_info)
+            ):
+                if int(info["shard_idx"]) != shard_idx:
+                    raise ValueError(
+                        f"cached shard index mismatch at position {position}"
+                    )
+                per_shard_info.append({
+                    "shard_idx": shard_idx,
+                    "path": shard_path,
+                    "num_docs": int(info["num_docs"]),
+                    "start_idx": int(info["start_idx"]),
+                    "end_idx": int(info["end_idx"]),
+                    "text_access": "physical_row",
+                })
+
+            if per_shard_info and per_shard_info[-1]["end_idx"] != num_docs:
+                raise ValueError("cached shard offsets do not match document count")
+
+            self._domain_labels = domain_labels
+            self._quality_scores = quality_scores
+            self._doc_char_counts = doc_char_counts
+            self._shard_starts = shard_starts
+            self._per_shard_info = per_shard_info
+            self._num_docs = num_docs
+            self._num_shards = len(indexed)
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            print(
+                f"[ShardMetadataManager] Ignoring unusable STEM metadata cache: {exc}"
+            )
+            return False
+
+        elapsed = time.time() - load_t0
+        print(
+            f"[ShardMetadataManager] Loaded STEM metadata cache: "
+            f"{self._num_docs:,} docs in {elapsed:.1f}s"
+        )
+        print(f"[ShardMetadataManager] Cache directory: {cache_dir}")
+        print(f"[ShardMetadataManager] Quality scores: {self._quality_scores.shape}")
+        return True
+
+    @staticmethod
+    def _atomic_save_npy(path: str, array: np.ndarray) -> None:
+        temporary = f"{path}.tmp"
+        with open(temporary, "wb") as handle:
+            np.save(handle, array, allow_pickle=False)
+        os.replace(temporary, path)
+
+    @staticmethod
+    def _atomic_save_json(path: str, value: object) -> None:
+        temporary = f"{path}.tmp"
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, ensure_ascii=False, sort_keys=True)
+            handle.write("\n")
+        os.replace(temporary, path)
+
+    def _save_stem_metadata_cache(
+        self,
+        indexed: List[Tuple[int, str]],
+        cache_dir: str,
+    ) -> None:
+        save_t0 = time.time()
+        os.makedirs(cache_dir, exist_ok=True)
+        manifest_path = os.path.join(cache_dir, "manifest.json")
+
+        # The manifest is the validity marker and must be written last.
+        if os.path.exists(manifest_path):
+            os.remove(manifest_path)
+
+        self._atomic_save_npy(
+            os.path.join(cache_dir, "domain_labels.npy"),
+            self._domain_labels,
+        )
+        self._atomic_save_npy(
+            os.path.join(cache_dir, "quality_scores.npy"),
+            self._quality_scores,
+        )
+        self._atomic_save_npy(
+            os.path.join(cache_dir, "doc_char_counts.npy"),
+            self._doc_char_counts,
+        )
+        self._atomic_save_npy(
+            os.path.join(cache_dir, "shard_starts.npy"),
+            self._shard_starts,
+        )
+
+        shard_info = [
+            {
+                "shard_idx": int(info["shard_idx"]),
+                "num_docs": int(info["num_docs"]),
+                "start_idx": int(info["start_idx"]),
+                "end_idx": int(info["end_idx"]),
+            }
+            for info in self._per_shard_info
+        ]
+        self._atomic_save_json(
+            os.path.join(cache_dir, "shard_info.json"),
+            shard_info,
+        )
+        self._atomic_save_json(
+            manifest_path,
+            self._stem_cache_manifest(indexed),
+        )
+        elapsed = time.time() - save_t0
+        print(
+            f"[ShardMetadataManager] Saved STEM metadata cache in {elapsed:.1f}s"
+        )
+        print(f"[ShardMetadataManager] Cache directory: {cache_dir}")
+
+    def _init_stem_raw(
+        self,
+        batch_size: int,
+        shard_limit: Optional[int],
+        max_workers: Optional[int],
+    ) -> None:
         """Load metadata directly from filtered STEM parquet shards.
 
         This is intentionally strict: rows are not filtered or renumbered at
@@ -356,101 +663,104 @@ class ShardMetadataManager:
 
         self._shard_files = [path for _, path in indexed]
         self._shard_index = None
+        total_shards = len(indexed)
+        cache_root = os.environ.get("STEM_METADATA_CACHE_DIR", "").strip()
+        cache_dir = (
+            os.path.join(cache_root, f"{total_shards}_shards")
+            if cache_root
+            else ""
+        )
+        if cache_dir and self._load_stem_metadata_cache(indexed, cache_dir):
+            return
+
+        n_workers = max_workers if max_workers is not None else min(8, total_shards)
+        if n_workers < 1:
+            raise ValueError("max_workers must be positive")
+
+        print(
+            f"[ShardMetadataManager] Direct STEM mode: {total_shards} shards, "
+            f"{n_workers} parallel workers"
+        )
+
+        shard_data: List[Optional[dict]] = [None] * total_shards
+        load_t0 = time.time()
+        done = 0
+        log_interval = max(1, total_shards // 20)
+
+        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+            future_to_position = {
+                pool.submit(
+                    _read_stem_raw_shard,
+                    shard_idx,
+                    shard_path,
+                    batch_size,
+                ): position
+                for position, (shard_idx, shard_path) in enumerate(indexed)
+            }
+            for future in as_completed(future_to_position):
+                position = future_to_position[future]
+                shard_data[position] = future.result()
+                done += 1
+                if done % log_interval == 0 or done == total_shards:
+                    elapsed = time.time() - load_t0
+                    pct = done / total_shards * 100
+                    docs_so_far = sum(
+                        result["num_docs"]
+                        for result in shard_data
+                        if result is not None
+                    )
+                    eta = elapsed / done * (total_shards - done)
+                    print(
+                        f"[ShardMetadataManager] Direct STEM {done}/{total_shards} "
+                        f"({pct:.0f}%) — {docs_so_far:,} docs, "
+                        f"elapsed {elapsed:.0f}s, ETA {eta:.0f}s"
+                    )
+
         domain_list: List[np.ndarray] = []
         quality_list: List[np.ndarray] = []
         char_count_list: List[np.ndarray] = []
-        self._per_shard_info = []
+        self._per_shard_info: List[dict] = []
         global_start = 0
-        required = ["text", "category_name", "category_score", *QUALITY_COLUMNS]
 
-        print(f"[ShardMetadataManager] Direct STEM mode: {len(indexed)} shards")
-        for shard_idx, shard_path in indexed:
-            parquet_file = pq.ParquetFile(shard_path)
-            missing = [name for name in required if name not in parquet_file.schema_arrow.names]
-            if missing:
-                raise ValueError(f"{shard_path}: missing required columns {missing}")
-
-            shard_domains: List[np.ndarray] = []
-            shard_quality: List[np.ndarray] = []
-            shard_chars: List[np.ndarray] = []
-            source_offset = 0
-            for batch in parquet_file.iter_batches(batch_size=batch_size, columns=required):
-                frame = batch.to_pandas()
-                n = len(frame)
-
-                text_valid = frame["text"].map(lambda value: isinstance(value, str)).to_numpy()
-                domains = frame["category_name"].map(STEM_DOMAIN_TO_ID)
-                domain_valid = domains.notna().to_numpy()
-                category_score = pd.to_numeric(frame["category_score"], errors="coerce")
-                score_values = category_score.to_numpy(dtype=np.float64, na_value=np.nan)
-                score_valid = np.isfinite(score_values) & (score_values > 0.3)
-
-                quality = np.empty((n, len(QUALITY_COLUMNS)), dtype=np.float64)
-                quality_valid = np.ones(n, dtype=bool)
-                for column_idx, name in enumerate(QUALITY_COLUMNS):
-                    values = pd.to_numeric(frame[name], errors="coerce").to_numpy(
-                        dtype=np.float64, na_value=np.nan
-                    )
-                    quality[:, column_idx] = values
-                    quality_valid &= np.isfinite(values)
-
-                valid = text_valid & domain_valid & score_valid & quality_valid
-                if not np.all(valid):
-                    bad = int(np.flatnonzero(~valid)[0])
-                    reasons = []
-                    if not text_valid[bad]:
-                        reasons.append("text is null or non-string")
-                    if not domain_valid[bad]:
-                        reasons.append(f"invalid category_name={frame.iloc[bad]['category_name']!r}")
-                    if not score_valid[bad]:
-                        reasons.append("category_score is not finite or <= 0.3")
-                    if not quality_valid[bad]:
-                        bad_columns = [
-                            name for idx, name in enumerate(QUALITY_COLUMNS)
-                            if not np.isfinite(quality[bad, idx])
-                        ]
-                        reasons.append(f"invalid quality columns={bad_columns}")
-                    raise ValueError(
-                        f"{shard_path}: invalid record at physical row "
-                        f"{source_offset + bad}: {'; '.join(reasons)}. "
-                        "Direct mode does not filter rows; fix parquet_filter first."
-                    )
-
-                shard_domains.append(domains.to_numpy(dtype=np.int64))
-                shard_quality.append(quality)
-                shard_chars.append(frame["text"].map(len).to_numpy(dtype=np.int64))
-                source_offset += n
-
-            n_docs = parquet_file.metadata.num_rows
-            domain_list.append(
-                np.concatenate(shard_domains) if shard_domains else np.empty(0, dtype=np.int64)
-            )
-            quality_list.append(
-                np.concatenate(shard_quality)
-                if shard_quality else np.empty((0, len(QUALITY_COLUMNS)), dtype=np.float64)
-            )
-            char_count_list.append(
-                np.concatenate(shard_chars) if shard_chars else np.empty(0, dtype=np.int64)
-            )
+        for position, data in enumerate(shard_data):
+            if data is None:
+                raise RuntimeError(
+                    f"Missing Direct STEM metadata result for shard position {position}"
+                )
+            domain_list.append(data["domain"])
+            quality_list.append(data["quality"])
+            char_count_list.append(data["char_count"])
             self._per_shard_info.append({
-                "shard_idx": shard_idx,
-                "path": shard_path,
-                "num_docs": n_docs,
+                "shard_idx": data["shard_idx"],
+                "path": data["path"],
+                "num_docs": data["num_docs"],
                 "start_idx": global_start,
-                "end_idx": global_start + n_docs,
+                "end_idx": global_start + data["num_docs"],
                 "text_access": "physical_row",
             })
-            global_start += n_docs
+            global_start += data["num_docs"]
 
         self._domain_labels = np.concatenate(domain_list)
         self._quality_scores = np.concatenate(quality_list)
         self._doc_char_counts = np.concatenate(char_count_list)
         self._num_docs = global_start
-        self._num_shards = len(self._shard_files)
+        self._num_shards = total_shards
         self._shard_starts = np.array(
             [item["start_idx"] for item in self._per_shard_info], dtype=np.int64
         )
-        print(f"[ShardMetadataManager] Loaded {self._num_docs:,} direct STEM docs")
+        if cache_dir:
+            try:
+                self._save_stem_metadata_cache(indexed, cache_dir)
+            except OSError as exc:
+                print(
+                    f"[ShardMetadataManager] WARNING: failed to save STEM "
+                    f"metadata cache: {exc}"
+                )
+        total_time = time.time() - load_t0
+        print(
+            f"[ShardMetadataManager] Loaded {self._num_docs:,} direct STEM docs "
+            f"in {total_time:.1f}s"
+        )
         print(f"[ShardMetadataManager] Quality scores: {self._quality_scores.shape}")
 
     # ── Properties ──
@@ -506,7 +816,7 @@ class ShardMetadataManager:
         mgr._shard_starts = shard_starts
         mgr._num_docs = len(domain_labels)
         mgr._num_shards = len(per_shard_info)
-        mgr._shard_files = []
+        mgr._shard_files = []  # not needed for shared mode
         mgr._shard_index = None
         return mgr
 
@@ -517,6 +827,17 @@ class ShardMetadataManager:
         return int(np.sum(self._doc_char_counts))
 
     def get_total_tokens_estimate(self, chars_per_token: float = 4.0) -> int:
+        """
+        Estimate total tokens from character count.
+
+        For English text, typical ratio is ~4 chars per token (GPT-NeoX tokenizer).
+
+        Args:
+            chars_per_token: Ratio for estimation. Default 4.0 for English.
+
+        Returns:
+            Estimated total tokens.
+        """
         total_chars = self.get_total_chars()
         return int(total_chars / chars_per_token)
 
@@ -525,11 +846,18 @@ class ShardMetadataManager:
     def global_to_shard_rows(
         self, global_indices: npt.NDArray[np.int64]
     ) -> Dict[int, Tuple[str, npt.NDArray[np.int64]]]:
+        """
+        Convert global document indices to per-shard lookup instructions.
+
+        Returns:
+            Dict[shard_idx, (shard_path, local_row_indices)]
+        """
         shard_ids = np.searchsorted(
             self._shard_starts, global_indices, side="right"
         ) - 1
         shard_ids = np.clip(shard_ids, 0, self._num_shards - 1)
 
+        # Sort by shard_id for grouping
         order = np.argsort(shard_ids)
         sorted_shard_ids = shard_ids[order]
         sorted_global_idx = global_indices[order]
@@ -552,7 +880,12 @@ class ShardMetadataManager:
     def read_texts(
         self, global_indices: npt.NDArray[np.int64]
     ) -> List[str]:
-        import pandas as pd
+        """
+        Read text for selected global indices, preserving input order.
+
+        Groups by shard, reads only needed rows from each shard via
+        parquet row filters.
+        """
         if len(global_indices) == 0:
             return []
 
@@ -579,4 +912,5 @@ class ShardMetadataManager:
     def estimate_token_counts(
         self,
     ) -> npt.NDArray[np.int64]:
+        """Estimate token count per doc: char_count // 4 (same formula as single-file mode)."""
         return np.maximum(self._doc_char_counts // 4, 1).astype(np.int64)

@@ -963,6 +963,7 @@ def main():
         args.preprocessed_dir,
         input_format=args.input_format,
         shard_limit=args.shard_limit,
+        max_workers=int(os.environ.get("STEM_METADATA_WORKERS", "8")),
     )
     print(f"[Setup] {metadata_manager.num_docs:,} docs across "
           f"{metadata_manager.num_shards} shards")
