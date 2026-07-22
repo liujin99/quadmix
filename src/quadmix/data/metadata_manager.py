@@ -123,6 +123,12 @@ def _read_shard_metadata_pyarrow(shard_path: str, schema: DatasetSchema) -> dict
     else:
         char_count_arr = np.zeros(n, dtype=np.int64)
 
+    if schema.row_in_shard_col is not None and schema.row_in_shard_col in table.column_names:
+        row_in_shard_arr = table.column(schema.row_in_shard_col).to_numpy(
+            zero_copy_only=False).astype(np.int64)
+    else:
+        row_in_shard_arr = np.arange(n, dtype=np.int64)
+
     return {
         "shard_idx": parsed_idx,
         "path": shard_path,
@@ -130,6 +136,7 @@ def _read_shard_metadata_pyarrow(shard_path: str, schema: DatasetSchema) -> dict
         "domain": domain_arr,
         "quality": quality_arr,
         "char_count": char_count_arr,
+        "row_in_shard_col": row_in_shard_arr,
         "domain_cat_map": cat_map,
         "computed_char_count": schema.needs_text_for_char_count(),
     }
@@ -215,6 +222,7 @@ class ShardMetadataManager:
                     f":{','.join(self._schema.quality_cols)}"
                     f":{self._schema.text_col}"
                     f":{self._schema.char_count_col}"
+                    f":{self._schema.row_in_shard_col}"
                     f":domain_names={','.join(self._schema.domain_names or [])}"
                     f":quality_directions={','.join(str(d) for d in self._schema.quality_directions)}"
                 )
@@ -249,6 +257,20 @@ class ShardMetadataManager:
             self._shard_starts = np.array(
                 [s["start_idx"] for s in self._per_shard_info], dtype=np.int64
             )
+
+            if "row_in_shard_cols_concat" in cached:
+                concat = cached["row_in_shard_cols_concat"]
+                boundaries = cached["row_in_shard_boundaries"]
+                self._row_in_shard_cols = {}
+                for i in range(len(self._per_shard_info)):
+                    start = int(boundaries[i])
+                    end = int(boundaries[i + 1]) if i + 1 < len(boundaries) else len(concat)
+                    self._row_in_shard_cols[i] = concat[start:end]
+            else:
+                self._row_in_shard_cols = {}
+
+            self._is_row_col_sequential = self._check_row_col_sequential()
+            self._row_in_shard_col_sorted_cache = {}
 
             unique_domains = np.unique(self._domain_labels)
             if self._schema.domain_names is not None:
@@ -318,12 +340,15 @@ class ShardMetadataManager:
         domain_list: List[np.ndarray] = []
         quality_list: List[np.ndarray] = []
         char_count_list: List[np.ndarray] = []
+        row_col_list: List[np.ndarray] = []
+        row_col_boundaries: List[int] = [0]
         domain_cat_maps: List[dict] = []
 
         for i, data in enumerate(shard_data):
             domain_list.append(data["domain"])
             quality_list.append(data["quality"])
             char_count_list.append(data["char_count"])
+            row_col_list.append(data["row_in_shard_col"])
             if data["domain_cat_map"] is not None:
                 domain_cat_maps.append(data["domain_cat_map"])
             self._per_shard_info[i] = {
@@ -333,6 +358,7 @@ class ShardMetadataManager:
                 "start_idx": global_start,
                 "end_idx": global_start + data["num_docs"],
             }
+            row_col_boundaries.append(row_col_boundaries[-1] + data["num_docs"])
             global_start += data["num_docs"]
 
         self._domain_labels = np.concatenate(domain_list)
@@ -344,6 +370,12 @@ class ShardMetadataManager:
         self._shard_starts = np.array(
             [s["start_idx"] for s in self._per_shard_info], dtype=np.int64
         )
+
+        self._row_in_shard_cols: Dict[int, np.ndarray] = {}
+        for i, data in enumerate(shard_data):
+            self._row_in_shard_cols[i] = data["row_in_shard_col"]
+        self._is_row_col_sequential = self._check_row_col_sequential()
+        self._row_in_shard_col_sorted_cache: Dict[int, bool] = {}
 
         unique_domains = np.unique(self._domain_labels)
         if self._schema.domain_names is not None:
@@ -386,15 +418,20 @@ class ShardMetadataManager:
               f"Quality scores: {self._quality_scores.shape}")
 
         try:
+            row_in_shard_cols_concat = np.concatenate(row_col_list)
+            row_in_shard_boundaries = np.array(row_col_boundaries, dtype=np.int64)
             np.savez(cache_path,
                      domain_labels=self._domain_labels,
                      quality_scores=self._quality_scores,
-                     doc_char_counts=self._doc_char_counts)
+                     doc_char_counts=self._doc_char_counts,
+                     row_in_shard_cols_concat=row_in_shard_cols_concat,
+                     row_in_shard_boundaries=row_in_shard_boundaries)
             schema_key = (
                 f"{self._schema.domain_col}"
                 f":{','.join(self._schema.quality_cols)}"
                 f":{self._schema.text_col}"
                 f":{self._schema.char_count_col}"
+                f":{self._schema.row_in_shard_col}"
                 f":domain_names={','.join(self._schema.domain_names or [])}"
                 f":quality_directions={','.join(str(d) for d in self._schema.quality_directions)}"
             )
@@ -452,6 +489,50 @@ class ShardMetadataManager:
             return [code_to_name.get(int(m), f"D{m}") for m in range(self._num_domains)]
 
         return [f"D{m}" for m in range(self._num_domains)]
+
+    def _check_row_col_sequential(self) -> bool:
+        """Check if row_in_shard_col values equal sequential 0-based positions for ALL shards."""
+        if not self._row_in_shard_cols:
+            return True
+        for sid, arr in self._row_in_shard_cols.items():
+            expected = np.arange(len(arr), dtype=np.int64)
+            if not np.array_equal(arr, expected):
+                return False
+        return True
+
+    # ── Row-in-shard ID conversion ──
+
+    def _is_row_col_sorted(self, sid: int) -> bool:
+        if sid not in self._row_in_shard_col_sorted_cache:
+            if sid not in self._row_in_shard_cols:
+                self._row_in_shard_col_sorted_cache[sid] = True
+            else:
+                arr = self._row_in_shard_cols[sid]
+                self._row_in_shard_col_sorted_cache[sid] = bool(np.all(arr[:-1] <= arr[1:]))
+        return self._row_in_shard_col_sorted_cache[sid]
+
+    def local_to_row_col(self, sid: int, local_positions: np.ndarray) -> np.ndarray:
+        if self._is_row_col_sequential or sid not in self._row_in_shard_cols:
+            return local_positions
+        return self._row_in_shard_cols[sid][local_positions]
+
+    def row_col_to_local(self, sid: int, row_col_values: np.ndarray) -> np.ndarray:
+        if self._is_row_col_sequential or sid not in self._row_in_shard_cols:
+            return row_col_values
+        col_arr = self._row_in_shard_cols[sid]
+        if self._is_row_col_sorted(sid):
+            positions = np.searchsorted(col_arr, row_col_values)
+            positions = np.clip(positions, 0, len(col_arr) - 1)
+            matched = col_arr[positions] == row_col_values
+            if not matched.all():
+                n_miss = int((~matched).sum())
+                raise ValueError(
+                    f"[ShardMetadataManager] row_col_to_local: shard {sid} has "
+                    f"{n_miss} unmatched row_in_shard_col values"
+                )
+            return positions.astype(np.int64)
+        reverse_map = {int(v): i for i, v in enumerate(col_arr)}
+        return np.array([reverse_map[int(v)] for v in row_col_values], dtype=np.int64)
 
     # ── Properties ──
 
@@ -550,6 +631,9 @@ class ShardMetadataManager:
         valid_labels = domain_labels[domain_labels >= 0]
         mgr._domain_counts = np.bincount(valid_labels, minlength=mgr._num_domains)
         mgr._has_row_in_shard = False
+        mgr._row_in_shard_cols = {}
+        mgr._is_row_col_sequential = True
+        mgr._row_in_shard_col_sorted_cache = {}
         return mgr
 
     # ── Token estimation ──
@@ -608,15 +692,17 @@ class ShardMetadataManager:
 
         for sid, (shard_path, local_rows) in shard_groups.items():
             if row_col is not None:
+                row_col_values = self.local_to_row_col(sid, local_rows)
                 df_chunk = pd.read_parquet(
                     shard_path,
                     columns=[row_col, text_col],
-                    filters=[(row_col, "in", local_rows.tolist())],
+                    filters=[(row_col, "in", row_col_values.tolist())],
                 )
                 chunk_map = dict(zip(df_chunk[row_col], df_chunk[text_col]))
-                for local_row in local_rows:
-                    text = chunk_map.get(local_row, "")
-                    global_idx = self._shard_starts[sid] + local_row
+                for i, local_row in enumerate(local_rows):
+                    rcv = int(row_col_values[i])
+                    text = chunk_map.get(rcv, "")
+                    global_idx = self._shard_starts[sid] + int(local_row)
                     for pos in pos_map.get(int(global_idx), []):
                         result[pos] = text
             else:

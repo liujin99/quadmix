@@ -191,6 +191,8 @@ class DatasetSchema:
             cols.append(self.char_count_col)
         if self.needs_text_for_char_count():
             cols.append(self.text_col)
+        if self.row_in_shard_col is not None:
+            cols.append(self.row_in_shard_col)
         return cols
 
     def text_read_columns(self) -> List[str]:

@@ -536,20 +536,24 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             for exp_id, rows in exp_rows_dict.items():
                 all_needed_rows.update(rows)
 
+            all_needed_arr = np.array(sorted(all_needed_rows), dtype=np.int64)
+            row_col_vals = mgr.local_to_row_col(sid, all_needed_arr)
+            row_col_int = set(int(v) for v in row_col_vals)
+
             memory_cached = self._memory_cache_get_rows(sid)
-            hit_in_memory = [r for r in all_needed_rows if r in memory_cached]
+            hit_in_memory = [v for v in row_col_int if v in memory_cached]
 
-            remaining_rows = [r for r in all_needed_rows if r not in memory_cached]
+            remaining = [v for v in row_col_int if v not in memory_cached]
             disk_cached = self._cached_shard_rows(sid)
-            hit_in_disk = [r for r in remaining_rows if r in disk_cached]
+            hit_in_disk = [v for v in remaining if v in disk_cached]
 
-            miss_rows = [r for r in remaining_rows if r not in disk_cached]
+            miss_row_col = [v for v in remaining if v not in disk_cached]
 
-            if miss_rows:
+            if miss_row_col:
                 shard_path = mgr._per_shard_info[sid]["path"]
-                miss_rows_arr = np.array(sorted(miss_rows), dtype=np.int64)
-                shard_miss_info[sid] = (shard_path, miss_rows_arr)
-                total_miss_rows += len(miss_rows)
+                miss_arr = np.array(sorted(miss_row_col), dtype=np.int64)
+                shard_miss_info[sid] = (shard_path, miss_arr)
+                total_miss_rows += len(miss_row_col)
 
             if hit_in_disk:
                 cache_path = self._get_shard_token_path(sid)
@@ -607,7 +611,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             for sid, cache_data in self._memory_cache.items():
                 rows = cache_data["rows"]
                 tokens = cache_data["tokens"]
-                global_ids = shard_starts[sid] + rows
+                seq_positions = mgr.row_col_to_local(sid, rows)
+                global_ids = shard_starts[sid] + seq_positions
                 global_ids_list.append(global_ids)
                 tokens_list.append(tokens)
 
@@ -697,32 +702,35 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         for sid, (shard_path, local_rows) in shard_groups.items():
             cache_path = self._get_shard_token_path(sid)
 
+            row_col_vals = mgr.local_to_row_col(sid, local_rows)
+            row_col_int = [int(v) for v in row_col_vals]
+
             if os.path.exists(cache_path):
                 data = np.load(cache_path)
                 token_data = data['tokens']
                 row_index = data['rows']
                 row_to_pos = {int(r): i for i, r in enumerate(row_index)}
 
-                hit_rows = [r for r in local_rows if int(r) in row_to_pos]
-                miss_rows = [r for r in local_rows if int(r) not in row_to_pos]
+                hit_rcv = [v for v in row_col_int if v in row_to_pos]
+                miss_rcv = [v for v in row_col_int if v not in row_to_pos]
 
                 hit_tokens = None
                 miss_tokens = None
 
-                if hit_rows:
+                if hit_rcv:
                     positions = np.array(
-                        [row_to_pos[int(r)] for r in hit_rows], dtype=np.int64
+                        [row_to_pos[v] for v in hit_rcv], dtype=np.int64
                     )
                     hit_tokens = torch.from_numpy(
                         token_data[positions].astype(np.int64)
                     )
-                    self._cache_hits += len(hit_rows)
+                    self._cache_hits += len(hit_rcv)
 
                 del data, token_data, row_index
 
-                if miss_rows:
-                    self._cache_misses += len(miss_rows)
-                    miss_rows_arr = np.array(miss_rows, dtype=np.int64)
+                if miss_rcv:
+                    self._cache_misses += len(miss_rcv)
+                    miss_rcv_arr = np.array(miss_rcv, dtype=np.int64)
 
                     schema = self.metadata_manager.schema
                     text_col = schema.text_col
@@ -732,7 +740,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                         df_shard = pd.read_parquet(
                             shard_path,
                             columns=[row_col, text_col],
-                            filters=[(row_col, "in", miss_rows_arr.tolist())],
+                            filters=[(row_col, "in", miss_rcv_arr.tolist())],
                         )
                         df_shard = df_shard.sort_values(row_col)
                         selected_texts = df_shard[text_col].astype(str).tolist()
@@ -743,30 +751,30 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                         parsed_rows = np.arange(len(selected_texts), dtype=np.int64)
 
                     print(f"    [Partial miss] shard {sid}: "
-                          f"tokenizing {len(miss_rows):,} docs "
-                          f"(hit {len(hit_rows):,} from cache)...")
+                          f"tokenizing {len(miss_rcv):,} docs "
+                          f"(hit {len(hit_rcv):,} from cache)...")
 
                     miss_tokens_full = self._tokenize_texts(selected_texts)
                     self._cache_add_rows(sid, parsed_rows, miss_tokens_full)
 
                     row_to_pos_new = {int(r): i for i, r in enumerate(parsed_rows)}
                     positions = np.array(
-                        [row_to_pos_new[int(r)] for r in miss_rows], dtype=np.int64
+                        [row_to_pos_new[v] for v in miss_rcv], dtype=np.int64
                     )
                     miss_tokens = torch.from_numpy(
                         miss_tokens_full.numpy().astype(np.int64)[positions]
                     )
 
-                if miss_rows:
+                if miss_rcv:
                     row_to_token = {}
                     if hit_tokens is not None:
-                        for i, r in enumerate(hit_rows):
-                            row_to_token[int(r)] = hit_tokens[i]
+                        for i, v in enumerate(hit_rcv):
+                            row_to_token[v] = hit_tokens[i]
                     if miss_tokens is not None:
-                        for i, r in enumerate(miss_rows):
-                            row_to_token[int(r)] = miss_tokens[i]
+                        for i, v in enumerate(miss_rcv):
+                            row_to_token[v] = miss_tokens[i]
                     shard_tokens = torch.stack([
-                        row_to_token[int(r)] for r in local_rows
+                        row_to_token[v] for v in row_col_int
                     ])
                 else:
                     shard_tokens = hit_tokens
@@ -780,7 +788,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                     df_shard = pd.read_parquet(
                         shard_path,
                         columns=[row_col, text_col],
-                        filters=[(row_col, "in", local_rows.tolist())],
+                        filters=[(row_col, "in", row_col_int)],
                     )
                     df_shard = df_shard.sort_values(row_col)
                     selected_texts = df_shard[text_col].astype(str).tolist()
@@ -798,7 +806,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
                 row_to_pos = {int(r): i for i, r in enumerate(parsed_rows)}
                 positions = np.array(
-                    [row_to_pos[int(r)] for r in local_rows], dtype=np.int64
+                    [row_to_pos[v] for v in row_col_int], dtype=np.int64
                 )
                 shard_tokens = torch.from_numpy(
                     tokenized.numpy().astype(np.int64)[positions]
@@ -1745,16 +1753,17 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 cached_rows = self._cached_shard_rows(sid)
                 memory_cached = self._memory_cache_get_rows(sid)
 
-                local_rows_int = [int(r) for r in local_rows]
-                hit_rows = [r for r in local_rows_int if r in cached_rows or r in memory_cached]
-                miss_rows = [r for r in local_rows_int if r not in cached_rows and r not in memory_cached]
+                row_col_vals = mgr.local_to_row_col(sid, local_rows)
+                row_col_int = [int(v) for v in row_col_vals]
+                hit_rows = [v for v in row_col_int if v in cached_rows or v in memory_cached]
+                miss_row_col = [v for v in row_col_int if v not in cached_rows and v not in memory_cached]
 
                 total_cached += len(hit_rows)
 
-                if miss_rows:
-                    miss_rows_arr = np.array(sorted(miss_rows), dtype=np.int64)
-                    shard_miss_info.append((sid, shard_path, miss_rows_arr.tolist()))
-                    shard_miss_meta[sid] = len(miss_rows)
+                if miss_row_col:
+                    miss_row_col_arr = np.array(sorted(miss_row_col), dtype=np.int64)
+                    shard_miss_info.append((sid, shard_path, miss_row_col_arr.tolist()))
+                    shard_miss_meta[sid] = len(miss_row_col)
 
         if shard_miss_info:
             print(f"[TokenizeAll] {sum(shard_miss_meta.values()):,} miss rows across {len(shard_miss_info)} shards, parallel tokenizing...")
@@ -1786,7 +1795,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         for sid, cache_data in self._memory_cache.items():
             rows = cache_data["rows"]
             tokens = cache_data["tokens"]
-            global_ids = shard_starts[sid] + rows
+            seq_positions = mgr.row_col_to_local(sid, rows)
+            global_ids = shard_starts[sid] + seq_positions
             global_ids_list.append(global_ids)
             tokens_list.append(tokens)
 
