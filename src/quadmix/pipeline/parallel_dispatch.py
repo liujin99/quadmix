@@ -385,7 +385,10 @@ def _worker_dynamic_loop(
 
             gc.collect()
             if device_type == "npu":
-                torch.npu.empty_cache()
+                try:
+                    torch.npu.empty_cache()
+                except Exception:
+                    pass
 
             if shm_info is not None:
                 from multiprocessing.shared_memory import SharedMemory
@@ -520,7 +523,10 @@ def _reval_worker(
             if device.type == "npu":
                 import gc
                 gc.collect()
-                torch.npu.empty_cache()
+                try:
+                    torch.npu.empty_cache()
+                except Exception:
+                    pass
             elif device.type == "cuda":
                 torch.cuda.empty_cache()
 

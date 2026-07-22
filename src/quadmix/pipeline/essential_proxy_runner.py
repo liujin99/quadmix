@@ -37,6 +37,12 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+def _safe_npu_empty_cache():
+    try:
+        torch.npu.empty_cache()
+    except Exception:
+        pass
+
 from quadmix.core.types import ParameterSet, ProxyResult, QuaDMixConfig
 from quadmix.core.quality_merger import compute_merged_quality_scores
 from quadmix.core.quality_rank import compute_quality_ranks
@@ -1200,7 +1206,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         arange_npu = torch.arange(self.block_size, dtype=torch.long, device=device)
 
         if device.type == "npu":
-            torch.npu.empty_cache()
+            _safe_npu_empty_cache()
 
         use_npu_graph = False
         graphed_step = None
@@ -1286,7 +1292,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
                 if checkpoint_interval > 0 and step_ct % checkpoint_interval == 0 and step_ct < num_steps:
                     if device.type == "npu":
-                        torch.npu.empty_cache()
+                        _safe_npu_empty_cache()
                     elif device.type == "cuda":
                         torch.cuda.empty_cache()
                     ckpt_val, _ = self._run_validation(model, device)
@@ -1315,7 +1321,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             if device.type == "npu":
                 import gc as _gc
                 _gc.collect()
-                torch.npu.empty_cache()
+                _safe_npu_empty_cache()
             elif device.type == "cuda":
                 import gc as _gc
                 _gc.collect()
@@ -1409,7 +1415,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             if device.type == "npu":
                 import gc
                 gc.collect()
-                torch.npu.empty_cache()
+                _safe_npu_empty_cache()
 
         return ProxyResult(parameters=params, validation_loss=val_loss, metadata=meta, per_task_losses=per_task_losses)
 
@@ -1468,7 +1474,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         
         del val_tokens, val_mask, per_doc_losses, all_losses
         if device.type == "npu":
-            torch.npu.empty_cache()
+            _safe_npu_empty_cache()
         elif device.type == "cuda":
             torch.cuda.empty_cache()
         model.train()
@@ -1491,7 +1497,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         if device.type == "npu":
             import gc
             gc.collect()
-            torch.npu.empty_cache()
+            _safe_npu_empty_cache()
         elif device.type == "cuda":
             torch.cuda.empty_cache()
         return val_loss, per_task_losses
