@@ -711,6 +711,7 @@ class QuaDMixPipeline:
                       default=lambda x: float(x) if isinstance(x, (np.floating,)) else x)
 
         if text_source == "sharded":
+            print(f"[Stage 8] Reading {len(selected_indices):,} sampled texts from shards...")
             sampled_texts = self._metadata_manager.read_texts(selected_indices)
             sel_domain = domain_labels[selected_indices]
             sel_rank = final_ranks[selected_indices]
@@ -720,6 +721,7 @@ class QuaDMixPipeline:
             sampled_path = os.path.join(output_dir, "sampled_dataset.parquet")
             os.makedirs(os.path.dirname(sampled_path) or ".", exist_ok=True)
             schema = self._schema
+            print(f"[Stage 8] Writing sampled dataset to parquet ({len(selected_indices):,} rows)...")
             pd.DataFrame({
                 schema.text_col: sampled_texts,
                 "doc_id": selected_indices,

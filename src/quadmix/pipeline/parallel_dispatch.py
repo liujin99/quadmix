@@ -5,6 +5,7 @@ Standalone functions used by EssentialWebProxyRunner for multi-NPU parallel trai
 
 import os
 import time
+import gc
 import warnings
 import multiprocessing as mp
 from typing import Dict, List, Optional, Tuple
@@ -362,7 +363,6 @@ def _worker_dynamic_loop(
             result_queue.put(r)
             completed += 1
 
-            import gc
             gc.collect()
             if device_type == "npu":
                 torch.npu.empty_cache()
@@ -411,7 +411,6 @@ def _worker_dynamic_loop(
         except:
             pass
         try:
-            import torch
             if device_type == "npu":
                 torch.npu.empty_cache()
         except:

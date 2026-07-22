@@ -58,7 +58,7 @@ def compute_val_batch_size(
         (val_bs, chunk_size) — both guaranteed >= 1.
     """
     if device.type not in ("npu", "cuda"):
-        return min(max_val_bs, 8), min(seq_len, 2048)
+        return min(max_val_bs, 8), 2048
 
     api = torch.npu if device.type == "npu" else torch.cuda
     total_mem = api.get_device_properties(device).total_memory
@@ -69,8 +69,6 @@ def compute_val_batch_size(
         return 4, 256
 
     for cs in (2048, 1024, 512, 256):
-        if cs > seq_len:
-            continue
         per_sample_peak = 6 * cs * vocab_size
         bs = max(4, min(max_val_bs, int(safe_available / per_sample_peak)))
         if bs >= 8:

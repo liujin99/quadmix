@@ -31,7 +31,7 @@ import json, os, glob, time, re
 import multiprocessing as mp
 
 from typing import Dict, List, Optional, Tuple
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 
 from quadmix.utils.concurrency import ConcurrencyConfig
 
@@ -678,6 +678,7 @@ class ShardMetadataManager:
         self, global_indices: npt.NDArray[np.int64]
     ) -> List[str]:
         import pandas as pd
+        import time as _time
         if len(global_indices) == 0:
             return []
 
@@ -686,11 +687,23 @@ class ShardMetadataManager:
         for p, idx in enumerate(global_indices):
             pos_map.setdefault(int(idx), []).append(p)
 
-        result = [""] * len(global_indices)
         text_col = self._schema.text_col
         row_col = self._schema.row_in_shard_col if self._has_row_in_shard else None
 
-        for sid, (shard_path, local_rows) in shard_groups.items():
+        cfg = ConcurrencyConfig()
+        n_shards = len(shard_groups)
+        n_workers = min(cfg.max_io_workers, n_shards)
+
+        if n_shards <= 1:
+            n_workers = 1
+
+        print(f"[read_texts] {len(global_indices):,} texts from {n_shards} shards, "
+              f"{n_workers} I/O threads")
+
+        t0 = _time.time()
+
+        def _read_one_shard(sid: int, shard_path: str, local_rows: np.ndarray):
+            texts_out: List[Tuple[int, str]] = []
             if row_col is not None:
                 row_col_values = self.local_to_row_col(sid, local_rows)
                 df_chunk = pd.read_parquet(
@@ -703,16 +716,46 @@ class ShardMetadataManager:
                     rcv = int(row_col_values[i])
                     text = chunk_map.get(rcv, "")
                     global_idx = self._shard_starts[sid] + int(local_row)
-                    for pos in pos_map.get(int(global_idx), []):
-                        result[pos] = text
+                    texts_out.append((global_idx, text))
             else:
                 df_chunk = pd.read_parquet(shard_path, columns=[text_col])
                 for local_row in local_rows:
                     if local_row < len(df_chunk):
                         text = df_chunk.iloc[local_row][text_col]
                         global_idx = self._shard_starts[sid] + local_row
-                        for pos in pos_map.get(int(global_idx), []):
-                            result[pos] = str(text) if text is not None else ""
+                        texts_out.append((global_idx, str(text) if text is not None else ""))
+            return texts_out
+
+        all_texts: List[Tuple[int, str]] = []
+        if n_workers <= 1:
+            for sid, (shard_path, local_rows) in shard_groups.items():
+                all_texts.extend(_read_one_shard(sid, shard_path, local_rows))
+        else:
+            log_interval = max(1, n_shards // 20)
+            done = 0
+            with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                future_map = {
+                    pool.submit(_read_one_shard, sid, shard_path, local_rows): sid
+                    for sid, (shard_path, local_rows) in shard_groups.items()
+                }
+                for future in as_completed(future_map):
+                    all_texts.extend(future.result())
+                    done += 1
+                    if done % log_interval == 0 or done == n_shards:
+                        elapsed = _time.time() - t0
+                        pct = done / n_shards * 100
+                        eta = elapsed / done * (n_shards - done)
+                        print(f"[read_texts] {done}/{n_shards} shards "
+                              f"({pct:.0f}%) — elapsed {elapsed:.0f}s, ETA {eta:.0f}s")
+
+        result = [""] * len(global_indices)
+        for global_idx, text in all_texts:
+            for pos in pos_map.get(int(global_idx), []):
+                result[pos] = text
+
+        elapsed = _time.time() - t0
+        print(f"[read_texts] Done: {len(global_indices):,} texts in {elapsed:.1f}s "
+              f"({n_shards} shards, {n_workers} threads)")
 
         return result
 
