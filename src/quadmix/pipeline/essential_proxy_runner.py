@@ -58,8 +58,8 @@ from quadmix.pipeline.parallel_dispatch import (
 from collections import namedtuple
 
 _PreSampleData = namedtuple("_PreSampleData", [
-    "normalized_quality_info", "domain_indices_infos",
-    "token_counts_info", "has_token_counts",
+    "sub_quality_infos", "domain_indices_infos",
+    "sub_token_counts_infos", "has_token_counts",
     "num_domains", "rank_ref_size", "num_docs",
 ])
 
@@ -79,27 +79,30 @@ class GraphedTrainStep(torch.nn.Module):
 def _presample_one(args):
     i, params, data = args
     from quadmix.pipeline.shared_memory import shared_to_ndarray
-    normalized_quality = shared_to_ndarray(data.normalized_quality_info)
+    sub_qualities = {m: shared_to_ndarray(info) for m, info in data.sub_quality_infos.items()}
     domain_indices = {m: shared_to_ndarray(info) for m, info in data.domain_indices_infos.items()}
-    token_counts = shared_to_ndarray(data.token_counts_info) if data.has_token_counts else None
+    sub_tc = {}
+    if data.has_token_counts:
+        sub_tc = {m: shared_to_ndarray(info) for m, info in data.sub_token_counts_infos.items()}
 
     M = data.num_domains
     rng_eq2 = np.random.default_rng(i + 1729)
     rng_sample = np.random.default_rng(i + 42)
-    has_tokens = token_counts is not None
+    has_tokens = data.has_token_counts
 
     domain_selected = []
 
     for m in range(M):
-        indices = domain_indices.get(m)
-        if indices is None or len(indices) == 0:
+        if m not in sub_qualities or len(sub_qualities[m]) == 0:
             continue
         if m >= len(params.sampling_configs):
             continue
 
-        n_m = len(indices)
+        sub_q = sub_qualities[m]
+        indices = domain_indices.get(m)
+        n_m = len(sub_q)
         alpha_m = params.merge_config.get_final_weights(m)
-        domain_scores = normalized_quality[indices] @ alpha_m
+        domain_scores = sub_q @ alpha_m
 
         k = min(data.rank_ref_size, n_m)
         ref_idx = rng_eq2.choice(n_m, k, replace=False)
@@ -108,8 +111,8 @@ def _presample_one(args):
         ref_scores = ref_scores_unsorted[sort_order]
         positions = np.searchsorted(-ref_scores, -domain_scores, side='right')
 
-        if has_tokens:
-            ref_tokens = token_counts[indices[ref_idx]][sort_order].astype(np.float64)
+        if has_tokens and m in sub_tc:
+            ref_tokens = sub_tc[m][ref_idx][sort_order].astype(np.float64)
             cum_tokens = np.concatenate(([0.0], np.cumsum(ref_tokens)))
             total_ref_tokens = cum_tokens[-1]
             if total_ref_tokens > 0:
@@ -1645,12 +1648,14 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         n = len(all_params)
         num_cpus = cfg.cpu_count
 
+        q_cols = self._normalized_quality.shape[1]
+        q_itemsize = self._normalized_quality.dtype.itemsize
         shm_data_size = (
-            self._normalized_quality.nbytes
+            sum(len(idx) * q_cols * q_itemsize for idx in self._domain_indices.values())
             + sum(idx.nbytes for idx in self._domain_indices.values())
         )
         if self._token_counts is not None:
-            shm_data_size += self._token_counts.nbytes
+            shm_data_size += sum(len(idx) * self._token_counts.dtype.itemsize for idx in self._domain_indices.values())
         n_m_max = max((len(idx) for idx in self._domain_indices.values()), default=self._num_docs)
         compute_mem = 6 * n_m_max * 8
         mem_per_process = compute_mem + 50 * 1024**2
@@ -1677,24 +1682,33 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         )
 
         shm_blocks = []
-        nq_info = ndarray_to_shared(self._normalized_quality, "presample_nq")
-        shm_blocks.append(nq_info.name)
+        sq_infos = {}
+        t_pre = time.time()
+        for m, idx in self._domain_indices.items():
+            sub_q = np.ascontiguousarray(self._normalized_quality[idx])
+            info = ndarray_to_shared(sub_q, f"presample_sq_{m}")
+            sq_infos[m] = info
+            shm_blocks.append(info.name)
         di_infos = {}
         for m, idx in self._domain_indices.items():
             info = ndarray_to_shared(idx, f"presample_di_{m}")
             di_infos[m] = info
             shm_blocks.append(info.name)
         has_tc = self._token_counts is not None
+        stc_infos = {}
         if has_tc:
-            tc_info = ndarray_to_shared(self._token_counts, "presample_tc")
-            shm_blocks.append(tc_info.name)
-        else:
-            tc_info = None
+            for m, idx in self._domain_indices.items():
+                sub_tc = np.ascontiguousarray(self._token_counts[idx])
+                info = ndarray_to_shared(sub_tc, f"presample_stc_{m}")
+                stc_infos[m] = info
+                shm_blocks.append(info.name)
+        pre_elapsed = time.time() - t_pre
+        print(f"[PreSample] Pre-extraction (contiguous per-domain): {pre_elapsed:.1f}s")
 
         data = _PreSampleData(
-            normalized_quality_info=nq_info,
+            sub_quality_infos=sq_infos,
             domain_indices_infos=di_infos,
-            token_counts_info=tc_info,
+            sub_token_counts_infos=stc_infos,
             has_token_counts=has_tc,
             num_domains=self.config.num_domains,
             rank_ref_size=self.rank_ref_size,
