@@ -39,8 +39,14 @@ QUALITY_COLORS = ["#4472C4", "#ED7D31", "#A5A5A5", "#FFC000", "#5B9BD5",
 
 
 def _setup_style():
+    available_names = {f.name for f in matplotlib.font_manager.fontManager.ttflist}
+    cjk_candidates = [
+        "Noto Sans CJK SC", "WenQuanYi Micro Hei", "SimHei",
+        "Microsoft YaHei", "Arial Unicode MS",
+    ]
+    chosen = next((f for f in cjk_candidates if f in available_names), "DejaVu Sans")
     plt.rcParams.update({
-        "font.family": "DejaVu Sans",
+        "font.family": chosen,
         "font.size": 10,
         "axes.titlesize": 12,
         "axes.labelsize": 11,
