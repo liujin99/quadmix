@@ -402,7 +402,8 @@ class QuaDMixPipeline:
 
         self._stage9_report(
             output_dir, data_path, optimal_params, selected_indices,
-            domain_labels, token_counts, summary, t_start, text_source, stage_times)
+            domain_labels, token_counts, summary, t_start, text_source, stage_times,
+            domain_names=domain_names, quality_names=quality_names)
 
         elapsed = time.time() - t_start
         self._print_timing_summary(stage_times, elapsed, output_dir)
@@ -751,7 +752,8 @@ class QuaDMixPipeline:
         return serialized, summary, n_docs_save
 
     def _stage9_report(self, output_dir, data_path, optimal_params, selected_indices,
-                       domain_labels, token_counts, summary, t_start, text_source, stage_times):
+                       domain_labels, token_counts, summary, t_start, text_source, stage_times,
+                       domain_names=None, quality_names=None):
         _t = time.time()
         elapsed = time.time() - t_start
         print(f"\n[Stage 9] Generating comparison report...")
@@ -773,8 +775,8 @@ class QuaDMixPipeline:
             per_task_analysis=summary.get("per_task_analysis"),
             dataset_size_prediction=summary.get("dataset_size_prediction"),
             stage_times={k: v for k, v in stage_times.items() if k != "stage9_report"},
-            domain_names=domain_names if domain_names else mm.detected_domain_names if mm else None,
-            quality_names=quality_names if quality_names else mm.detected_quality_names if mm else None,
+            domain_names=domain_names,
+            quality_names=quality_names,
             domain_col=self._schema.domain_col,
         )
         save_report(report, output_dir)
