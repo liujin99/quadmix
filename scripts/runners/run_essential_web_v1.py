@@ -261,7 +261,6 @@ def build_parser():
     p.add_argument("--num-search", type=int, default=None)
     # Note: --doc-limit removed. Proxy experiments should use full data pool.
     # Use --target-tokens to control final output size instead.
-    p.add_argument("--seed", type=int, default=42)
     p.add_argument("--top-k", type=int, default=10)
     p.add_argument("--target-tokens", type=float, default=0.0,
                    help="Desired max tokens in output (in B). θ* may produce less; "
