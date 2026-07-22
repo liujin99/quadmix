@@ -1197,6 +1197,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         use_npu_graph = False
         graphed_step = None
+        train_wrapper = None
         if device.type == "npu":
             try:
                 train_wrapper = GraphedTrainStep(model, 1024)
@@ -1301,14 +1302,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         PerfTimer._timings.setdefault(f"{_timer_prefix}.training_loop", []).append(_train_elapsed)
 
         with PerfTimer.section("free_resources", _timer_prefix):
-            if use_npu_graph and graphed_step is not None:
-                for g in (graphed_step.fwd_graph, graphed_step.bwd_graph):
-                    if g is not None:
-                        try:
-                            g.reset()
-                        except Exception:
-                            pass
-                del graphed_step
+            if use_npu_graph:
+                del graphed_step, train_wrapper
             del flat_train, inp_buf, tgt_buf, block_starts_buf, arange_npu, optimizer, perm
             if device.type == "npu":
                 import gc as _gc
