@@ -56,6 +56,9 @@ def build_parser():
     p.add_argument("--preprocessed-dir", default=None,
                    help="Preprocessed shards output dir "
                         "(default: ~/.cache/QuaDMix/resample/preprocessed)")
+    p.add_argument("--input-format", default="preprocessed",
+                   choices=["preprocessed", "stem_raw"],
+                   help="Use stem_raw to resample parquet_filter directly")
     p.add_argument("--output", "-o", default=None,
                    help="Output directory (default: result/resample_<timestamp>)")
     p.add_argument("--target-tokens", type=float, default=0.0,
@@ -90,7 +93,8 @@ def main():
     print("  QuaDMix Resample with Optimal Parameters")
     print(f"  Data:       {args.data_dir}")
     print(f"  Params:     {args.params_file}")
-    print(f"  Cache:      {preprocessed_dir}")
+    metadata_dir = args.data_dir if args.input_format == "stem_raw" else preprocessed_dir
+    print(f"  Metadata:   {metadata_dir}")
     print(f"  Output:     {output_dir}")
     print(f"  Seed:       {args.seed}")
     if args.target_tokens > 0:
@@ -102,29 +106,32 @@ def main():
 
     # ── Stage 0: Preprocess ──────────────────────────────────
     _t = time.time()
-    print(f"\n[Stage 0] Preprocessing raw shards...")
-    preprocess_cmd = [
-        sys.executable,
-        os.path.join(_SCRIPT_DIR, "preprocess_essential_web_v1_sharded.py"),
-        "--input-dir", args.data_dir,
-        "--output-dir", preprocessed_dir,
-        "--workers", str(args.workers),
-    ]
-    if args.force:
-        preprocess_cmd.append("--force")
+    if args.input_format == "stem_raw":
+        print(f"\n[Stage 0] Direct STEM mode: preprocessing skipped")
+    else:
+        print(f"\n[Stage 0] Preprocessing raw shards...")
+        preprocess_cmd = [
+            sys.executable,
+            os.path.join(_SCRIPT_DIR, "preprocess_essential_web_v1_sharded.py"),
+            "--input-dir", args.data_dir,
+            "--output-dir", preprocessed_dir,
+            "--workers", str(args.workers),
+        ]
+        if args.force:
+            preprocess_cmd.append("--force")
 
-    print(f"  Command: {' '.join(preprocess_cmd)}")
-    result = subprocess.run(preprocess_cmd)
-    if result.returncode != 0:
-        print(f"[Error] Preprocessing failed with exit code {result.returncode}")
-        return 1
+        print(f"  Command: {' '.join(preprocess_cmd)}")
+        result = subprocess.run(preprocess_cmd)
+        if result.returncode != 0:
+            print(f"[Error] Preprocessing failed with exit code {result.returncode}")
+            return 1
     stage_times["stage0_preprocess"] = time.time() - _t
     print(f"[Stage 0] Preprocess: {stage_times['stage0_preprocess']:.1f}s")
 
     # ── Stage 1: Load metadata ───────────────────────────────
     _t = time.time()
-    print(f"\n[Stage 1] Loading metadata from: {preprocessed_dir}")
-    mm = ShardMetadataManager(preprocessed_dir)
+    print(f"\n[Stage 1] Loading metadata from: {metadata_dir}")
+    mm = ShardMetadataManager(metadata_dir, input_format=args.input_format)
     print(f"[Stage 1] {mm.num_docs:,} docs across {mm.num_shards} shards")
     domain_labels = mm.domain_labels
     quality_scores = mm.quality_scores
@@ -246,7 +253,7 @@ def main():
     summary = {
         "params_file": args.params_file,
         "data_dir": args.data_dir,
-        "preprocessed_dir": preprocessed_dir,
+        "preprocessed_dir": metadata_dir,
         "seed": args.seed,
         "target_tokens_billions": args.target_tokens,
         "num_original_docs": n_docs,

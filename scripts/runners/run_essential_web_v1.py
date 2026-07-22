@@ -781,7 +781,7 @@ def ensure_stem_v1_data(val_path: str) -> str:
         print(f"\n[Setup] {HF_STEM_V1_FILENAME} version mismatch")
         print(f"[Setup]   Local:  {local_size / 1024**2:.0f} MB")
         print(f"[Setup]   Remote: {remote_size / 1024**2:.0f} MB")
-        print(f"[Setup]   Re-downloading...")
+        print("[Setup]   Re-downloading...")
         os.remove(val_path)
     else:
         print(f"\n[Setup] STEM v1 validation set not found at:\n  {val_path}")
@@ -792,7 +792,7 @@ def ensure_stem_v1_data(val_path: str) -> str:
         print(f"[Setup] Download failed. You can manually download from:\n"
               f"  https://huggingface.co/datasets/{HF_STEM_V1_DATASET}")
     else:
-        print(f"[Setup] Cannot connect to HuggingFace.")
+        print("[Setup] Cannot connect to HuggingFace.")
         print(f"[Setup] You can manually download from:\n"
               f"  https://huggingface.co/datasets/{HF_STEM_V1_DATASET}")
 
@@ -808,7 +808,12 @@ from quadmix.constants import DOMAIN_NAMES, QUALITY_NAMES, QUALITY_COLUMNS, NUM_
 def build_parser():
     p = argparse.ArgumentParser(description="QuaDMix on essential-web-v1 (sharded mode)")
     p.add_argument("--preprocessed-dir", default=DEFAULT_PREPROCESSED_DIR,
-                   help="Directory of preprocessed parquet shards")
+                   help="Directory containing input parquet shards")
+    p.add_argument("--input-format", default="preprocessed",
+                   choices=["preprocessed", "stem_raw"],
+                   help="preprocessed: QuaDMix shards; stem_raw: direct parquet_filter input")
+    p.add_argument("--shard-limit", type=int, default=None,
+                   help="Use only the first N shards in stem_raw mode (smoke testing)")
     p.add_argument("--quick", action="store_true", help="Quick: 200 exp, 2000 search")
     p.add_argument("--full", action="store_true", help="Full: 3000 exp, 100K search")
     p.add_argument("--output", "-o", default=None)
@@ -953,7 +958,12 @@ def main():
 
     # ── Load metadata manager (reads only domain + quality from all shards) ──
     print(f"\n[Setup] Loading ShardMetadataManager from: {args.preprocessed_dir}")
-    metadata_manager = ShardMetadataManager(args.preprocessed_dir)
+    print(f"[Setup] Input format: {args.input_format}")
+    metadata_manager = ShardMetadataManager(
+        args.preprocessed_dir,
+        input_format=args.input_format,
+        shard_limit=args.shard_limit,
+    )
     print(f"[Setup] {metadata_manager.num_docs:,} docs across "
           f"{metadata_manager.num_shards} shards")
 
@@ -992,7 +1002,8 @@ def main():
     print(f"════════════════════════════════════════════════════════")
 
     config = QuaDMixConfig(
-        num_domains=NUM_DOMAINS, num_quality_criteria=5,
+        num_domains=NUM_DOMAINS,
+        num_quality_criteria=len(QUALITY_COLUMNS),
         num_proxy_experiments=n_exp, num_search_points=n_search,
         top_k_average=top_k,
         target_tokens=int(args.target_tokens * 1e9) if args.target_tokens > 0 else 0,
