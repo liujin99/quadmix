@@ -260,6 +260,16 @@ class QuaDMixConfig:
     # Target dataset size (0 = no scaling)
     target_tokens: int = 0  # Desired total tokens in sampled dataset
 
+    # Pipeline seed — controls all randomness (Alg.1 parameter sampling,
+    # Eq.1-3 document selection, budget subsampling, LightGBM search).
+    #   None  (default): each run is non-deterministic (OS entropy),
+    #          so different executions naturally produce diverse experiments.
+    #          Merging multiple runs increases LightGBM regression coverage.
+    #   int   (e.g. 42): fully reproducible — same seed always gives the
+    #          same parameter sets, sampled docs, and training subsets.
+    #          Useful for debugging or controlled A/B comparisons.
+    seed: Optional[int] = None
+
     def get_domain_param_dim(self) -> int:
         """Parameter dimension per domain: (N + 4)"""
         return self.num_quality_criteria + 4

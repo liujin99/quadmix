@@ -89,7 +89,7 @@ class QuaDMixPipeline:
         self._quality_scorers: List = []
         self._domain_classifier = None
         self._optimizer: Optional[QuaDMixOptimizer] = None
-        self._param_sampler = ParameterSampler(config)
+        self._param_sampler = ParameterSampler(config, seed=config.seed)
 
         # Internal state
         self._precomputed_mode = False

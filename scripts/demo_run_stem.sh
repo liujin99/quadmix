@@ -134,6 +134,18 @@ fi
 # Performance timer: set to 1 to enable detailed timing report
 export QUADMIX_PERF_TIMER="${QUADMIX_PERF_TIMER:-1}"
 
+# ── Pipeline seed ───────────────────────────────────────────────
+# QUADMIX_SEED: controls all randomness in the pipeline.
+#   unset / empty  → each run is non-deterministic (different experiments each time)
+#   int (e.g. 42)  → fully reproducible (same seed → same results)
+# To merge multiple runs for better regression, leave unset so each run
+# naturally produces diverse parameter configurations.
+QUADMIX_SEED="${QUADMIX_SEED:-}"
+SEED_ARG=""
+if [ -n "$QUADMIX_SEED" ]; then
+    SEED_ARG="--seed $QUADMIX_SEED"
+fi
+
 # ── STEM 数据不需要预处理，直接用原始 parquet ──────────────
 # metadata_manager 会根据 schema 自动读取 domain/quality/text 列
 
@@ -153,6 +165,7 @@ python3 "$QUADMIX_DIR/scripts/runners/run_essential_web_v1.py" \
     --search-mode r2_weighted \
     --output "$OUTPUT_DIR" \
     $DEVICE_ARG \
+    $SEED_ARG \
     "$@" || exit $?
 
 echo ""

@@ -313,6 +313,12 @@ def build_parser():
     p.add_argument("--schema", type=str, required=True,
                    help="YAML dataset schema config file (必填)。"
                         "示例数据集: configs/schema_essential_web.yaml")
+    p.add_argument("--seed", type=int, default=None,
+                   help="Pipeline seed for reproducibility. "
+                        "None (default): each run is non-deterministic (OS entropy), "
+                        "so different executions produce diverse experiments. "
+                        "Set an int (e.g. 42) for fully reproducible results. "
+                        "Merging runs with different seeds increases regression coverage.")
     return p
 
 
@@ -458,6 +464,7 @@ def main():
         top_k_average=top_k,
         target_tokens=int(args.target_tokens * 1e9) if args.target_tokens > 0 else 0,
         search_weight_mode=args.search_mode,
+        seed=args.seed,
     )
 
     pipeline = QuaDMixPipeline(config)

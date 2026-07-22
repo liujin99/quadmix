@@ -61,6 +61,7 @@ _PreSampleData = namedtuple("_PreSampleData", [
     "sub_quality_infos", "domain_indices_infos",
     "sub_token_counts_infos", "has_token_counts",
     "num_domains", "rank_ref_size", "num_docs",
+    "seed_offset",
 ])
 
 
@@ -85,9 +86,10 @@ def _presample_one(args):
     if data.has_token_counts:
         sub_tc = {m: shared_to_ndarray(info) for m, info in data.sub_token_counts_infos.items()}
 
+    seed_offset = data.seed_offset
     M = data.num_domains
-    rng_eq2 = np.random.default_rng(i + 1729)
-    rng_sample = np.random.default_rng(i + 42)
+    rng_eq2 = np.random.default_rng(i + seed_offset + 1729)
+    rng_sample = np.random.default_rng(i + seed_offset + 42)
     has_tokens = data.has_token_counts
 
     domain_selected = []
@@ -141,7 +143,7 @@ def _presample_one(args):
     if domain_selected:
         return i, np.concatenate(domain_selected)
     else:
-        rng2 = np.random.default_rng(i + 42)
+        rng2 = np.random.default_rng(i + seed_offset + 42)
         return i, rng2.choice(np.arange(data.num_docs), 100, replace=False)
 
 
@@ -189,6 +191,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             token_cache_dir = DEFAULT_TOKEN_CACHE_DIR
 
         self.config = config
+        self._seed_offset = config.seed if config.seed is not None else np.random.default_rng().integers(0, 2**31)
         self._concurrency = ConcurrencyConfig()
         self.metadata_manager = metadata_manager
         self.legacy_data_path = data_path
@@ -1010,8 +1013,9 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         """Process one experiment: Eq.1-3 + sampling, domain-by-domain."""
         cancel = getattr(self, '_cancel_flag', None)
         M = self.config.num_domains
-        rng_eq2 = np.random.default_rng(experiment_id + 1729)
-        rng_sample = np.random.default_rng(experiment_id + 42)
+        so = self._seed_offset
+        rng_eq2 = np.random.default_rng(experiment_id + so + 1729)
+        rng_sample = np.random.default_rng(experiment_id + so + 42)
         has_tokens = hasattr(self, '_token_counts') and self._token_counts is not None
 
         domain_selected = []
@@ -1067,7 +1071,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         if domain_selected:
             return np.concatenate(domain_selected)
         else:
-            rng2 = np.random.default_rng(experiment_id + 42)
+            rng2 = np.random.default_rng(experiment_id + self._seed_offset + 42)
             return rng2.choice(np.arange(self._num_docs), 100, replace=False)
 
     def run_experiment(
@@ -1116,7 +1120,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 selected_idx_out = rng2.choice(self._train_idx, 100, replace=False)
 
             sampled_doc_count = len(selected_idx_out)
-            selected_idx_out = self._subsample_for_budget(selected_idx_out, seed=experiment_id)
+            selected_idx_out = self._subsample_for_budget(selected_idx_out, seed=experiment_id + self._seed_offset)
         else:
             selected_idx_out = np.asarray(selected_idx, dtype=np.int64)
 
@@ -1647,6 +1651,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         t0 = time.time()
         n = len(all_params)
         num_cpus = cfg.cpu_count
+        seed_offset = self._seed_offset
 
         q_cols = self._normalized_quality.shape[1]
         q_itemsize = self._normalized_quality.dtype.itemsize
@@ -1713,6 +1718,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             num_domains=self.config.num_domains,
             rank_ref_size=self.rank_ref_size,
             num_docs=self._num_docs,
+            seed_offset=seed_offset,
         )
 
         orig_env = {}
@@ -1779,7 +1785,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         total_train_docs = 0
         total_sampled_docs = 0
         for i, sel in enumerate(all_selected):
-            train_sel = self._subsample_for_budget(sel, seed=i)
+            train_sel = self._subsample_for_budget(sel, seed=i + seed_offset)
             all_selected_train.append(train_sel)
             total_train_docs += len(train_sel)
             total_sampled_docs += len(sel)
