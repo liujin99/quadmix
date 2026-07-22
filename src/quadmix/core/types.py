@@ -74,6 +74,7 @@ class SamplingConfig:
             return self.epsilon
 
         exponent = -self.lambda_ * (self.omega - quality_rank)
+        exponent = max(-100.0, min(100.0, exponent))
         sigmoid = 2.0 / (1.0 + np.exp(exponent))
         return float(sigmoid ** self.eta + self.epsilon)
 

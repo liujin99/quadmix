@@ -628,12 +628,21 @@ class ShardMetadataManager:
         mgr._shard_index = None
         mgr._schema = schema
         mgr._num_domains = num_domains if num_domains is not None else (
-            len(mgr._schema.domain_names) if mgr._schema.domain_names is not None
-            else len(np.unique(domain_labels))
+            len(mgr._schema.domain_names) if mgr._schema is not None and mgr._schema.domain_names is not None
+            else len(np.unique(domain_labels[domain_labels >= 0]))
         )
-        mgr._num_quality_criteria = num_quality_criteria if num_quality_criteria is not None else len(mgr._schema.quality_cols)
-        mgr._detected_domain_names = detected_domain_names if detected_domain_names is not None else [f"D{m}" for m in range(mgr._num_domains)]
-        mgr._detected_quality_names = detected_quality_names if detected_quality_names is not None else list(mgr._schema.quality_cols)
+        mgr._num_quality_criteria = num_quality_criteria if num_quality_criteria is not None else (
+            len(mgr._schema.quality_cols) if mgr._schema is not None
+            else quality_scores.shape[1]
+        )
+        mgr._detected_domain_names = detected_domain_names if detected_domain_names is not None else (
+            list(mgr._schema.domain_names) if mgr._schema is not None and mgr._schema.domain_names is not None
+            else [f"D{m}" for m in range(mgr._num_domains)]
+        )
+        mgr._detected_quality_names = detected_quality_names if detected_quality_names is not None else (
+            list(mgr._schema.quality_cols) if mgr._schema is not None
+            else [f"q{n}" for n in range(mgr._num_quality_criteria)]
+        )
         mgr._domain_cat_map = domain_label_map
         valid_labels = domain_labels[domain_labels >= 0]
         mgr._domain_counts = np.bincount(valid_labels, minlength=mgr._num_domains)

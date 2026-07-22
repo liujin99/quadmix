@@ -38,6 +38,7 @@ fi
 QUADMIX_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 export PYTHONPATH="${QUADMIX_DIR}/src:${PYTHONPATH:-}"
 export PATH="$HOME/.local/bin:$PATH"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-}"
 
 # Temp/cache dir: override via QUADMIX_TEMP_DIR env var, defaults to ~/.cache/QuaDMix/temp/
 export QUADMIX_TEMP_DIR="${QUADMIX_TEMP_DIR:-$HOME/.cache/QuaDMix/temp}"
