@@ -249,7 +249,7 @@ python3 "$QUADMIX_DIR/scripts/runners/run_essential_web_v1.py" \
     --rank-ref-size 10000 \
     --checkpoint-interval 0 \
     --val-set "$VAL_SET" \
-    --search-mode r2_sigma_weighted \
+    --search-mode r2_weighted \
     --output "$OUTPUT_DIR" \
     $DEVICE_ARG \
     "$@" || exit $?

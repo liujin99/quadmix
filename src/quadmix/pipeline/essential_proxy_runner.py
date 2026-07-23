@@ -2019,6 +2019,9 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 ready_count = sum(1 for i in range(first_batch_end) if ready_events.get(i, False))
             if ready_count == first_batch_end:
                 break
+            if not tokenize_thread.is_alive():
+                print("[DynamicParallel] Tokenize thread died unexpectedly - aborting wait")
+                break
             if time.time() - wait_start > 900:
                 with ready_cond:
                     for i in range(first_batch_end):

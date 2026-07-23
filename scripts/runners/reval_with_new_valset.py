@@ -21,6 +21,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -57,10 +58,25 @@ from quadmix.constants import (
     HF_CAP_V1_DATASET, HF_CAP_V1_FILENAME,
     HF_STEM_V1_DATASET, HF_STEM_V1_FILENAME,
     DEFAULT_EVAL_BUNDLE,
+    VAL_SHA256,
 )
 
 QUADMIX_DIR = PROJECT_DIR
 QUADMIX_TEMP_DIR = DEFAULT_TEMP_DIR
+
+
+def _sha256_verify(local_path: str, expected_hash: str) -> bool:
+    sha256 = hashlib.sha256()
+    with open(local_path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            sha256.update(chunk)
+    actual = sha256.hexdigest()
+    if actual == expected_hash:
+        return True
+    print(f"[Setup] SHA256 mismatch for {os.path.basename(local_path)}")
+    print(f"[Setup]   Expected: {expected_hash}")
+    print(f"[Setup]   Actual:   {actual}")
+    return False
 
 
 def _hf_remote_size(repo_id: str, filename: str) -> int:
@@ -91,12 +107,23 @@ def _download_hf_file(repo_id: str, filename: str, local_path: str) -> bool:
 def _check_and_download(local_path: str, repo_id: str, filename: str) -> str:
     os.makedirs(os.path.dirname(local_path), exist_ok=True)
     remote_size = _hf_remote_size(repo_id, filename)
+    expected_hash = VAL_SHA256.get(filename)
     if os.path.exists(local_path):
-        if remote_size > 0 and os.path.getsize(local_path) == remote_size:
+        if expected_hash and not _sha256_verify(local_path, expected_hash):
+            print(f"[Setup] Local file SHA256 mismatch, re-downloading...")
+            os.remove(local_path)
+        elif remote_size > 0 and os.path.getsize(local_path) == remote_size:
             print(f"[Setup] Validation set OK: {local_path}")
             return local_path
-        print(f"[Setup] Local file size mismatch, re-downloading...")
+        else:
+            print(f"[Setup] Local file size mismatch, re-downloading...")
     if _download_hf_file(repo_id, filename, local_path):
+        if expected_hash and not _sha256_verify(local_path, expected_hash):
+            print(f"[Setup] Downloaded file SHA256 mismatch, removing and retrying...")
+            os.remove(local_path)
+            if _download_hf_file(repo_id, filename, local_path):
+                if expected_hash and not _sha256_verify(local_path, expected_hash):
+                    print(f"[Setup] SHA256 still mismatch after retry. Proceeding with caution.")
         return local_path
     if os.path.exists(local_path):
         print(f"[Setup] Download failed, using existing local file")

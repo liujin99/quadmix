@@ -17,18 +17,13 @@ import torch
 
 from quadmix.utils.perf_timer import PerfTimer
 from quadmix.utils.concurrency import ConcurrencyConfig
+from quadmix.utils.tokenizer_utils import get_tokenizer
 from quadmix.pipeline.shared_memory import shared_to_ndarray
-
-
-_tokenizer_cache: Dict[str, "Tokenizer"] = {}
 
 
 def _get_tokenizer(tokenizer_path: str) -> "Tokenizer":
     """Get or create a cached tokenizer instance (per-process cache)."""
-    if tokenizer_path not in _tokenizer_cache:
-        from tokenizers import Tokenizer
-        _tokenizer_cache[tokenizer_path] = Tokenizer.from_pretrained(tokenizer_path)
-    return _tokenizer_cache[tokenizer_path]
+    return get_tokenizer(tokenizer_path, use_cache=True)
 
 
 def _io_read_shard(

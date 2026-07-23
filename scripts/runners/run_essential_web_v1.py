@@ -25,7 +25,7 @@ to use the BMK v2 set (10 BMK-like tasks, full-sequence loss), or
 1M proxy learnability, full-sequence loss).
 """
 
-import argparse, os, sys, time, urllib.request, ssl
+import argparse, hashlib, os, sys, time, urllib.request, ssl
 _cpu_count = os.cpu_count() or 4
 os.environ.setdefault('OPENBLAS_NUM_THREADS', str(max(1, _cpu_count // 4)))
 os.environ.setdefault('OMP_NUM_THREADS', str(max(1, _cpu_count // 4)))
@@ -54,11 +54,26 @@ from quadmix.constants import (
     HF_CAP_V1_DATASET, HF_CAP_V1_FILENAME,
     HF_STEM_V1_DATASET, HF_STEM_V1_FILENAME,
     DEFAULT_EVAL_BUNDLE,
+    VAL_SHA256,
 )
 
 QUADMIX_DIR = PROJECT_DIR
 QUADMIX_TEMP_DIR = DEFAULT_TEMP_DIR
 DEFAULT_VAL_PATH = os.path.join(DEFAULT_VAL_DIR, HF_OPENHERMES_FILENAME)
+
+
+def _sha256_verify(local_path: str, expected_hash: str) -> bool:
+    sha256 = hashlib.sha256()
+    with open(local_path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            sha256.update(chunk)
+    actual = sha256.hexdigest()
+    if actual == expected_hash:
+        return True
+    print(f"[Setup] SHA256 mismatch for {os.path.basename(local_path)}")
+    print(f"[Setup]   Expected: {expected_hash}")
+    print(f"[Setup]   Actual:   {actual}")
+    return False
 
 
 def _hf_remote_size(repo_id: str, filename: str) -> int:
@@ -113,6 +128,9 @@ def _ensure_hf_data(val_path: str, hf_dataset: str, hf_filename: str,
 
     if remote_size == 0:
         if local_size > 0:
+            expected_hash = VAL_SHA256.get(hf_filename)
+            if expected_hash and not _sha256_verify(val_path, expected_hash):
+                print(f"[Setup] SHA256 mismatch, but cannot re-download. Proceeding with caution.")
             print(f"\n[Setup] Warning: Cannot connect to HuggingFace to check {hf_filename}")
             print(f"[Setup] Using local file ({local_size / 1024**2:.0f} MB)")
             print(f"[Setup] To force re-download, delete: {val_path}")
@@ -125,8 +143,13 @@ def _ensure_hf_data(val_path: str, hf_dataset: str, hf_filename: str,
                 f"  And place at: {val_path}"
             )
     elif local_size == remote_size:
-        print(f"[Setup] {display_label} validation set up-to-date: {hf_filename} ({local_size / 1024**2:.0f} MB)")
-        return val_path
+        expected_hash = VAL_SHA256.get(hf_filename)
+        if expected_hash and not _sha256_verify(val_path, expected_hash):
+            print(f"[Setup] SHA256 mismatch, re-downloading...")
+            os.remove(val_path)
+        else:
+            print(f"[Setup] {display_label} validation set up-to-date: {hf_filename} ({local_size / 1024**2:.0f} MB)")
+            return val_path
     elif local_size > 0:
         print(f"\n[Setup] {hf_filename} version mismatch")
         print(f"[Setup]   Local:  {local_size / 1024**2:.0f} MB")
@@ -138,6 +161,13 @@ def _ensure_hf_data(val_path: str, hf_dataset: str, hf_filename: str,
 
     if remote_size > 0:
         if _download_hf_file(hf_dataset, hf_filename, val_path):
+            expected_hash = VAL_SHA256.get(hf_filename)
+            if expected_hash and not _sha256_verify(val_path, expected_hash):
+                print(f"[Setup] Downloaded file SHA256 mismatch, removing and retrying...")
+                os.remove(val_path)
+                if _download_hf_file(hf_dataset, hf_filename, val_path):
+                    if expected_hash and not _sha256_verify(val_path, expected_hash):
+                        print(f"[Setup] SHA256 still mismatch after retry. Proceeding with caution.")
             return val_path
         if eval_bundle:
             print(f"[Setup] Falling back to local generation...")

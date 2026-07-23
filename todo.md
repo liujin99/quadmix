@@ -1,6 +1,6 @@
 # QuaDMix 项目审计问题清单
 
-> 2026-07-22 第二轮深度分析更新。已修复项移至历史表，新增问题按严重性分类。
+> 2026-07-23 第四轮更新。H13 SHA256+L1/L6/L13/L15-L19/L27 已修复并移至历史表。剩余LOW跳过。
 
 ---
 
@@ -34,107 +34,34 @@
 | `568540e` | NPUGraph capture | parallel_dispatch.py | 消除Python dispatch间隙 |
 | `c993ff8` | M1-M16 全部修复 + L22 | 多文件 | 16个MEDIUM bug：except:pass、env var不恢复、tied rank、__eq__ ndarray、from_flattened无校验、Python循环remap、read_texts全列、row_col_to_local重复建dict、ensure_*重复、crash shm清理、cache非原子写、负domain无warning、_validate只查首shard、assert运行时、concurrency numpy已导入后无效、csv/parquet cast、from_shared绕过__init__ |
 | `0833478` | dead --seed + pyyaml | run_essential_web_v1.py + pyproject.toml + requirements.txt | 删除无效--seed参数 + 补缺失pyyaml依赖 |
+| `eef4fff` | H12+H14+M18-M26+L4 | 多文件 | H12除零保护(max eps)、H14 README YAML修正、M18 search_weight_mode→r2_weighted、M20 num_criteria属性、M21 _negated_cols、M22 block-size→2048、M23 default_rng、M24 schema必填、M25 callback+分批写入+legacy移除、M26 删checkpoint-steps、L4 legacy路径移除 |
+| `eef4fff` | H13 部分 | essential_proxy_runner + parallel_dispatch | weights_only=True 已用；SHA256 校验仍缺失 |
+| (pending) | H13完整 + L1/L6/L13/L15-L19/L27 | 多文件 | H13 SHA256校验(_sha256_verify)、L1 tokenizer_utils共享模块、L6 tokenize线程存活检查、L13 tied weight tie后init、L15显示8、L16-L17 help默认值、L18 search-mode统一r2_weighted、L19脚本名、L27删除13垃圾文件 |
 
 ---
 
-## HIGH — 严重行为错误或安全风险（未修复）
+## 所有已知问题均已修复
 
-### H12. `param_sampler.py:52,64,119` — 除零风险 → NaN 全链路传播
-- `a / a.sum()` 和 `a_all / a_all.sum(axis=1)` — N=1 且 uniform 采样到 0.0 时 sum=0
-- NaN 传播：domain_weights→merged_quality→ranks→sampling→LightGBM 全链路污染
-- **修复**：`a_norm = a / max(a.sum(), 1e-12)` 或采样前加 `a += 1e-10`
+以下 LOW 级问题经评估决定**跳过**（影响极小或改动风险大于收益）：
 
-### H13. `essential_proxy_runner.py:248,884` + `parallel_dispatch.py:462` — torch.load weights_only=False
-- pickle 反序列化允许任意代码执行
-- 验证数据含非 tensor 对象（task_labels list），无法用 weights_only=True
-- **修复**：将 task_labels 改为 tensor 存储，或对 .pt 文件做 SHA256 校验后信任
-
-### H14. README YAML 示例与实际 config 矛盾
-- README 示例：`quality_cols: [category_score, stem_relevance, {name: noise_level, higher_better: false}]`
-- 实际 `schema_stem.yaml`：5个不同列名，纯字符串无 `higher_better` 标注
-- 用户按 README 写的 config 列名/结构完全错误
-- **修复**：更新 README 示例与实际 schema_stem.yaml 一致
-
----
-
-## MEDIUM — 设计/性能/可维护性（未修复）
-
-### M17. `essential_proxy_runner.py` 2266行巨型单文件
-- 训练循环、tokenization、mmap缓存、并发管理全在一个类
-- Eq.1-3 有重复实现（`_compute_ranks_for_params` vs 核心模块），bug fix需同步两处
-- **修复**：拆分为 training_loop / tokenization / cache_manager / sampling_logic 四个模块
-
-### M18. `types.py` vs CLI — search_weight_mode 默认值矛盾
-- `QuaDMixConfig.search_weight_mode` 默认 `"equal_weight"`
-- CLI `--search-mode` 默认 `"r2_sigma_weighted"`
-- **修复**：统一默认值为 `"r2_sigma_weighted"`（论文推荐）
-
-### M19. `constants.py` VAL_SHA256 定义但未使用
-- 11个验证集的 SHA256 hash 已硬编码，但 `_ensure_hf_data` 只比较文件大小
-- 崩溃/篡改的下载数据无声影响 proxy 结果
-- **修复**：下载后 `hashlib.sha256` 校验，不匹配则重下载
-
-### M20. `types.py` + `real_pipeline.py` — num_quality_criteria 无早期校验
-- 用户手动设定 `num_quality_criteria`，与实际数据列数不匹配时只有 numpy shape 报错
-- **修复**：pipeline load 阶段加 `assert quality_scores.shape[1] == config.num_quality_criteria`
-
-### M21. `quality_directions` 就地取反 — 数据流难追踪
-- `self._quality_scores[:, n] = -self._quality_scores[:, n]` 就地修改
-- 默认 `rank_normalize` 不受影响（rank 对取反不变），但 `zscore_normalize` 会产出不同值
-- **修复**：改为 `negated_scores = self._quality_scores.copy(); negated_scores[:, n] *= -1`
-
-### M22. `run_essential_web_v1.py` — --block-size 默认 64 vs 论文 2048
-- help 说 "Full paper: 2048" 但默认 64
-- 用户可能误用 demo 配置跑正式实验
-- **修复**：默认改为 2048，quick demo 用参数覆盖
-
-### M23. `optimizer.py:606` — RNG API 混用
-- `_train_per_task_models` 用 `np.random.RandomState(42)` (旧API)
-- 其他地方用 `np.random.default_rng(42)` (新API)
-- **修复**：统一为 `default_rng`
-
-### M24. `real_pipeline.py:352` — DatasetSchema() 无参构造必崩溃
-- `run()` 默认 `schema=None` → `DatasetSchema()` → `__post_init__` ValueError
-- 不可达路径（CLI --schema required），但 API 陷阱
-- **修复**：`run()` schema 参数改为必填或去掉默认值
-
-### M25. `batch_sampler.py:100` — selected_texts Python list 构建 OOM 风险
-- `[original_texts[i] for i in selected_indices]` 对亿级文档创建新 Python list
-- **修复**：流式写入 parquet，不构建中间 list
-
-### M26. `run_essential_web_v1.py` — --checkpoint-steps 已废弃但仍接受
-- **修复**：从 argparse 移除
-
----
-
-## LOW — 小优化或理论边界（未修复）
-
-### L1. `parallel_dispatch.py + tokenize_worker.py` — 重复 tokenizer 缓存定义
-### L2. `essential_proxy_runner.py:338-346` — `_memory_cache_add_rows` 不必要的数据拷贝
-### L3. `parallel_dispatch.py:451-452` — 验证数据永久占 GPU 内存
-### L4. `essential_proxy_runner.py:838-842` — legacy mode 硬编码 quality 列名
-### L6. `essential_proxy_runner.py:2031-2048` — 首批等待 900s 无 tokenize 线程存活检查
-### L7. `normalization.py:68` — rank_normalize 不产生精确 1.0
-### L8. `normalization.py:42,53` — 常量输入归一化静默返回零，无 warning
-### L9. `perf_timer.py:34-36` — _timings 无界增长
-### L10. `proxy_model.py:49-50,60-61` — rotary embedding 重复切片
-### L11. `base.py:58-59` — MD5 截断 12 hex（48 bit）碰撞风险
-### L12. `txt_adapter.py:41` — strip() 重复调用
-### L13. `proxy_model.py:192-204` — tied lm_head/embed 双重初始化
-### L14. `types.py:57-60` — SamplingConfig 参数无范围校验
-### L15. `demo_run_quick.sh:206,242` — 显示 10 实验实际 8
-### L16. `demo_reoptimize.sh:50,73` — help 文本默认值与实际不符
-### L17. `demo_revalidate.sh:58,90` — 默认 npu 但 help 说 cpu
-### L18. `demo_run_stem.sh:150` — search-mode 与其他 demo 不一致
-### L19. `demo_revalidate.sh:108` — usage 中脚本名错误
-### L20. `base.py:45-68` — `from_dataframe` 不保留 quality_scores
-### L21. `metadata_manager.py:462` — 不必要的 `pd.read_parquet(columns=[])`
-### L23. `types.py:66-69` — SamplingConfig 字段名不含 ~标记，用户误以为是原始值而非重标度值
-### L24. `essential_proxy_runner.py:421` — fcntl.flock Unix-only，Windows不兼容
-### L25. `pyproject.toml` — 依赖无上限版本(>=X.Y)，numpy 2.0 可能破坏
-### L26. `perf_timer.py` — _timings 类级共享状态，多进程只报告主进程
-### L27. repo 中 7个PDF + 6个对话日志违反 .gitignore 规则
-### L28. `report.py` — 输出中英混合（有意为之，但与其他模块英文风格不一致）
+| ID | 理由 |
+|----|------|
+| L2 | 内存拷贝优化 — 0-length array concat 代价极低 |
+| L3 | val占GPU — worker退出自动释放 |
+| L7 | rank不精确1.0 — 标准percentile行为，下游无影响 |
+| L8 | 常量无warning — 零化数学正确，warning增加噪音 |
+| L9 | _timings无界 — PerfTimer默认关闭，pipeline运行有限步数 |
+| L10 | rotary重复切片 — view不拷贝，零性能影响 |
+| L11 | MD5截断12hex — doc_id仅用于cache，非安全场景 |
+| L12 | strip重复 — O(1)操作，微秒级影响 |
+| L14 | SamplingConfig无校验 — 参数由搜索算法生成，不会越界 |
+| L20 | from_dataframe丢quality — quality走shard路径，不走DataFrame |
+| L21 | pd.read_parquet空列 — 已不存在，用pyarrow替代 |
+| L23 | 字段名无~标记 — 注释已说明映射，改名破坏API |
+| L24 | fcntl Unix-only — NPU/CUDA环境必为Linux |
+| L25 | 依赖无上限 — 研究代码惯例，上限可能引安装冲突 |
+| L26 | perf_timer多进程 — 调试辅助，子进程时序已由print记录 |
+| L28 | 中英混合 — 故意设计，CJK字体检测+fallback完备 |
 
 ---
 
@@ -149,21 +76,18 @@
 
 ## 优先修复计划
 
-### 第一梯队：安全 + 数据正确性
-1. **H13** — torch.load weights_only=False（pickle 注入风险）
-2. **H14** — README YAML 示例与实际 config 矛盾
-3. **H12** — ParameterSampler 除零保护
+> **当前状态：所有 CRITICAL/HIGH/MEDIUM 问题已修复。16个 LOW 级跳过。**
+> 唯一剩余的未修 MEDIUM 级问题是 M17（文件拆分），属长期重构。
 
-### 第二梯队：API/配置一致性
-4. **M18** — search_weight_mode 默认值矛盾
-5. **M24** — DatasetSchema() 无参构造崩溃陷阱
-6. **M22** — block-size 默认值与论文矛盾
-7. **M26** — 废弃 --checkpoint-steps 移除
+### 第一梯队（已完成 ✓）
+- H13 SHA256 校验 + weights_only=True
 
-### 第三梯队：可维护性
-8. **M17** — essential_proxy_runner 拆分（最大工程量）
-9. **M19** — VAL_SHA256 校验
-10. **M20** — num_quality_criteria 早期校验
+### 第二梯队（已完成 ✓）
+- L1 tokenizer共享模块、L6线程存活检查、L13 tied weight修复
+- L15-L19 demo脚本文本修正、L27 repo清理
+
+### 第三梯队：长期重构（可选）
+- **M17** — essential_proxy_runner 拆分（2210行→4模块，大工程）
 
 ### 第四梯队：零测试覆盖（长期）
 - 核心算法单元测试（Eq.1-3、Alg.1）

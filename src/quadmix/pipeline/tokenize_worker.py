@@ -3,15 +3,7 @@ import time
 import numpy as np
 from typing import List, Optional, Tuple
 
-
-def _get_tokenizer(tokenizer_path: str):
-    """Lazy load tokenizer."""
-    from tokenizers import Tokenizer
-    import os
-    if os.path.exists(tokenizer_path):
-        return Tokenizer.from_file(tokenizer_path)
-    else:
-        return Tokenizer.from_pretrained(tokenizer_path)
+from quadmix.utils.tokenizer_utils import get_tokenizer
 
 
 def _tokenize_chunk_to_array(
@@ -25,7 +17,7 @@ def _tokenize_chunk_to_array(
     _os.environ["RAYON_NUM_THREADS"] = str(threads_per_worker)
     _os.environ["OMP_NUM_THREADS"] = str(threads_per_worker)
 
-    tok = _get_tokenizer(tokenizer_path)
+    tok = get_tokenizer(tokenizer_path)
     texts = [item[2] for item in chunk]
     encodings = tok.encode_batch(texts)
 

@@ -73,7 +73,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --top-k N                Top-K average (default: 10)"
             echo "  --target-tokens N        Target in billions (default: 0)"
             echo "  --preprocessed-dir PATH  Preprocessed shards dir"
-            echo "  --search-mode MODE       equal_weight (default) or r2_weighted"
+            echo "  --search-mode MODE       r2_weighted (default) or equal_weight"
             exit 0
             ;;
         *)

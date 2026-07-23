@@ -207,7 +207,7 @@ cat << PARAMS
   ├────────────────────────────┼──────────────┤
   │ Shards                     │        $NUM_SHARDS  │
   │ NPU 设备                   │         $NPU_DEVICES  │
-  │ 实验数                     │          10  │
+  │ 实验数                     │          8  │
   │ 搜索点                     │       1,000  │
   │ Top-K 平均                 │           3  │
   │ seq_len (block_size)       │       2,048  │
@@ -253,7 +253,7 @@ python3 "$QUADMIX_DIR/scripts/runners/run_essential_web_v1.py" \
     --rank-ref-size 10000 \
     --checkpoint-interval 0 \
     --val-set "$VAL_SET" \
-    --search-mode r2_sigma_weighted \
+    --search-mode r2_weighted \
     --output "$OUTPUT_DIR" \
     $DEVICE_ARG \
     "$@" || exit $?

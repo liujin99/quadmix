@@ -192,9 +192,10 @@ class ProxyModel(nn.Module):
         self.norm = RMSNorm(config.n_embd, eps=config.norm_eps)
 
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        self.lm_head.weight = self.embed.weight  # tied
 
         self._init_weights()
+
+        self.lm_head.weight = self.embed.weight
 
     def _init_weights(self):
         for module in self.modules():

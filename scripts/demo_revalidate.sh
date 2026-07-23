@@ -87,7 +87,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --val-set {core,openhermes,core_bmk_v6,cap_v1,stem_v1}  New validation set (default: cap_v1)"
             echo "  --val-path PATH              Custom .pt file (overrides --val-set)"
             echo "  --output PATH                Output directory (default: auto)"
-            echo "  --device-type {cpu,cuda,npu} Device (default: cpu)"
+            echo "  --device-type {cpu,cuda,npu} Device (default: npu)"
             echo "  --num-search N               Search points (default: 100000)"
             echo "  --top-k N                    Top-K average (default: 10)"
             echo "  --target-tokens N            Target in billions (default: 0)"
@@ -105,7 +105,7 @@ done
 
 if [[ -z "$RESULT_DIR" ]]; then
     echo "[Error] --result-dir is required"
-    echo "Usage: bash scripts/demo_reval.sh --result-dir result/quadmix_20260609_120000"
+    echo "Usage: bash scripts/demo_revalidate.sh --result-dir result/quadmix_20260609_120000"
     exit 1
 fi
 
