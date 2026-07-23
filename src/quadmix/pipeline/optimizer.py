@@ -166,7 +166,6 @@ def _bootstrap_one(
     try:
         model = RegressionModel(
             model_type="lightgbm",
-            n_jobs=1,
             **regression_params,
         )
         model.fit(
@@ -227,7 +226,7 @@ class RegressionModel:
                     "learning_rate": 0.01,
                     "max_depth": max_depth,
                     "num_leaves": min(7, 2 ** max_depth - 1),
-                    "min_child_samples": max(50, n_train // 4),
+                    "min_child_samples": max(5, int(np.ceil(np.sqrt(n_train))), n_features // 5),
                     "subsample": 0.7,
                     "colsample_bytree": 0.4,
                     "reg_alpha": 5.0,
@@ -242,7 +241,7 @@ class RegressionModel:
                     "learning_rate": 0.02,
                     "max_depth": max_depth,
                     "num_leaves": min(15, 2 ** max_depth - 1),
-                    "min_child_samples": max(30, n_train // 6),
+                    "min_child_samples": max(5, int(np.ceil(np.sqrt(n_train))), n_features // 5),
                     "subsample": 0.8,
                     "colsample_bytree": 0.6,
                     "reg_alpha": 1.0,
@@ -255,7 +254,7 @@ class RegressionModel:
                     "n_estimators": 1000,
                     "learning_rate": 0.05,
                     "num_leaves": 31,
-                    "min_child_samples": min(20, max(5, n_train // 10)),
+                    "min_child_samples": max(5, int(np.ceil(np.sqrt(n_train))), n_features // 5),
                     "subsample": 0.8,
                     "colsample_bytree": 0.8,
                     "reg_alpha": 0.1,
