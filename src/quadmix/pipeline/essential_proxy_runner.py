@@ -1,12 +1,9 @@
 """
 EssentialWebProxyRunner — Real proxy training on essential-web-v1 data.
 
-Shard-aware mode (recommended):
+Shard-aware mode:
   Uses ShardMetadataManager → loads only metadata (domain+quality) upfront,
   reads text on-demand per experiment. Per-shard disk cache for tokens.
-
-Legacy mode (single-file):
-  Uses data_path → loads all text upfront, tokenizes all.
 
 Multi-NPU Parallelism:
   Dynamic task queue mode (run_batch_parallel):
@@ -150,7 +147,6 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             config: QuaDMixConfig,
             val_data_path: str,
             metadata_manager: Optional[object] = None,
-            data_path: Optional[str] = None,
             output_dir: str = "./proxy_validation",
             device_type: str = "cpu",
             npu_device_id: int = 0,
@@ -182,7 +178,6 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         self._seed_offset = config.seed if config.seed is not None else np.random.default_rng().integers(0, 2**31)
         self._concurrency = ConcurrencyConfig()
         self.metadata_manager = metadata_manager
-        self.legacy_data_path = data_path
         self.val_data_path = val_data_path
         self.output_dir = output_dir
         self.model_variant = model_variant
@@ -198,6 +193,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         self._domain_names = domain_names
         self._quality_names = quality_names
         self._quality_directions = quality_directions
+        self._negated_cols: List[int] = []
         self._worker_mode = worker_mode
 
         self.global_batch_size = global_batch_size
@@ -232,11 +228,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         if metadata_manager is not None:
             self._mode = "sharded"
             self._load_metadata_only()
-        elif data_path is not None:
-            self._mode = "legacy"
-            self._legacy_load_and_tokenize()
         else:
-            raise ValueError("Either metadata_manager or data_path must be provided")
+            raise ValueError("metadata_manager must be provided (legacy single-file path removed)")
 
         print(f"[ProxyRunner] Loading validation set: {self.val_data_path}")
         val_data = torch.load(self.val_data_path, map_location="cpu", weights_only=True)
@@ -263,10 +256,12 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         self._train_idx = np.arange(self._num_docs)
 
         quality_directions = self._quality_directions or mgr.quality_directions
+        self._negated_cols = []
         if quality_directions:
             for n, hb in enumerate(quality_directions):
                 if not hb:
                     self._quality_scores[:, n] = -self._quality_scores[:, n]
+                    self._negated_cols.append(n)
 
         print(f"[ProxyRunner] Sharded mode: {self._num_docs:,} docs "
               f"(metadata only, {mgr.num_shards} shards) ({time.time() - t0:.0f}s)")
@@ -708,9 +703,6 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             shm_info: Optional[tuple] = None,
     ) -> torch.Tensor:
         """Load tokens for selected document indices."""
-        if self._mode == "legacy":
-            return self._token_ids[selected_idx]
-
         if shm_info is not None:
             from multiprocessing.shared_memory import SharedMemory
             shm_name, shape, dtype_str = shm_info
@@ -848,74 +840,6 @@ class EssentialWebProxyRunner(BaseProxyRunner):
               f"cache: {self._cache_hits}/{total} hits ({hit_rate:.0f}%) "
               f"({elapsed:.1f}s)")
         return result
-
-    def _legacy_load_and_tokenize(self):
-        """Legacy: load all text from single parquet, tokenize all upfront."""
-        import pandas as pd
-        t0 = time.time()
-        print(f"[ProxyRunner] (legacy) Loading training data: {self.legacy_data_path}")
-        df = pd.read_parquet(self.legacy_data_path)
-        texts = df["text"].astype(str).tolist()
-
-        if self.doc_limit and self.doc_limit < len(texts):
-            texts = texts[:self.doc_limit]
-
-        self._domain_labels = df["domain"].to_numpy(dtype=np.int64)[:len(texts)]
-        self._quality_scores = df[[
-            "qs_dclm", "qs_fineweb_edu_approx", "qs_english",
-            "qs_eai_general_math", "qs_eai_open_web_math",
-        ]].to_numpy(dtype=np.float64)[:len(texts)]
-        self._num_docs = len(texts)
-        print(f"[ProxyRunner] (legacy) {self._num_docs:,} docs ({time.time() - t0:.0f}s)")
-
-        dl = self.doc_limit if self.doc_limit else "all"
-        cache = os.path.join(
-            os.path.dirname(self.token_cache_dir),
-            f"legacy_neox_{self.block_size}_dl{dl}.pt",
-        )
-        if os.path.exists(cache):
-            print(f"[ProxyRunner] (legacy) Loading cached tokens: {cache}")
-            cached = torch.load(cache, map_location="cpu", weights_only=True)
-            self._token_ids = cached["token_ids"]
-            self._token_counts = cached["token_counts"].numpy()
-            print(f"[ProxyRunner] (legacy) Cached: {self._token_ids.shape}")
-        else:
-            print(f"[ProxyRunner] (legacy) Tokenizing {self._num_docs:,} docs...")
-            self._token_ids = self._tokenize_texts(texts)
-            token_counts = (self._token_ids != self.tokenizer.pad_token_id).sum(dim=1).numpy()
-            torch.save({
-                "token_ids": self._token_ids,
-                "token_counts": torch.from_numpy(token_counts),
-            }, cache)
-            print(f"[ProxyRunner] (legacy) Tokenized: {self._token_ids.shape} cached")
-
-        self._train_idx = np.arange(self._num_docs)
-
-        from quadmix.utils.normalization import get_normalizer
-        if not hasattr(self, '_normalizer_name'):
-            self._normalizer_name = "rank"
-        normalize_fn = get_normalizer(self._normalizer_name)
-
-        t1 = time.time()
-        num_criteria = self._quality_scores.shape[1]
-        n_jobs = min(num_criteria, os.cpu_count()) if self._num_docs > 50000 else 1
-        normalized_cols = Parallel(n_jobs=n_jobs, prefer="threads")(
-            delayed(normalize_fn)(self._quality_scores[:, n]) for n in range(num_criteria)
-        )
-        self._normalized_quality = np.column_stack(normalized_cols).astype(self._quality_scores.dtype)
-        print(f"[ProxyRunner] (legacy) Pre-normalized {num_criteria} criteria "
-              f"({time.time() - t1:.1f}s) — Eq.1 now ~5x faster")
-
-        t2 = time.time()
-        sort_idx = np.argsort(self._domain_labels)
-        sorted_labels = self._domain_labels[sort_idx]
-        boundaries = np.concatenate([[0], np.where(sorted_labels[:-1] != sorted_labels[1:])[0] + 1, [self._num_docs]])
-        self._domain_indices: Dict[int, np.ndarray] = {}
-        for i in range(len(boundaries) - 1):
-            domain_id = int(sorted_labels[boundaries[i]])
-            self._domain_indices[domain_id] = sort_idx[boundaries[i]:boundaries[i + 1]]
-        print(f"[ProxyRunner] (legacy) Pre-computed domain indices for {len(self._domain_indices)} domains "
-              f"({time.time() - t2:.1f}s)")
 
     def _compute_ranks_for_params(
             self, params: ParameterSet, experiment_id: int,
