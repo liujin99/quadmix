@@ -35,8 +35,8 @@
 | `c993ff8` | M1-M16 全部修复 + L22 | 多文件 | 16个MEDIUM bug：except:pass、env var不恢复、tied rank、__eq__ ndarray、from_flattened无校验、Python循环remap、read_texts全列、row_col_to_local重复建dict、ensure_*重复、crash shm清理、cache非原子写、负domain无warning、_validate只查首shard、assert运行时、concurrency numpy已导入后无效、csv/parquet cast、from_shared绕过__init__ |
 | `0833478` | dead --seed + pyyaml | run_essential_web_v1.py + pyproject.toml + requirements.txt | 删除无效--seed参数 + 补缺失pyyaml依赖 |
 | `eef4fff` | H12+H14+M18-M26+L4 | 多文件 | H12除零保护(max eps)、H14 README YAML修正、M18 search_weight_mode→r2_weighted、M20 num_criteria属性、M21 _negated_cols、M22 block-size→2048、M23 default_rng、M24 schema必填、M25 callback+分批写入+legacy移除、M26 删checkpoint-steps、L4 legacy路径移除 |
-| `eef4fff` | H13 部分 | essential_proxy_runner + parallel_dispatch | weights_only=True 已用；SHA256 校验仍缺失 |
-| (pending) | H13完整 + L1/L6/L13/L15-L19/L27 | 多文件 | H13 SHA256校验(_sha256_verify)、L1 tokenizer_utils共享模块、L6 tokenize线程存活检查、L13 tied weight tie后init、L15显示8、L16-L17 help默认值、L18 search-mode统一r2_weighted、L19脚本名、L27删除13垃圾文件 |
+| `eef4fff` | H13 部分 | essential_proxy_runner + parallel_dispatch | weights_only=True 已用；SHA256 完整校验在 `60bee15` 补完 |
+| `60bee15` | H13完整 + L1/L6/L13/L15-L19/L27 | 多文件 | H13 SHA256校验(_sha256_verify)、L1 tokenizer_utils共享模块、L6 tokenize线程存活检查、L13 tied weight tie后init、L15显示8、L16-L17 help默认值、L18 search-mode统一r2_weighted、L19脚本名、L27删除13垃圾文件 |
 
 ---
 
