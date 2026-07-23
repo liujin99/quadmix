@@ -37,12 +37,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-def _safe_npu_empty_cache():
-    try:
-        torch.npu.empty_cache()
-    except Exception:
-        pass
-
 from quadmix.core.types import ParameterSet, ProxyResult, QuaDMixConfig
 from quadmix.core.quality_merger import compute_merged_quality_scores
 from quadmix.core.quality_rank import compute_quality_ranks
@@ -69,18 +63,6 @@ _PreSampleData = namedtuple("_PreSampleData", [
     "num_domains", "rank_ref_size", "num_docs",
     "seed_offset",
 ])
-
-
-class GraphedTrainStep(torch.nn.Module):
-    def __init__(self, model, chunk_size):
-        super().__init__()
-        self.model = model
-        self.chunk_size = chunk_size
-
-    def forward(self, inp, tgt):
-        hidden = self.model(inp, return_hidden=True)
-        loss = chunked_loss_from_hidden(self.model, hidden, tgt, chunk_size=self.chunk_size)
-        return loss
 
 
 def _presample_one(args):
@@ -1206,26 +1188,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         arange_npu = torch.arange(self.block_size, dtype=torch.long, device=device)
 
         if device.type == "npu":
-            _safe_npu_empty_cache()
-
-        use_npu_graph = False
-        graphed_step = None
-        train_wrapper = None
-        if device.type == "npu":
-            try:
-                train_wrapper = GraphedTrainStep(model, 1024)
-                sample_inp = torch.zeros(self.micro_batch_size, self.block_size, dtype=torch.long, device=device)
-                sample_tgt = torch.zeros(self.micro_batch_size, self.block_size, dtype=torch.long, device=device)
-                graphed_step = torch.npu.make_graphed_callables(
-                    train_wrapper, sample_args=(sample_inp, sample_tgt), num_warmup_iters=3,
-                )
-                use_npu_graph = True
-                print(f"  [Exp {experiment_id:04d}] NPUGraph enabled (forward+backward captured)")
-                del sample_inp, sample_tgt
-            except Exception as e:
-                use_npu_graph = False
-                graphed_step = None
-                print(f"  [Exp {experiment_id:04d}] NPUGraph failed: {e}, using eager mode")
+            torch.npu.empty_cache()
 
         _train_t0 = time.perf_counter()
         model.train()
@@ -1272,11 +1235,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             inp = inp_buf[mb_start:mb_end]
             tgt = tgt_buf[mb_start:mb_end]
 
-            if use_npu_graph:
-                loss = graphed_step(inp, tgt)
-            else:
-                hidden = model(inp, return_hidden=True)
-                loss = chunked_loss_from_hidden(model, hidden, tgt, chunk_size=1024)
+            hidden = model(inp, return_hidden=True)
+            loss = chunked_loss_from_hidden(model, hidden, tgt, chunk_size=1024)
 
             is_acc = (iter_ct + 1) % grad_acc != 0
             (loss / grad_acc).backward()
@@ -1287,12 +1247,12 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                     pg["lr"] = lr
                 torch.nn.utils.clip_grad_norm_(model.parameters(), self.grad_clip)
                 optimizer.step()
-                optimizer.zero_grad(set_to_none=not use_npu_graph)
+                optimizer.zero_grad(set_to_none=True)
                 step_ct += 1
 
                 if checkpoint_interval > 0 and step_ct % checkpoint_interval == 0 and step_ct < num_steps:
                     if device.type == "npu":
-                        _safe_npu_empty_cache()
+                        torch.npu.empty_cache()
                     elif device.type == "cuda":
                         torch.cuda.empty_cache()
                     ckpt_val, _ = self._run_validation(model, device)
@@ -1315,19 +1275,11 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         PerfTimer._timings.setdefault(f"{_timer_prefix}.training_loop", []).append(_train_elapsed)
 
         with PerfTimer.section("free_resources", _timer_prefix):
-            if use_npu_graph:
-                del graphed_step, train_wrapper
-                if device.type == "npu":
-                    torch.npu.synchronize()
-                    try:
-                        torch.npu.graph.default_capture_stream = None
-                    except AttributeError:
-                        pass
             del flat_train, inp_buf, tgt_buf, block_starts_buf, arange_npu, optimizer, perm
             if device.type == "npu":
                 import gc as _gc
                 _gc.collect()
-                _safe_npu_empty_cache()
+                torch.npu.empty_cache()
             elif device.type == "cuda":
                 import gc as _gc
                 _gc.collect()
@@ -1421,7 +1373,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             if device.type == "npu":
                 import gc
                 gc.collect()
-                _safe_npu_empty_cache()
+                torch.npu.empty_cache()
 
         return ProxyResult(parameters=params, validation_loss=val_loss, metadata=meta, per_task_losses=per_task_losses)
 
@@ -1480,7 +1432,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         
         del val_tokens, val_mask, per_doc_losses, all_losses
         if device.type == "npu":
-            _safe_npu_empty_cache()
+            torch.npu.empty_cache()
         elif device.type == "cuda":
             torch.cuda.empty_cache()
         model.train()
@@ -1503,7 +1455,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         if device.type == "npu":
             import gc
             gc.collect()
-            _safe_npu_empty_cache()
+            torch.npu.empty_cache()
         elif device.type == "cuda":
             torch.cuda.empty_cache()
         return val_loss, per_task_losses
