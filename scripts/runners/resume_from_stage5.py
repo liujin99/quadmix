@@ -139,8 +139,8 @@ def build_parser():
     p.add_argument("--search-mode", default="equal_weight",
                    choices=["r2_weighted", "equal_weight", "r2_sigma_weighted"],
                    help="Search weighting mode (default: equal_weight)")
-    p.add_argument("--schema", default=None,
-                   help="Path to dataset schema YAML (default: Essential-Web schema)")
+    p.add_argument("--schema", required=True,
+                   help="Path to dataset schema YAML (required)")
     return p
 
 
@@ -189,7 +189,7 @@ def main():
     n_search = args.num_search
     top_k = args.top_k
 
-    schema = DatasetSchema.from_yaml(args.schema) if args.schema else DatasetSchema()
+    schema = DatasetSchema.from_yaml(args.schema)
 
     mm = ShardMetadataManager(args.preprocessed_dir, schema=schema)
     print(f"[Resume] {mm.num_docs:,} docs across {mm.num_shards} shards")

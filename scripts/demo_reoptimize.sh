@@ -43,6 +43,7 @@ export QUADMIX_TEMP_DIR="${QUADMIX_TEMP_DIR:-$HOME/.cache/QuaDMix/temp}"
 PREPROCESSED_DIR="$QUADMIX_TEMP_DIR/preprocessed"
 
 RESULT_DIR="${RESULT_DIR:-}"
+SCHEMA=""
 OUTPUT=""
 NUM_SEARCH="100000"
 TOP_K="10"
@@ -52,6 +53,7 @@ SEARCH_MODE="r2_weighted"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --result-dir)    RESULT_DIR="$2"; shift 2 ;;
+        --schema)        SCHEMA="$2"; shift 2 ;;
         --output|-o)     OUTPUT="$2"; shift 2 ;;
         --num-search)    NUM_SEARCH="$2"; shift 2 ;;
         --top-k)         TOP_K="$2"; shift 2 ;;
@@ -63,6 +65,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Required:"
             echo "  --result-dir PATH        Original pipeline result directory"
+            echo "  --schema PATH            Dataset schema YAML config"
             echo ""
             echo "Options:"
             echo "  --output PATH            Output directory (default: auto)"
@@ -83,6 +86,12 @@ done
 if [[ -z "$RESULT_DIR" ]]; then
     echo "[Error] --result-dir is required"
     echo "Usage: bash scripts/demo_reoptimize.sh --result-dir result/quadmix_20260609_120000"
+    exit 1
+fi
+
+if [[ -z "$SCHEMA" ]]; then
+    echo "[Error] --schema is required"
+    echo "  e.g. --schema configs/schema_stem.yaml"
     exit 1
 fi
 
@@ -109,6 +118,7 @@ echo "╔══ QuaDMix Re-optimize (from Stage 5) ══╗"
 echo ""
 echo "  Source:        $RESULT_DIR"
 echo "  Experiments:   $EXP_COUNT"
+echo "  Schema:        $SCHEMA"
 echo "  Preprocessed:  $PREPROCESSED_DIR"
 echo "  Search points: $NUM_SEARCH"
 echo "  Top-K:         $TOP_K"
@@ -121,6 +131,7 @@ echo ""
 ARGS=(
     --proxy-dir "$PROXY_DIR"
     --preprocessed-dir "$PREPROCESSED_DIR"
+    --schema "$SCHEMA"
     --num-search "$NUM_SEARCH"
     --top-k "$TOP_K"
     --target-tokens "$TARGET_TOKENS"

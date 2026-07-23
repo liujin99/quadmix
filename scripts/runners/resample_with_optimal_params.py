@@ -67,8 +67,8 @@ def build_parser():
                    help="Force re-preprocess even if output exists")
     p.add_argument("--workers", type=int, default=64,
                    help="Number of parallel preprocessing workers")
-    p.add_argument("--schema", default=None,
-                   help="Path to dataset schema YAML (default: Essential-Web schema)")
+    p.add_argument("--schema", required=True,
+                   help="Path to dataset schema YAML (required)")
     return p
 
 
@@ -127,7 +127,7 @@ def main():
     # ── Stage 1: Load metadata ───────────────────────────────
     _t = time.time()
     print(f"\n[Stage 1] Loading metadata from: {preprocessed_dir}")
-    schema = DatasetSchema.from_yaml(args.schema) if args.schema else DatasetSchema()
+    schema = DatasetSchema.from_yaml(args.schema)
     mm = ShardMetadataManager(preprocessed_dir, schema=schema)
     domain_names = mm.detected_domain_names
     print(f"[Stage 1] {mm.num_docs:,} docs across {mm.num_shards} shards")
