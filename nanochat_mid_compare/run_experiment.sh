@@ -387,7 +387,20 @@ if [ -n "$MID_CHECKPOINTS_OUTPUT_DIR" ]; then
     LINK_PATH="$NANOCHAT_MODEL_DIR/mid_checkpoints"
 
     if [ -L "$LINK_PATH" ]; then
-        echo "  Symlink already exists: $LINK_PATH -> $(readlink "$LINK_PATH")"
+        CURRENT_TARGET=$(readlink "$LINK_PATH")
+        if [ "$CURRENT_TARGET" != "$MID_CHECKPOINTS_OUTPUT_DIR" ]; then
+            echo "  Updating stale symlink: $LINK_PATH"
+            echo "    was: $CURRENT_TARGET"
+            echo "    now: $MID_CHECKPOINTS_OUTPUT_DIR"
+            rm "$LINK_PATH"
+            ln -s "$MID_CHECKPOINTS_OUTPUT_DIR" "$LINK_PATH"
+        elif [ ! -d "$CURRENT_TARGET" ]; then
+            echo "  Symlink target missing, recreating: $LINK_PATH -> $MID_CHECKPOINTS_OUTPUT_DIR"
+            rm "$LINK_PATH"
+            ln -s "$MID_CHECKPOINTS_OUTPUT_DIR" "$LINK_PATH"
+        else
+            echo "  Symlink already exists: $LINK_PATH -> $CURRENT_TARGET"
+        fi
     elif [ -d "$LINK_PATH" ]; then
         echo "  WARNING: $LINK_PATH exists as a directory (not a symlink)."
         echo "  Skipping symlink creation. Mid checkpoints will be saved here."
