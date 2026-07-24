@@ -320,6 +320,7 @@ export PYTORCH_NPU_ENABLE_LARGE_CONCAT=1
 export PYTORCH_NPU_ENABLE_TORCHscript=1
 export NPU_PERF_MODE=high_performance
 export NANOCHAT_DTYPE=bfloat16
+export PYTHONWARNINGS="ignore::UserWarning:torch_npu.utils.collect_env,ignore::UserWarning:torch_npu.utils._path_manager"
 
 # ══════════════════════════════════════════════════════════════
 #  PRINT CONFIG
