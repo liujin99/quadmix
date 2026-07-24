@@ -85,7 +85,7 @@ def _try_meta_json(ckpt_dir):
     total_batch_size = meta.get("total_batch_size", None)
     try:
         import torch
-        from nanochat.gpt import GPTConfig
+        from nanochat.gpt import GPT, GPTConfig
         config = GPTConfig(**model_config)
         with torch.device("meta"):
             model = GPT(config)
