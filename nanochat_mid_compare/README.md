@@ -37,7 +37,7 @@ bash nanochat_mid_compare/run_experiment.sh
 | `BASE_MODEL_TAG` | 预训练 base model tag (所有实验共享) | `d24_0320` |
 | `MID_CHECKPOINTS_OUTPUT_DIR` | mid-training checkpoint 保存目录 (避免 EVS 空间不足) | `$HOME/.cache/nanochat_mid_compare/mid_checkpoints` |
 | `TARGET_PARAM_DATA_RATIO` | 目标 tokens/params 比例 (自动 cap 防止过度训练) | `0.5` |
-| `NUM_SCALING_PARAMS` | 模型 scaling params 数量 (d24 ≈ 1.3B) | `1300000000` |
+| `NUM_SCALING_PARAMS` | 模型 scaling params 数量 (d24 ≈ 730M，留空则自动检测) | (auto-detect) |
 | `DEVICE_BATCH_SIZE` | 每卡 batch size | `8` |
 | `NUM_NPU` | NPU 卡数 | `8` |
 | `SHARD_SIZE` | 输出 parquet 每 shard 文档数 | `10000` |
@@ -61,14 +61,14 @@ num_iterations = actual_tokens / total_batch_size (524288)
 - **数据稀缺** (data < target): 用全部数据（1 epoch），不重复训练
 - **数据充足** (data > target): 按 ratio 截断，不过度训练
 
-**d24 模型示例** (num_scaling_params ≈ 1.3B, ratio=0.5):
+**d24 模型示例** (num_scaling_params ≈ 730M, ratio=0.5):
 
 | 数据集大小 | target_tokens | actual_tokens | steps | 说明 |
 |-----------|---------------|---------------|-------|------|
-| 50M | 650M | 50M | ~95 | 数据稀缺，全量训练 |
-| 300M | 650M | 300M | ~572 | 数据稀缺，全量训练 |
-| 650M | 650M | 650M | ~1240 | 刚好匹配 |
-| 1B | 650M | 650M | ~1240 | 数据充足，截断训练 |
+| 50M | 365M | 50M | ~95 | 数据稀缺，全量训练 |
+| 200M | 365M | 200M | ~381 | 数据稀缺，全量训练 |
+| 365M | 365M | 365M | ~696 | 刚好匹配 |
+| 1B | 365M | 365M | ~696 | 数据充足，截断训练 |
 
 ## Prerequisites
 

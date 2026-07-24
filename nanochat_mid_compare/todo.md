@@ -35,3 +35,22 @@
 | # | 原优先级 | 问题 | 原因 |
 |---|---------|------|------|
 | 21 | P3 | eval device-batch-size 不一致 | 不同机器 GPU/NPU 数量不同导致配置差异，不是代码 bug |
+
+---
+
+## 第二轮审查 (issues 22-31)
+
+### 已修复
+
+| # | 优先级 | 问题 | 修复文件 | 修复方式 |
+|---|--------|------|----------|----------|
+| 22 | P0 | `run_quadmix_only.sh` 硬编码 `NUM_SCALING_PARAMS=1300000000` (d24 实际 ~730M) | run_quadmix_only.sh | 用 `get_model_info.py` 自动检测；同时修复 `continue_experiment.sh` 同样问题 |
+| 23 | P1 | 数据复用检查目录名不匹配 (`quadmix` vs `quadmix_data`)，永远跳过复用 | run_stem_experiment.sh, run_experiment.sh | 删除复用检查，每次重新准备数据 (保证正确性) |
+| 24 | P1 | 数据复用缺少配置一致性校验 | (同 #23) | 删除复用检查后不存在此问题 |
+| 25 | P1 | `run_experiment.sh` 缺少磁盘空间检查 | run_experiment.sh | 添加 pre-flight 检查 (同 run_stem_experiment.sh) |
+| 26 | P2 | `run_experiment.sh` L70 注释 `d24 ≈ 1.3B` 错误 | run_experiment.sh | 改为 `≈ 730M` |
+| 27 | P2 | `run_experiment.sh` L13 注释说 auto-detect 但实际硬编码 | run_experiment.sh | 修正注释为明确默认路径 |
+| 28 | P2 | `run_experiment.sh` L39 `QUADMIX_SAMPLED_DATA="${QUADMIX_SAMPLED_DATA:-}"` 冗余 | run_experiment.sh | 删除 |
+| 29 | P2 | `prepare_data.py` L830-867 temp 文件写/读无意义 (1.5T RAM) | prepare_data.py | 删除 temp write/read 块 |
+| 30 | P2 | `run_mid_training()` 重复读 `total_batch_size` (已有 `CKPT_TOTAL_BATCH_SIZE`) | run_stem_experiment.sh, run_experiment.sh, run_quadmix_only.sh, continue_experiment.sh | 使用全局 `CKPT_TOTAL_BATCH_SIZE` |
+| 31 | P2 | `--eval-benchmarks` 未传给 `mid_train.py` | run_stem_experiment.sh, run_experiment.sh | 加 `--eval-benchmarks` 参数 |

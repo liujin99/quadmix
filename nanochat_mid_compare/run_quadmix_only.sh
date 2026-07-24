@@ -44,7 +44,7 @@ MID_CHECKPOINTS_OUTPUT_DIR="${MID_CHECKPOINTS_OUTPUT_DIR:-$HOME/.cache/nanochat_
 RESULT_DIR="${RESULT_DIR:-$SCRIPT_DIR/results/quadmix_only_$TIMESTAMP}"
 
 TARGET_PARAM_DATA_RATIO="${TARGET_PARAM_DATA_RATIO:-0.5}"
-NUM_SCALING_PARAMS="${NUM_SCALING_PARAMS:-1300000000}"
+NUM_SCALING_PARAMS="${NUM_SCALING_PARAMS:-}"
 DEVICE_BATCH_SIZE="${DEVICE_BATCH_SIZE:-8}"
 NUM_NPU="${NUM_NPU:-8}"
 CORE_METRIC_EVERY="${CORE_METRIC_EVERY:--1}"
@@ -52,6 +52,36 @@ EVAL_EVERY="${EVAL_EVERY:--1}"
 SHARD_SIZE="${SHARD_SIZE:-10000}"
 
 QUADMIX_MODEL_TAG="${QUADMIX_MODEL_TAG:-${BASE_MODEL_TAG}_quadmix_${TIMESTAMP}}"
+
+# ══════════════════════════════════════════════════════════════
+#  VALIDATION & AUTO-DETECT
+# ══════════════════════════════════════════════════════════════
+
+if [ ! -d "$NANOCHAT_REPO" ]; then
+    echo "ERROR: Nanochat repo not found: $NANOCHAT_REPO"
+    exit 1
+fi
+
+BASE_CKPT_DIR="$NANOCHAT_MODEL_DIR/base_checkpoints/$BASE_MODEL_TAG"
+if [ ! -d "$BASE_CKPT_DIR" ]; then
+    echo "ERROR: Base model checkpoint not found: $BASE_CKPT_DIR"
+    exit 1
+fi
+
+if [ -z "$NUM_SCALING_PARAMS" ]; then
+    MODEL_INFO=$(python3 "$SCRIPT_DIR/get_model_info.py" \
+        --ckpt-dir "$BASE_CKPT_DIR" \
+        --nanochat-repo "$NANOCHAT_REPO")
+    NUM_SCALING_PARAMS=$(echo "$MODEL_INFO" | grep NUM_SCALING_PARAMS | cut -d= -f2)
+    CKPT_TOTAL_BATCH_SIZE=$(echo "$MODEL_INFO" | grep TOTAL_BATCH_SIZE | cut -d= -f2)
+    echo "  Auto-detected: NUM_SCALING_PARAMS=$NUM_SCALING_PARAMS, TOTAL_BATCH_SIZE=$CKPT_TOTAL_BATCH_SIZE"
+else
+    CKPT_META_JSON=$(ls "$BASE_CKPT_DIR"/meta_*.json 2>/dev/null | sort | tail -1)
+    CKPT_TOTAL_BATCH_SIZE=""
+    if [ -n "$CKPT_META_JSON" ]; then
+        CKPT_TOTAL_BATCH_SIZE=$(python3 -c "import json; print(json.load(open('$CKPT_META_JSON'))['total_batch_size'])")
+    fi
+fi
 
 # ══════════════════════════════════════════════════════════════
 #  DATA PREPARATION
@@ -202,12 +232,6 @@ fi
 
 QUADMIX_DATA="$DATA_DIR/quadmix_data"
 
-CKPT_META_JSON=$(ls "$NANOCHAT_MODEL_DIR/base_checkpoints/$BASE_MODEL_TAG"/meta_*.json 2>/dev/null | sort | tail -1)
-CKPT_TOTAL_BATCH_SIZE=""
-if [ -n "$CKPT_META_JSON" ]; then
-    CKPT_TOTAL_BATCH_SIZE=$(python3 -c "import json; print(json.load(open('$CKPT_META_JSON'))['total_batch_size'])")
-fi
-
 DATA_DIR="$DATA_DIR" BASE_MODEL_TAG="$BASE_MODEL_TAG" \
 TARGET_PARAM_DATA_RATIO="$TARGET_PARAM_DATA_RATIO" \
 NUM_SCALING_PARAMS="$NUM_SCALING_PARAMS" \
@@ -240,21 +264,6 @@ stats['config'].update({
 with open(stats_path, 'w') as f:
     json.dump(stats, f, indent=2)
 "
-
-# ══════════════════════════════════════════════════════════════
-#  VALIDATION
-# ══════════════════════════════════════════════════════════════
-
-if [ ! -d "$NANOCHAT_REPO" ]; then
-    echo "ERROR: Nanochat repo not found: $NANOCHAT_REPO"
-    exit 1
-fi
-
-BASE_CKPT_DIR="$NANOCHAT_MODEL_DIR/base_checkpoints/$BASE_MODEL_TAG"
-if [ ! -d "$BASE_CKPT_DIR" ]; then
-    echo "ERROR: Base model checkpoint not found: $BASE_CKPT_DIR"
-    exit 1
-fi
 
 # ══════════════════════════════════════════════════════════════
 #  NPU ENVIRONMENT SETUP
@@ -397,17 +406,10 @@ s = json.load(open(os.path.join(os.environ['DATA_DIR'], 'dataset_stats.json')))
 print(s['quadmix']['tokens'])
 ")
 
-META_JSON=$(ls "$BASE_CKPT_DIR"/meta_*.json 2>/dev/null | sort | tail -1)
-if [ -n "$META_JSON" ]; then
-    TOTAL_BATCH_SIZE=$(python3 -c "import json; print(json.load(open('$META_JSON'))['total_batch_size'])")
-    echo "  Read total_batch_size=$TOTAL_BATCH_SIZE from checkpoint"
-else
-    TOTAL_BATCH_SIZE=524288
-    echo "  WARNING: No meta JSON found in $BASE_CKPT_DIR, falling back to 524288"
-fi
 TARGET_TOKENS=$(python3 -c "print(int($TARGET_PARAM_DATA_RATIO * $NUM_SCALING_PARAMS))")
 ACTUAL_TOKENS=$(python3 -c "print(min($TARGET_TOKENS, $QUADMIX_TOKENS))")
-NUM_ITERATIONS=$((ACTUAL_TOKENS / TOTAL_BATCH_SIZE))
+TOTAL_BATCH_SIZE="${CKPT_TOTAL_BATCH_SIZE:-524288}"
+NUM_ITERATIONS=$(( (ACTUAL_TOKENS + TOTAL_BATCH_SIZE - 1) / TOTAL_BATCH_SIZE ))
 ACTUAL_RATIO=$(python3 -c "print(f'{$ACTUAL_TOKENS / $NUM_SCALING_PARAMS:.4f}')")
 
 echo "╔══ Mid-training on QuadMix data ══╗"

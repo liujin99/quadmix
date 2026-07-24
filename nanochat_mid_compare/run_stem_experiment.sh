@@ -257,38 +257,23 @@ echo ""
 echo "╔══ Step 1: Prepare STEM datasets ══╗"
 echo ""
 
-_DATA_READY=true
-if [ ! -f "$DATA_DIR/dataset_stats.json" ]; then
-    _DATA_READY=false
-fi
-for _subdir in quadmix random manual_ratio; do
-    if [ ! -d "$DATA_DIR/$_subdir" ]; then
-        _DATA_READY=false
-        break
-    fi
-done
-if $_DATA_READY; then
-    echo "  Datasets already exist. Skipping preparation."
-    echo "  (Delete $DATA_DIR to regenerate)"
-else
-    PREP_ARGS=(
-        --quadmix-sampled-data "$QUADMIX_SAMPLED_DATA"
-        --preprocessed-data-dir "$STEM_DATA_DIR"
-        --output-dir "$DATA_DIR"
-        --tokenizer-pkl "$TOKENIZER_DIR/tokenizer.pkl"
-        --schema "$SCHEMA_PATH"
-        --file-pattern "$FILE_PATTERN"
-        --manual-ratio "$MANUAL_RATIO"
-        --data-ratio "$TARGET_PARAM_DATA_RATIO"
-        --num-scaling-params "$NUM_SCALING_PARAMS"
-        --shard-size "$SHARD_SIZE"
-        --val-ratio "$VAL_RATIO"
-        --seed "$SEED"
-        --max-shards "$MAX_SHARDS"
-        --num-npu "$NUM_NPU"
-    )
-    python3 "$SCRIPT_DIR/prepare_data.py" "${PREP_ARGS[@]}"
-fi
+PREP_ARGS=(
+    --quadmix-sampled-data "$QUADMIX_SAMPLED_DATA"
+    --preprocessed-data-dir "$STEM_DATA_DIR"
+    --output-dir "$DATA_DIR"
+    --tokenizer-pkl "$TOKENIZER_DIR/tokenizer.pkl"
+    --schema "$SCHEMA_PATH"
+    --file-pattern "$FILE_PATTERN"
+    --manual-ratio "$MANUAL_RATIO"
+    --data-ratio "$TARGET_PARAM_DATA_RATIO"
+    --num-scaling-params "$NUM_SCALING_PARAMS"
+    --shard-size "$SHARD_SIZE"
+    --val-ratio "$VAL_RATIO"
+    --seed "$SEED"
+    --max-shards "$MAX_SHARDS"
+    --num-npu "$NUM_NPU"
+)
+python3 "$SCRIPT_DIR/prepare_data.py" "${PREP_ARGS[@]}"
 
 # Update dataset_stats.json with experiment metadata
 DATA_DIR="$DATA_DIR" BASE_MODEL_TAG="$BASE_MODEL_TAG" \
@@ -450,16 +435,7 @@ run_mid_training() {
     local DATASET_TOKENS="$5"
     local TRAIN_TOKENS="$6"
 
-    local BASE_CKPT_DIR="$NANOCHAT_MODEL_DIR/base_checkpoints/$BASE_MODEL_TAG"
-    local META_JSON=$(ls "$BASE_CKPT_DIR"/meta_*.json 2>/dev/null | sort | tail -1)
-    if [ -n "$META_JSON" ]; then
-        local TOTAL_BATCH_SIZE=$(python3 -c "import json; print(json.load(open('$META_JSON'))['total_batch_size'])")
-        echo "    Read total_batch_size=$TOTAL_BATCH_SIZE from checkpoint"
-    else
-        echo "    ERROR: No meta JSON found in $BASE_CKPT_DIR" >&2
-        exit 1
-    fi
-    local NUM_ITERATIONS=$(( (TRAIN_TOKENS + TOTAL_BATCH_SIZE - 1) / TOTAL_BATCH_SIZE ))
+    local NUM_ITERATIONS=$(( (TRAIN_TOKENS + CKPT_TOTAL_BATCH_SIZE - 1) / CKPT_TOTAL_BATCH_SIZE ))
 
     echo "  Starting mid-training: $RUN_NAME"
     echo "    Data:       $DATA_PATH"
@@ -484,11 +460,12 @@ run_mid_training() {
         --num-iterations="$NUM_ITERATIONS" \
         --target-param-data-ratio="$TARGET_PARAM_DATA_RATIO" \
         --device-batch-size="$DEVICE_BATCH_SIZE" \
-        --total-batch-size="$TOTAL_BATCH_SIZE" \
+        --total-batch-size="$CKPT_TOTAL_BATCH_SIZE" \
         --run="$RUN_NAME" \
         --model-tag="$MODEL_TAG" \
         --core-metric-every="$CORE_METRIC_EVERY" \
         --eval-every="$EVAL_EVERY" \
+        --eval-benchmarks="$EVAL_BENCHMARKS" \
         --data-dir="$DATA_PATH" \
         2>&1 | tee "$LOG_FILE"
     popd > /dev/null

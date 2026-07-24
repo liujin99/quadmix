@@ -30,7 +30,7 @@ Usage (STEM):
         --file-pattern "*.parquet" \
         --manual-ratio "数学=60:物理=15:化学=12.5:生物学=12.5" \
         --data-ratio 0.5 \
-        --num-scaling-params 1300000000 \
+        --num-scaling-params 730000000 \
         --tokenizer-pkl /path/to/nanochat/tokenizer/tokenizer.pkl
 """
 
@@ -827,48 +827,10 @@ def main():
         if not do_manual_ratio:
             print(f"\n[{step_num}/N] Quality baseline skipped")
 
-    import tempfile
-    _tmp_dir = tempfile.mkdtemp(prefix="prepare_data_")
-    print(f"\n  Saving docs to temp dir to free memory: {_tmp_dir}")
-    _qm_tmp = os.path.join(_tmp_dir, "quadmix.parquet")
-    _rd_tmp = os.path.join(_tmp_dir, "random.parquet")
-    pq.write_table(pa.table({"text": [d["text"] for d in quadmix_docs],
-                              "token_count": [d["token_count"] for d in quadmix_docs]}), _qm_tmp)
-    pq.write_table(pa.table({"text": [d["text"] for d in random_docs],
-                              "token_count": [d["token_count"] for d in random_docs]}), _rd_tmp)
-    _mr_tmp = None
-    if do_manual_ratio:
-        _mr_tmp = os.path.join(_tmp_dir, "manual_ratio.parquet")
-        pq.write_table(pa.table({"text": [d["text"] for d in manual_ratio_docs],
-                                  "token_count": [d["token_count"] for d in manual_ratio_docs]}), _mr_tmp)
-    del quadmix_docs, random_docs
-    if manual_ratio_docs is not None:
-        del manual_ratio_docs
-    gc.collect()
-    print(f"  Freed docs from memory")
-
-    print(f"\n  Reloading docs from temp dir...")
-    _qm_df = pq.read_table(_qm_tmp).to_pandas()
-    quadmix_docs = [{"text": t, "char_count": len(t), "token_count": tc}
-                    for t, tc in zip(_qm_df["text"], _qm_df["token_count"])]
-    del _qm_df
-    _rd_df = pq.read_table(_rd_tmp).to_pandas()
-    random_docs = [{"text": t, "char_count": len(t), "token_count": tc}
-                   for t, tc in zip(_rd_df["text"], _rd_df["token_count"])]
-    del _rd_df
-    manual_ratio_docs = None
-    if _mr_tmp:
-        _mr_df = pq.read_table(_mr_tmp).to_pandas()
-        manual_ratio_docs = [{"text": t, "char_count": len(t), "token_count": tc}
-                             for t, tc in zip(_mr_df["text"], _mr_df["token_count"])]
-        del _mr_df
-    gc.collect()
-    import shutil
-    shutil.rmtree(_tmp_dir, ignore_errors=True)
     qm_count = len(quadmix_docs)
     rd_count = len(random_docs)
     mr_count = len(manual_ratio_docs) if manual_ratio_docs else 0
-    print(f"  Reloaded {qm_count:,} quadmix + {rd_count:,} random + {mr_count:,} manual_ratio docs")
+    print(f"  Docs: {qm_count:,} quadmix + {rd_count:,} random + {mr_count:,} manual_ratio")
 
     step_num = (6 if do_manual_ratio else 5) if do_quality else (5 if do_manual_ratio else 4)
     print(f"\n[{step_num}/N] Splitting train/val (val_ratio={args.val_ratio})...")

@@ -10,7 +10,7 @@
 # Usage (after running QuaDMix pipeline, e.g. bash scripts/demo_run_full.sh):
 #   bash nanochat_mid_compare/run_experiment.sh
 #
-# QUADMIX_SAMPLED_DATA auto-detects the latest result/*/sampled_dataset.parquet.
+# QUADMIX_SAMPLED_DATA defaults to a specific sampled_dataset.parquet path.
 # PREPROCESSED_DATA_DIR defaults to $HOME/.cache/QuaDMix/temp/preprocessed.
 #
 # Override any config via environment variables:
@@ -32,11 +32,9 @@ QUADMIX_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 # QuadMix output: sampled_dataset.parquet from QuadMix pipeline
-# Auto-detects the latest result directory if not set
 if [ -z "${QUADMIX_SAMPLED_DATA:-}" ]; then
     QUADMIX_SAMPLED_DATA="/home/ma-user/work/QuaDMix/result/revalidate_openhermes_20260702_193824/sampled_dataset.parquet"
 fi
-QUADMIX_SAMPLED_DATA="${QUADMIX_SAMPLED_DATA:-}"
 
 # Preprocessed shards directory (preprocessed_*.parquet with quality scores)
 # Used for both random baseline and quality top-k baseline
@@ -67,7 +65,7 @@ RESULT_DIR="${RESULT_DIR:-$SCRIPT_DIR/results/$TIMESTAMP}"
 # Training token budget: min(target_ratio * num_scaling_params, dataset_tokens)
 # - If data < ratio * params: use all data (1 epoch, no overfitting)
 # - If data > ratio * params: cap at ratio * params (no over-training)
-# d24 model: num_scaling_params (total) ≈ 1.3B
+# d24 model: num_scaling_params (total) ≈ 730M
 TARGET_PARAM_DATA_RATIO="${TARGET_PARAM_DATA_RATIO:-0.5}"
 NUM_SCALING_PARAMS="${NUM_SCALING_PARAMS:-}"
 DEVICE_BATCH_SIZE="${DEVICE_BATCH_SIZE:-8}"
@@ -76,6 +74,7 @@ CORE_METRIC_EVERY="${CORE_METRIC_EVERY:--1}"
 # Val BPB disabled by default (-1) because QuadMix and Random use different data,
 # so their val sets are not comparable. Use CORE metric for comparison instead.
 EVAL_EVERY="${EVAL_EVERY:--1}"
+EVAL_BENCHMARKS="${EVAL_BENCHMARKS:-core}"
 
 # Data preparation
 SHARD_SIZE="${SHARD_SIZE:-10000}"
@@ -145,6 +144,11 @@ else
             CKPT_TOTAL_BATCH_SIZE=$(python3 -c "import json; print(json.load(open('$CKPT_META_JSON'))['total_batch_size'])")
         fi
     fi
+fi
+
+if [ -z "$CKPT_TOTAL_BATCH_SIZE" ]; then
+    CKPT_TOTAL_BATCH_SIZE=524288
+    echo "  WARNING: CKPT_TOTAL_BATCH_SIZE not found, using default 524288"
 fi
 
 # Auto-generate model tags
@@ -257,6 +261,7 @@ echo "    target-param-data-ratio: $TARGET_PARAM_DATA_RATIO"
 echo "    num-scaling-params:      $NUM_SCALING_PARAMS"
 echo "    device-batch-size:       $DEVICE_BATCH_SIZE"
 echo "    NPU cards:               $NUM_NPU"
+echo "    eval-benchmarks:         $EVAL_BENCHMARKS"
 echo ""
 echo "  Model tags (save):"
 echo "    QuadMix: $QUADMIX_MODEL_TAG"
@@ -282,43 +287,23 @@ echo ""
 echo "╔══ Step 1: Prepare datasets ══╗"
 echo ""
 
-_DATA_READY=true
-if [ ! -f "$DATA_DIR/dataset_stats.json" ]; then
-    _DATA_READY=false
+PREP_ARGS=(
+    --quadmix-sampled-data "$QUADMIX_SAMPLED_DATA"
+    --preprocessed-data-dir "$PREPROCESSED_DATA_DIR"
+    --output-dir "$DATA_DIR"
+    --tokenizer-pkl "$TOKENIZER_DIR/tokenizer.pkl"
+    --data-ratio "$TARGET_PARAM_DATA_RATIO"
+    --num-scaling-params "$NUM_SCALING_PARAMS"
+    --shard-size "$SHARD_SIZE"
+    --val-ratio "$VAL_RATIO"
+    --seed "$SEED"
+    --max-shards "$MAX_SHARDS"
+    --num-npu "$NUM_NPU"
+)
+if [ "$DO_QUALITY" -eq 1 ]; then
+    PREP_ARGS+=(--quality-method "$QUALITY_METHODS")
 fi
-for _subdir in quadmix random; do
-    if [ ! -d "$DATA_DIR/$_subdir" ]; then
-        _DATA_READY=false
-        break
-    fi
-done
-if $_DATA_READY; then
-    echo "  Datasets already exist. Skipping preparation."
-    echo "  (Delete $DATA_DIR to regenerate)"
-else
-    PREP_ARGS=(
-        --quadmix-sampled-data "$QUADMIX_SAMPLED_DATA"
-        --preprocessed-data-dir "$PREPROCESSED_DATA_DIR"
-        --output-dir "$DATA_DIR"
-        --tokenizer-pkl "$TOKENIZER_DIR/tokenizer.pkl"
-        --data-ratio "$TARGET_PARAM_DATA_RATIO"
-        --num-scaling-params "$NUM_SCALING_PARAMS"
-        --shard-size "$SHARD_SIZE"
-        --val-ratio "$VAL_RATIO"
-        --seed "$SEED"
-        --max-shards "$MAX_SHARDS"
-        --num-npu "$NUM_NPU"
-    )
-    if [ "$DO_QUALITY" -eq 1 ]; then
-        PREP_ARGS+=(--quality-method "$QUALITY_METHODS")
-    fi
-    python3 "$SCRIPT_DIR/prepare_data.py" "${PREP_ARGS[@]}"
-fi
-
-CKPT_META_JSON=$(ls "$BASE_CKPT_DIR"/meta_*.json 2>/dev/null | sort | tail -1)
-if [ -z "$CKPT_TOTAL_BATCH_SIZE" ] && [ -n "$CKPT_META_JSON" ]; then
-    CKPT_TOTAL_BATCH_SIZE=$(python3 -c "import json; print(json.load(open('$CKPT_META_JSON'))['total_batch_size'])")
-fi
+python3 "$SCRIPT_DIR/prepare_data.py" "${PREP_ARGS[@]}"
 
 DATA_DIR="$DATA_DIR" BASE_MODEL_TAG="$BASE_MODEL_TAG" \
 TARGET_PARAM_DATA_RATIO="$TARGET_PARAM_DATA_RATIO" \
@@ -332,6 +317,7 @@ NANOCHAT_MODEL_DIR="$NANOCHAT_MODEL_DIR" \
 MID_CHECKPOINTS_OUTPUT_DIR="$MID_CHECKPOINTS_OUTPUT_DIR" \
 QUADMIX_GIT_HASH="$(git -C "$QUADMIX_DIR" rev-parse --short HEAD 2>/dev/null || echo 'unknown')" \
 NANOCHAT_GIT_HASH="$(git -C "$NANOCHAT_REPO" rev-parse --short HEAD 2>/dev/null || echo 'unknown')" \
+EVAL_BENCHMARKS="$EVAL_BENCHMARKS" \
 python3 -c "
 import os, json
 stats_path = os.path.join(os.environ['DATA_DIR'], 'dataset_stats.json')
@@ -349,6 +335,7 @@ stats['config'].update({
     'mid_checkpoints_output_dir': os.environ.get('MID_CHECKPOINTS_OUTPUT_DIR', ''),
     'quadmix_git_hash': os.environ.get('QUADMIX_GIT_HASH', ''),
     'nanochat_git_hash': os.environ.get('NANOCHAT_GIT_HASH', ''),
+    'eval_benchmarks': os.environ.get('EVAL_BENCHMARKS', ''),
 })
 with open(stats_path, 'w') as f:
     json.dump(stats, f, indent=2)
@@ -417,6 +404,44 @@ if [ -n "$MID_CHECKPOINTS_OUTPUT_DIR" ]; then
 fi
 
 # ══════════════════════════════════════════════════════════════
+#  PRE-FLIGHT: DISK SPACE CHECK
+# ══════════════════════════════════════════════════════════════
+
+echo ""
+echo "╔══ Pre-flight: Disk space check ══╗"
+echo ""
+
+CKPT_DIR="${MID_CHECKPOINTS_OUTPUT_DIR}"
+mkdir -p "$CKPT_DIR"
+
+AVAILABLE_KB=$(df -P "$CKPT_DIR" | awk 'NR==2{print $4}')
+AVAILABLE_GB=$((AVAILABLE_KB / 1024 / 1024))
+MIN_REQUIRED_GB=60
+
+echo "  Checkpoint dir:  $CKPT_DIR"
+echo "  Available space: ${AVAILABLE_GB}GB"
+echo "  Minimum needed:  ${MIN_REQUIRED_GB}GB (3+ trainings × ~20GB/ckpt)"
+
+if [ "$AVAILABLE_GB" -lt "$MIN_REQUIRED_GB" ]; then
+    echo ""
+    echo "  ERROR: Insufficient disk space!"
+    echo "  Available: ${AVAILABLE_GB}GB < Required: ${MIN_REQUIRED_GB}GB"
+    echo ""
+    echo "  Options:"
+    echo "    1. Set MID_CHECKPOINTS_OUTPUT_DIR to a partition with more space:"
+    echo "       MID_CHECKPOINTS_OUTPUT_DIR=/path/to/larger/disk bash nanochat_mid_compare/run_experiment.sh"
+    echo "    2. Free up space on the current partition"
+    echo ""
+    echo "╚══════════════════════════════════════════════════════════╝"
+    exit 1
+fi
+
+echo "  ✓ Disk space sufficient"
+echo ""
+echo "╚══════════════════════════════════════════════════════════╝"
+echo ""
+
+# ══════════════════════════════════════════════════════════════
 #  STEP 3: MID-TRAINING
 # ══════════════════════════════════════════════════════════════
 
@@ -431,16 +456,7 @@ run_mid_training() {
     local DATASET_TOKENS="$5"
     local TRAIN_TOKENS="$6"
 
-    local BASE_CKPT_DIR="$NANOCHAT_MODEL_DIR/base_checkpoints/$BASE_MODEL_TAG"
-    local META_JSON=$(ls "$BASE_CKPT_DIR"/meta_*.json 2>/dev/null | sort | tail -1)
-    if [ -n "$META_JSON" ]; then
-        local TOTAL_BATCH_SIZE=$(python3 -c "import json; print(json.load(open('$META_JSON'))['total_batch_size'])")
-        echo "    Read total_batch_size=$TOTAL_BATCH_SIZE from checkpoint"
-    else
-        echo "    ERROR: No meta JSON found in $BASE_CKPT_DIR, cannot determine total_batch_size" >&2
-        exit 1
-    fi
-    local NUM_ITERATIONS=$(( (TRAIN_TOKENS + TOTAL_BATCH_SIZE - 1) / TOTAL_BATCH_SIZE ))
+    local NUM_ITERATIONS=$(( (TRAIN_TOKENS + CKPT_TOTAL_BATCH_SIZE - 1) / CKPT_TOTAL_BATCH_SIZE ))
 
     echo "  Starting mid-training: $RUN_NAME"
     echo "    Data:       $DATA_PATH"
@@ -465,11 +481,12 @@ run_mid_training() {
         --num-iterations="$NUM_ITERATIONS" \
         --target-param-data-ratio="$TARGET_PARAM_DATA_RATIO" \
         --device-batch-size="$DEVICE_BATCH_SIZE" \
-        --total-batch-size="$TOTAL_BATCH_SIZE" \
+        --total-batch-size="$CKPT_TOTAL_BATCH_SIZE" \
         --run="$RUN_NAME" \
         --model-tag="$MODEL_TAG" \
         --core-metric-every="$CORE_METRIC_EVERY" \
         --eval-every="$EVAL_EVERY" \
+        --eval-benchmarks="$EVAL_BENCHMARKS" \
         --data-dir="$DATA_PATH" \
         2>&1 | tee "$LOG_FILE"
     popd > /dev/null
@@ -553,6 +570,7 @@ run_eval() {
     pushd "$NANOCHAT_REPO" > /dev/null
     python3 -m torch.distributed.run --standalone --nproc_per_node="$NUM_NPU" -m scripts.base_eval -- \
         --eval=core \
+        --eval-benchmarks="$EVAL_BENCHMARKS" \
         --device-batch-size=32 \
         --model-tag="$MODEL_TAG" \
         --model-type="$MODEL_TYPE" \

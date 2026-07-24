@@ -33,7 +33,7 @@ NUM_NPU="${NUM_NPU:-8}"
 CORE_METRIC_EVERY="${CORE_METRIC_EVERY:--1}"
 EVAL_EVERY="${EVAL_EVERY:--1}"
 TARGET_PARAM_DATA_RATIO="${TARGET_PARAM_DATA_RATIO:-0.5}"
-NUM_SCALING_PARAMS="${NUM_SCALING_PARAMS:-1300000000}"
+NUM_SCALING_PARAMS="${NUM_SCALING_PARAMS:-}"
 MID_CHECKPOINTS_OUTPUT_DIR="${MID_CHECKPOINTS_OUTPUT_DIR:-$HOME/.cache/nanochat_mid_compare/mid_checkpoints}"
 
 # Extract timestamp from result directory name
@@ -69,6 +69,34 @@ fi
 if [ ! -d "$NANOCHAT_REPO" ]; then
     echo "ERROR: Nanochat repo not found: $NANOCHAT_REPO"
     exit 1
+fi
+
+if [ -z "$NUM_SCALING_PARAMS" ]; then
+    NUM_SCALING_PARAMS=$(STATS_FILE="$STATS_FILE" python3 -c "
+import os, json
+s = json.load(open(os.environ['STATS_FILE']))
+print(s['config'].get('num_scaling_params', ''))
+")
+    if [ -z "$NUM_SCALING_PARAMS" ]; then
+        MODEL_INFO=$(python3 "$SCRIPT_DIR/get_model_info.py" \
+            --ckpt-dir "$BASE_CKPT_DIR" \
+            --nanochat-repo "$NANOCHAT_REPO")
+        NUM_SCALING_PARAMS=$(echo "$MODEL_INFO" | grep NUM_SCALING_PARAMS | cut -d= -f2)
+        CKPT_TOTAL_BATCH_SIZE=$(echo "$MODEL_INFO" | grep TOTAL_BATCH_SIZE | cut -d= -f2)
+    else
+        CKPT_TOTAL_BATCH_SIZE=$(STATS_FILE="$STATS_FILE" python3 -c "
+import os, json
+s = json.load(open(os.environ['STATS_FILE']))
+print(s['config'].get('total_batch_size', '524288'))
+")
+    fi
+    echo "  Read from stats: NUM_SCALING_PARAMS=$NUM_SCALING_PARAMS, TOTAL_BATCH_SIZE=$CKPT_TOTAL_BATCH_SIZE"
+else
+    CKPT_TOTAL_BATCH_SIZE=$(STATS_FILE="$STATS_FILE" python3 -c "
+import os, json
+s = json.load(open(os.environ['STATS_FILE']))
+print(s['config'].get('total_batch_size', '524288'))
+")
 fi
 
 # ══════ NPU ENVIRONMENT ══════
@@ -188,17 +216,10 @@ run_mid_training() {
     local LOG_FILE="$4"
     local DATASET_TOKENS="$5"
 
-    local META_JSON=$(ls "$BASE_CKPT_DIR"/meta_*.json 2>/dev/null | sort | tail -1)
-    if [ -n "$META_JSON" ]; then
-        local TOTAL_BATCH_SIZE=$(python3 -c "import json; print(json.load(open('$META_JSON'))['total_batch_size'])")
-        echo "    Read total_batch_size=$TOTAL_BATCH_SIZE from checkpoint"
-    else
-        local TOTAL_BATCH_SIZE=524288
-        echo "    WARNING: No meta JSON found in $BASE_CKPT_DIR, falling back to 524288"
-    fi
+    local TOTAL_BATCH_SIZE="${CKPT_TOTAL_BATCH_SIZE:-524288}"
     local TARGET_TOKENS=$(python3 -c "print(int($TARGET_PARAM_DATA_RATIO * $NUM_SCALING_PARAMS))")
     local ACTUAL_TOKENS=$(python3 -c "print(min($TARGET_TOKENS, $DATASET_TOKENS))")
-    local NUM_ITERATIONS=$((ACTUAL_TOKENS / TOTAL_BATCH_SIZE))
+    local NUM_ITERATIONS=$(( (ACTUAL_TOKENS + TOTAL_BATCH_SIZE - 1) / TOTAL_BATCH_SIZE ))
     local ACTUAL_RATIO=$(python3 -c "print(f'{$ACTUAL_TOKENS / $NUM_SCALING_PARAMS:.4f}')")
 
     echo "  Starting mid-training: $RUN_NAME"
