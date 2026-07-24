@@ -18,15 +18,20 @@
 | 12 | P2 | NUM_ITERATIONS 整数截断 | run_stem_experiment.sh:410, run_experiment.sh:429 | 向上取整 ceiling div |
 | 14 | P2→merged | CORE metric regex 不匹配负值 | generate_report.py:81 | 已合并入 P0 #1 修复 |
 
-## 不修复/保留 (9/21)
+## 不修复/保留 (8/21)
 
 | # | 原优先级 | 新优先级 | 问题 | 原因 |
 |---|---------|---------|------|------|
 | 9 | P1 | P3 | symlink cleanup on crash | symlink 残留无害（指向正确 base ckpt，retry 可复用） |
 | 13 | P2 | merged | eval 缺 --eval-benchmarks | 默认 eval all 对 essential-web 合理，且已合并到 #1 |
-| 15 | P2 | P3 | Quality datasets 常驻内存 | 实际内存压力不大 |
+| 15 | P2 | P3 | Quality datasets 常驻内存 | 当前实验未用 quality method，内存压力不大 |
 | 17 | P3 | P3 | val_ratio=0 写 dummy shard | 不影响训练 |
-| 18 | P3 | P3 | trim_docs_to_target undershoot | 所有基线一致，公平 |
-| 19 | P3 | P3 | 无 warning source data 不够 | 未来可加 |
-| 20 | P3 | P3 | NCCL vars on HCCL | 需实测确认 |
-| 21 | P3 | P3 | eval device-batch-size 不一致 | 微小差异 |
+| 18 | P3 | P3 | trim_docs_to_target undershoot | 所有基线一致 undershoot，反而保证公平 |
+| 19 | P3 | P3 | 无 warning source data 不够 | 当前数据量充足，未来可加 |
+| 20 | P3 | P3 | NCCL vars on HCCL | 需实测确认，盲改有风险 |
+
+## 不是 bug (1/21)
+
+| # | 原优先级 | 问题 | 原因 |
+|---|---------|------|------|
+| 21 | P3 | eval device-batch-size 不一致 | 不同机器 GPU/NPU 数量不同导致配置差异，不是代码 bug |
