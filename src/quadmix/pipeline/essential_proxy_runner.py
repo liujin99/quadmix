@@ -352,12 +352,15 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             combined_rows = np.concatenate([old_rows, new_rows])
             combined_tokens = np.concatenate([old_tokens, new_tokens])
 
-            row_to_idx = {}
-            for i, r in enumerate(combined_rows):
-                row_to_idx[int(r)] = i
+            reversed_rows = combined_rows[::-1]
+            _, inverse_rev = np.unique(reversed_rows, return_index=True)
+            keep_indices = len(combined_rows) - 1 - inverse_rev
+            keep_rows = combined_rows[keep_indices]
+            keep_tokens = combined_tokens[keep_indices]
 
-            unique_rows = np.array(sorted(row_to_idx.keys()), dtype=np.int64)
-            final_tokens = combined_tokens[[row_to_idx[int(r)] for r in unique_rows]]
+            sort_order = np.argsort(keep_rows)
+            unique_rows = keep_rows[sort_order].astype(np.int64)
+            final_tokens = keep_tokens[sort_order]
 
             new_bytes = unique_rows.nbytes + final_tokens.nbytes
             self._memory_cache[sid] = {"rows": unique_rows, "tokens": final_tokens}
@@ -1729,23 +1732,43 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         shard_miss_meta = {}
 
         with PerfTimer.section("check_cache", "tokenize_all"):
+            from concurrent.futures import ThreadPoolExecutor
+
+            def _load_disk_cache(sid):
+                return sid, self._cached_shard_rows(sid)
+
+            with ThreadPoolExecutor(max_workers=min(32, len(shard_groups))) as pool:
+                disk_cache_map = dict(pool.map(_load_disk_cache, shard_groups.keys()))
+
             for sid, (shard_path, local_rows) in shard_groups.items():
-                cached_rows = self._cached_shard_rows(sid)
+                cached_rows = disk_cache_map[sid]
                 memory_cached = self._memory_cache_get_rows(sid)
 
                 row_col_vals = mgr.local_to_row_col(sid, local_rows)
-                row_col_int = [int(v) for v in row_col_vals]
-                hit_rows = [v for v in row_col_int if v in cached_rows or v in memory_cached]
-                miss_row_col = [v for v in row_col_int if v not in cached_rows and v not in memory_cached]
 
-                total_cached += len(hit_rows)
+                if cached_rows and memory_cached:
+                    combined_cached = cached_rows | memory_cached
+                    miss_mask = ~np.isin(row_col_vals, list(combined_cached))
+                    miss_row_col = row_col_vals[miss_mask]
+                    total_cached += int((~miss_mask).sum())
+                elif cached_rows:
+                    miss_mask = ~np.isin(row_col_vals, list(cached_rows))
+                    miss_row_col = row_col_vals[miss_mask]
+                    total_cached += int((~miss_mask).sum())
+                elif memory_cached:
+                    miss_mask = ~np.isin(row_col_vals, list(memory_cached))
+                    miss_row_col = row_col_vals[miss_mask]
+                    total_cached += int((~miss_mask).sum())
+                else:
+                    miss_row_col = row_col_vals
+                    total_cached += 0
 
-                if miss_row_col:
-                    miss_row_col_arr = np.array(sorted(miss_row_col), dtype=np.int64)
+                if len(miss_row_col) > 0:
+                    miss_row_col_arr = np.sort(miss_row_col).astype(np.int64)
                     shard_total_rows = mgr._per_shard_info[sid]["num_docs"]
                     shard_miss_info.append((sid, shard_path, miss_row_col_arr.tolist(),
                                            mgr._is_row_col_sequential, shard_total_rows))
-                    shard_miss_meta[sid] = len(miss_row_col)
+                    shard_miss_meta[sid] = len(miss_row_col_arr)
 
         if shard_miss_info:
             print(f"[TokenizeAll] {sum(shard_miss_meta.values()):,} miss rows across {len(shard_miss_info)} shards, parallel tokenizing...")

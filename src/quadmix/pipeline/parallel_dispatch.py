@@ -119,80 +119,80 @@ def _tokenize_shard_parallel(
     cfg = ConcurrencyConfig()
     n_shards = len(shard_tasks)
 
-    threads_per_worker = cfg.blas_threads_for(max(1, cfg.max_io_workers // 4))
+    env_workers = int(os.environ.get("TOKENIZE_WORKERS", "0"))
+    if env_workers >= 1:
+        n_workers = env_workers
+    else:
+        n_workers = min(cfg.max_io_workers, n_shards)
+
+    threads_per_worker = max(1, round(cfg.cpu_count / max(1, n_workers)))
     _saved_env = {}
     for _k in ("RAYON_NUM_THREADS", "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
         _saved_env[_k] = os.environ.get(_k)
-    os.environ["RAYON_NUM_THREADS"] = str(4)
+    os.environ["RAYON_NUM_THREADS"] = str(threads_per_worker)
     os.environ["OMP_NUM_THREADS"] = str(threads_per_worker)
     os.environ["OPENBLAS_NUM_THREADS"] = str(threads_per_worker)
 
+    print(f"  [ParallelTokenize] {n_shards} shards, {n_workers} processes "
+          f"× {threads_per_worker} Rust threads = {n_workers * threads_per_worker} total threads")
+
+    results = []
+    t0 = time.time()
+
+    completed = [0]
+    lock = threading.Lock()
+
+    def on_done(fut):
+        with lock:
+            completed[0] += 1
+            c = completed[0]
+        if c % 10 == 0 or c == n_shards:
+            elapsed = time.time() - t0
+            speed = c / elapsed if elapsed > 0 else 0
+            eta = (n_shards - c) / speed if speed > 0 else 0
+            print(f"  [Tokenize Progress] {c}/{n_shards} shards "
+                  f"({c*100//n_shards}%), "
+                  f"{speed:.1f} shards/s, ETA {eta:.0f}s")
+
+    with PerfTimer.section("parallel_tokenize", "parallel_tokenize"):
+        from quadmix.pipeline.tokenize_worker import _process_shard_full as _worker_process_shard
+        ctx = mp.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as executor:
+            futs = []
+            for sid, shard_path, miss_rows, is_seq, total_rows in shard_tasks:
+                fut = executor.submit(
+                    _worker_process_shard,
+                    sid, shard_path, miss_rows,
+                    tokenizer_path, block_size, threads_per_worker,
+                    text_col, row_in_shard_col if row_in_shard_col is not None else "row_in_shard", has_row_in_shard,
+                    is_seq, total_rows,
+                )
+                fut.add_done_callback(on_done)
+                futs.append(fut)
+
+            failed_shards = []
+            for fut in futs:
+                try:
+                    sid, parsed_rows, tokens_array, io_time, tok_time, total_time = fut.result()
+                    results.append((sid, parsed_rows, tokens_array, io_time, tok_time, total_time))
+                except Exception as e:
+                    print(f"  [Tokenize Error] {e}")
+                    import traceback
+                    traceback.print_exc()
+                    failed_shards.append(str(e))
+
+    if failed_shards:
+        raise RuntimeError(
+            f"[ParallelTokenize] {len(failed_shards)} shard(s) failed to tokenize. "
+            f"First error: {failed_shards[0]}"
+        )
+
+    total_time = time.time() - t0
+    total_docs = sum(len(r[1]) for r in results)
+    print(f"  [ParallelTokenize] {total_docs:,} docs in {total_time:.1f}s "
+          f"({total_docs / total_time:.0f} docs/s)")
+
     try:
-        env_workers = int(os.environ.get("TOKENIZE_WORKERS", "0"))
-        if env_workers >= 1:
-            n_workers = env_workers
-        else:
-            n_workers = min(cfg.max_io_workers, n_shards)
-
-        print(f"  [ParallelTokenize] {n_shards} shards, {n_workers} processes "
-              f"× {threads_per_worker} Rust threads = {n_workers * threads_per_worker} total threads")
-
-        results = []
-        t0 = time.time()
-
-        completed = [0]
-        lock = threading.Lock()
-
-        def on_done(fut):
-            with lock:
-                completed[0] += 1
-                c = completed[0]
-            if c % 10 == 0 or c == n_shards:
-                elapsed = time.time() - t0
-                speed = c / elapsed if elapsed > 0 else 0
-                eta = (n_shards - c) / speed if speed > 0 else 0
-                print(f"  [Tokenize Progress] {c}/{n_shards} shards "
-                      f"({c*100//n_shards}%), "
-                      f"{speed:.1f} shards/s, ETA {eta:.0f}s")
-
-        with PerfTimer.section("parallel_tokenize", "parallel_tokenize"):
-            from quadmix.pipeline.tokenize_worker import _process_shard_full as _worker_process_shard
-            ctx = mp.get_context("spawn")
-            with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as executor:
-                futs = []
-                for sid, shard_path, miss_rows, is_seq, total_rows in shard_tasks:
-                    fut = executor.submit(
-                        _worker_process_shard,
-                        sid, shard_path, miss_rows,
-                        tokenizer_path, block_size, threads_per_worker,
-                        text_col, row_in_shard_col if row_in_shard_col is not None else "row_in_shard", has_row_in_shard,
-                        is_seq, total_rows,
-                    )
-                    fut.add_done_callback(on_done)
-                    futs.append(fut)
-
-                failed_shards = []
-                for fut in futs:
-                    try:
-                        sid, parsed_rows, tokens_array, io_time, tok_time, total_time = fut.result()
-                        results.append((sid, parsed_rows, tokens_array, io_time, tok_time, total_time))
-                    except Exception as e:
-                        print(f"  [Tokenize Error] {e}")
-                        import traceback
-                        traceback.print_exc()
-                        failed_shards.append(str(e))
-
-        if failed_shards:
-            raise RuntimeError(
-                f"[ParallelTokenize] {len(failed_shards)} shard(s) failed to tokenize. "
-                f"First error: {failed_shards[0]}"
-            )
-
-        total_time = time.time() - t0
-        total_docs = sum(len(r[1]) for r in results)
-        print(f"  [ParallelTokenize] {total_docs:,} docs in {total_time:.1f}s "
-              f"({total_docs / total_time:.0f} docs/s)")
-
         return results
     finally:
         for _k, _v in _saved_env.items():

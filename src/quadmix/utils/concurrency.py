@@ -77,10 +77,10 @@ class ConcurrencyConfig:
             object.__setattr__(self, 'cpu_count', os.cpu_count() or 4)
         if self.max_compute_workers == 0:
             object.__setattr__(self, 'max_compute_workers',
-                               min(self.cpu_count, 16))
+                               min(self.cpu_count, max(16, self.cpu_count // 4)))
         if self.max_io_workers == 0:
             object.__setattr__(self, 'max_io_workers',
-                               min(self.cpu_count, 32))
+                               min(self.cpu_count, max(32, self.cpu_count // 4)))
 
     def blas_threads_for(self, n_workers: int) -> int:
         return max(1, round(self.cpu_count / max(1, n_workers)))
