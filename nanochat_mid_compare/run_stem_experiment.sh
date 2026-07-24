@@ -147,6 +147,7 @@ fi
 # ══════════════════════════════════════════════════════════════
 
 export OMP_NUM_THREADS=1
+export PYTHONWARNINGS="ignore::UserWarning:torch_npu"
 export WANDB_MODE=offline
 export NANOCHAT_BASE_DIR="$NANOCHAT_MODEL_DIR"
 mkdir -p "$NANOCHAT_MODEL_DIR"
