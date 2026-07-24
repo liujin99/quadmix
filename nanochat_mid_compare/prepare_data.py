@@ -638,7 +638,7 @@ def main():
 
     if args.data_ratio is not None and args.num_scaling_params is not None:
         target_tokens = int(args.data_ratio * args.num_scaling_params)
-        budget_cap = int(min(quadmix_total_tokens, target_tokens) * 1.1)
+        budget_cap = int(target_tokens * 1.1)
         print(f"\n  Token budget: target={target_tokens:,}, "
               f"quadmix_total={quadmix_total_tokens:,}, "
               f"budget_cap={budget_cap:,}")
