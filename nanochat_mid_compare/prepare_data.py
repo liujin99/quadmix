@@ -53,6 +53,40 @@ from tqdm import tqdm
 
 _SPAWN_CTX = mp.get_context("spawn")
 
+_io_pool = None
+_token_pool = None
+
+
+def _get_io_pool(num_workers=None):
+    global _io_pool
+    if _io_pool is None:
+        if num_workers is None:
+            num_workers = min(mp.cpu_count(), 256) or 1
+        _io_pool = _SPAWN_CTX.Pool(num_workers)
+    return _io_pool
+
+
+def _get_token_pool(tokenizer_pkl_path, num_workers=None):
+    global _token_pool
+    if _token_pool is None:
+        if num_workers is None:
+            num_workers = min(mp.cpu_count() // 4, 48) or 1
+        _token_pool = _SPAWN_CTX.Pool(
+            num_workers, initializer=_init_worker, initargs=(tokenizer_pkl_path,))
+    return _token_pool
+
+
+def _cleanup_pools():
+    global _io_pool, _token_pool
+    if _io_pool is not None:
+        _io_pool.close()
+        _io_pool.join()
+        _io_pool = None
+    if _token_pool is not None:
+        _token_pool.close()
+        _token_pool.join()
+        _token_pool = None
+
 QUALITY_SCORE_MAP = {
     "dclm": "qs_dclm",
     "fineweb_edu": "qs_fineweb_edu_approx",
@@ -104,42 +138,42 @@ def count_tokens_mp(texts, tokenizer_pkl_path, num_workers=None, chunk_timeout=6
     chunk_size = max(1, len(texts) // (num_workers * 4))
     chunks = [texts[i:i + chunk_size] for i in range(0, len(texts), chunk_size)]
     enc = load_tokenizer(tokenizer_pkl_path)
-    with _SPAWN_CTX.Pool(num_workers, initializer=_init_worker, initargs=(tokenizer_pkl_path,)) as pool:
-        async_results = [(i, pool.apply_async(_worker_encode_batch, (chunk,)))
-                         for i, chunk in enumerate(chunks)]
-        results = [None] * len(chunks)
-        pbar = tqdm(total=len(chunks), desc=f"  Tokenizing ({num_workers} processes x 4 rust threads)")
-        for i, ar in async_results:
+    pool = _get_token_pool(tokenizer_pkl_path, num_workers)
+    async_results = [(i, pool.apply_async(_worker_encode_batch, (chunk,)))
+                     for i, chunk in enumerate(chunks)]
+    results = [None] * len(chunks)
+    pbar = tqdm(total=len(chunks), desc=f"  Tokenizing ({num_workers} processes x 4 rust threads)")
+    for i, ar in async_results:
+        try:
+            results[i] = ar.get(timeout=chunk_timeout)
+        except mp.TimeoutError:
+            chunk = chunks[i]
+            lengths = [len(t) for t in chunk]
+            print(f"\n  WARNING: chunk {i} timed out after {chunk_timeout}s")
+            print(f"    Chunk stats: {len(chunk)} docs, min={min(lengths)}, max={max(lengths)}, avg={sum(lengths)//len(lengths)}")
+            print(f"    Retrying in main process...")
             try:
-                results[i] = ar.get(timeout=chunk_timeout)
-            except mp.TimeoutError:
-                chunk = chunks[i]
-                lengths = [len(t) for t in chunk]
-                print(f"\n  WARNING: chunk {i} timed out after {chunk_timeout}s")
-                print(f"    Chunk stats: {len(chunk)} docs, min={min(lengths)}, max={max(lengths)}, avg={sum(lengths)//len(lengths)}")
-                print(f"    Retrying in main process...")
-                try:
-                    if hasattr(enc, "encode_ordinary_batch"):
-                        results[i] = [len(ids) for ids in enc.encode_ordinary_batch(chunks[i], num_threads=1)]
-                    else:
-                        results[i] = [len(enc.encode_ordinary(t)) for t in chunks[i]]
-                    print(f"  Retry succeeded for chunk {i}")
-                except Exception as e2:
-                    print(f"  Retry failed: {e2}, using estimates")
-                    results[i] = [len(t) // 4 for t in chunks[i]]
-            except Exception as e:
-                print(f"\n  WARNING: chunk {i} failed: {e}, retrying in main process...")
-                try:
-                    if hasattr(enc, "encode_ordinary_batch"):
-                        results[i] = [len(ids) for ids in enc.encode_ordinary_batch(chunks[i], num_threads=1)]
-                    else:
-                        results[i] = [len(enc.encode_ordinary(t)) for t in chunks[i]]
-                    print(f"  Retry succeeded for chunk {i}")
-                except Exception as e2:
-                    print(f"  Retry failed: {e2}, using estimates")
-                    results[i] = [len(t) // 4 for t in chunks[i]]
-            pbar.update(1)
-        pbar.close()
+                if hasattr(enc, "encode_ordinary_batch"):
+                    results[i] = [len(ids) for ids in enc.encode_ordinary_batch(chunks[i], num_threads=1)]
+                else:
+                    results[i] = [len(enc.encode_ordinary(t)) for t in chunks[i]]
+                print(f"  Retry succeeded for chunk {i}")
+            except Exception as e2:
+                print(f"  Retry failed: {e2}, using estimates")
+                results[i] = [len(t) // 4 for t in chunks[i]]
+        except Exception as e:
+            print(f"\n  WARNING: chunk {i} failed: {e}, retrying in main process...")
+            try:
+                if hasattr(enc, "encode_ordinary_batch"):
+                    results[i] = [len(ids) for ids in enc.encode_ordinary_batch(chunks[i], num_threads=1)]
+                else:
+                    results[i] = [len(enc.encode_ordinary(t)) for t in chunks[i]]
+                print(f"  Retry succeeded for chunk {i}")
+            except Exception as e2:
+                print(f"  Retry failed: {e2}, using estimates")
+                results[i] = [len(t) // 4 for t in chunks[i]]
+        pbar.update(1)
+    pbar.close()
     return [c for batch in results for c in batch]
 
 
@@ -188,19 +222,19 @@ def _read_docs_from_shard_tagged(args):
 
 def read_docs_from_shards(shard_paths, selections, num_workers=None, desc=None, text_col="text"):
     if num_workers is None:
-        num_workers = min(mp.cpu_count(), 128) or 1
+        num_workers = min(mp.cpu_count(), 256) or 1
     shard_to_docs = {}
     for shard_id, doc_id in selections:
         if shard_id not in shard_to_docs:
             shard_to_docs[shard_id] = []
         shard_to_docs[shard_id].append(doc_id)
     tasks = [(sid, str(shard_paths[sid]), indices, text_col) for sid, indices in shard_to_docs.items()]
-    with _SPAWN_CTX.Pool(num_workers) as pool:
-        unordered = list(tqdm(
-            pool.imap_unordered(_read_docs_from_shard_tagged, tasks, chunksize=1),
-            total=len(tasks),
-            desc=desc or f"  Reading selected docs ({num_workers} processes)",
-        ))
+    pool = _get_io_pool(num_workers)
+    unordered = list(tqdm(
+        pool.imap_unordered(_read_docs_from_shard_tagged, tasks, chunksize=1),
+        total=len(tasks),
+        desc=desc or f"  Reading selected docs ({num_workers} processes)",
+    ))
     shard_result_map = {sid: docs for sid, docs in unordered}
     shard_cursors = {sid: 0 for sid in shard_to_docs}
     result = []
@@ -273,7 +307,7 @@ def scan_shards(data_dir, file_pattern, domain_col=None, domain_names=None,
                 char_count_col=None, text_col="text", num_workers=None, max_shards=None,
                 max_chars=1000000, max_char_repeat_ratio=0.3):
     if num_workers is None:
-        num_workers = min(mp.cpu_count(), 128) or 1
+        num_workers = min(mp.cpu_count(), 256) or 1
     shard_files = sorted(Path(data_dir).glob(file_pattern))
     if not shard_files:
         raise FileNotFoundError(f"No {file_pattern} files found in {data_dir}")
@@ -281,18 +315,18 @@ def scan_shards(data_dir, file_pattern, domain_col=None, domain_names=None,
         shard_files = shard_files[:max_shards]
     tasks = [(i, str(p), domain_col, domain_names, char_count_col, text_col, max_chars, max_char_repeat_ratio)
              for i, p in enumerate(shard_files)]
-    with _SPAWN_CTX.Pool(num_workers) as pool:
-        results = [None] * len(shard_files)
-        total_filtered_long = 0
-        total_filtered_repeat = 0
-        for idx, docs, fl, fr in tqdm(
-            pool.imap_unordered(_scan_shard_indexed, tasks, chunksize=1),
-            total=len(tasks),
-            desc=f"  Scanning shards ({num_workers} processes)",
-        ):
-            results[idx] = docs
-            total_filtered_long += fl
-            total_filtered_repeat += fr
+    pool = _get_io_pool(num_workers)
+    results = [None] * len(shard_files)
+    total_filtered_long = 0
+    total_filtered_repeat = 0
+    for idx, docs, fl, fr in tqdm(
+        pool.imap_unordered(_scan_shard_indexed, tasks, chunksize=1),
+        total=len(tasks),
+        desc=f"  Scanning shards ({num_workers} processes)",
+    ):
+        results[idx] = docs
+        total_filtered_long += fl
+        total_filtered_repeat += fr
     if total_filtered_long > 0 or total_filtered_repeat > 0:
         print(f"  Filtered {total_filtered_long:,} docs (>{max_chars:,} chars), "
               f"{total_filtered_repeat:,} docs (single char >{max_char_repeat_ratio*100:.0f}% repetition)")
@@ -592,7 +626,7 @@ def main():
     del quadmix_table
     max_chars = args.max_chars
     max_char_repeat_ratio = args.max_char_repeat_ratio
-    num_workers = args.num_workers or min(mp.cpu_count(), 128) or 1
+    num_workers = args.num_workers or min(mp.cpu_count(), 256) or 1
     chunk_size = max(1, len(texts) // (num_workers * 4))
     chunks = [texts[i:i + chunk_size] for i in range(0, len(texts), chunk_size)]
     filter_tasks = [(c, max_chars, max_char_repeat_ratio) for c in chunks]
@@ -600,16 +634,16 @@ def main():
     n_empty = 0
     n_too_long = 0
     n_repeat = 0
-    with _SPAWN_CTX.Pool(num_workers) as pool:
-        for valid, ne, tl, tr in tqdm(
-            pool.imap_unordered(_filter_docs_chunk, filter_tasks, chunksize=1),
-            total=len(filter_tasks),
-            desc=f"  Filtering QuadMix docs ({num_workers} processes)",
-        ):
-            valid_texts.extend(valid)
-            n_empty += ne
-            n_too_long += tl
-            n_repeat += tr
+    pool = _get_io_pool(num_workers)
+    for valid, ne, tl, tr in tqdm(
+        pool.imap_unordered(_filter_docs_chunk, filter_tasks, chunksize=1),
+        total=len(filter_tasks),
+        desc=f"  Filtering QuadMix docs ({num_workers} processes)",
+    ):
+        valid_texts.extend(valid)
+        n_empty += ne
+        n_too_long += tl
+        n_repeat += tr
     n_filtered = n_empty + n_too_long + n_repeat
     if n_filtered > 0:
         print(f"  Filtered {n_empty:,} docs (empty), "
@@ -914,6 +948,8 @@ def main():
     for m in quality_datasets:
         print(f"    Quality ({m}): {quality_dirs[m]}")
     print("=" * 60)
+
+    _cleanup_pools()
 
 
 if __name__ == "__main__":
