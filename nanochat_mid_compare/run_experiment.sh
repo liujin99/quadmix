@@ -403,6 +403,7 @@ run_mid_training() {
     local RUN_NAME="$3"
     local LOG_FILE="$4"
     local DATASET_TOKENS="$5"
+    local TRAIN_TOKENS="$6"
 
     local BASE_CKPT_DIR="$NANOCHAT_MODEL_DIR/base_checkpoints/$BASE_MODEL_TAG"
     local META_JSON=$(ls "$BASE_CKPT_DIR"/meta_*.json 2>/dev/null | sort | tail -1)
@@ -413,18 +414,15 @@ run_mid_training() {
         echo "    ERROR: No meta JSON found in $BASE_CKPT_DIR, cannot determine total_batch_size" >&2
         exit 1
     fi
-    local TARGET_TOKENS=$(python3 -c "print(int($TARGET_PARAM_DATA_RATIO * $NUM_SCALING_PARAMS))")
-    local ACTUAL_TOKENS=$(python3 -c "print(min($TARGET_TOKENS, $DATASET_TOKENS))")
-    local NUM_ITERATIONS=$((ACTUAL_TOKENS / TOTAL_BATCH_SIZE))
-    local ACTUAL_RATIO=$(python3 -c "print(f'{$ACTUAL_TOKENS / $NUM_SCALING_PARAMS:.4f}')")
+    local NUM_ITERATIONS=$((TRAIN_TOKENS / TOTAL_BATCH_SIZE))
+    local ACTUAL_RATIO=$(python3 -c "print(f'{$TRAIN_TOKENS / $NUM_SCALING_PARAMS:.4f}')")
 
     echo "  Starting mid-training: $RUN_NAME"
     echo "    Data:       $DATA_PATH"
     echo "    Source:     $BASE_MODEL_TAG (base)"
     echo "    Save as:    $MODEL_TAG (mid)"
     echo "    Dataset:    $DATASET_TOKENS tokens"
-    echo "    Target:     $TARGET_TOKENS tokens (ratio=$TARGET_PARAM_DATA_RATIO)"
-    echo "    Actual:     $ACTUAL_TOKENS tokens (ratio=$ACTUAL_RATIO)"
+    echo "    Train:      $TRAIN_TOKENS tokens (budget_cap, ratio=$ACTUAL_RATIO)"
     echo "    Steps:      $NUM_ITERATIONS"
     echo "    Log:        $LOG_FILE"
 
@@ -456,6 +454,11 @@ run_mid_training() {
 }
 
 STATS_FILE="$DATA_DIR/dataset_stats.json"
+BUDGET_CAP=$(STATS_FILE="$STATS_FILE" python3 -c "
+import os, json
+s = json.load(open(os.environ['STATS_FILE']))
+print(s['config'].get('budget_cap', '0'))
+")
 read -r QUADMIX_TOKENS RANDOM_TOKENS < <(
     STATS_FILE="$STATS_FILE" python3 -c "
 import os, json
@@ -463,13 +466,14 @@ s = json.load(open(os.environ['STATS_FILE']))
 print(s['quadmix']['tokens'], s['random']['tokens'])
 "
 )
+echo "  Common training budget: $BUDGET_CAP tokens (from budget_cap)"
 
 echo ""
 echo "╔══ Step 3a: Mid-training on QuadMix data ══╗"
 echo ""
 
 QUADMIX_LOG="$RESULT_DIR/mid_train_quadmix.log"
-run_mid_training "$QUADMIX_DATA" "$QUADMIX_MODEL_TAG" "quadmix_mid" "$QUADMIX_LOG" "$QUADMIX_TOKENS"
+run_mid_training "$QUADMIX_DATA" "$QUADMIX_MODEL_TAG" "quadmix_mid" "$QUADMIX_LOG" "$QUADMIX_TOKENS" "$BUDGET_CAP"
 
 echo ""
 echo "╚════════════════════════════════════════════╝"
@@ -480,7 +484,7 @@ echo "╔══ Step 3b: Mid-training on Random data ══╗"
 echo ""
 
 RANDOM_LOG="$RESULT_DIR/mid_train_random.log"
-run_mid_training "$RANDOM_DATA" "$RANDOM_MODEL_TAG" "random_mid" "$RANDOM_LOG" "$RANDOM_TOKENS"
+run_mid_training "$RANDOM_DATA" "$RANDOM_MODEL_TAG" "random_mid" "$RANDOM_LOG" "$RANDOM_TOKENS" "$BUDGET_CAP"
 
 echo ""
 echo "╚═══════════════════════════════════════════╝"
@@ -500,7 +504,7 @@ import os, json
 s = json.load(open(os.environ['STATS_FILE']))
 print(s[f'quality_{os.environ[\"METHOD\"]}']['tokens'])
 ")
-        run_mid_training "$QUALITY_DATA" "$QUALITY_MODEL_TAG" "quality_${method}_mid" "$QUALITY_LOG" "$QUALITY_TOKENS"
+        run_mid_training "$QUALITY_DATA" "$QUALITY_MODEL_TAG" "quality_${method}_mid" "$QUALITY_LOG" "$QUALITY_TOKENS" "$BUDGET_CAP"
 
         echo ""
         echo "╚════════════════════════════════════════════════╝"
