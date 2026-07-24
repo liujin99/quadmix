@@ -213,14 +213,16 @@ def _filter_docs_chunk(args):
 def _read_docs_from_shard_tagged(args):
     shard_id, shard_path, doc_indices, text_col = args
     table = pq.read_table(shard_path, columns=[text_col])
-    texts = table[text_col].to_pylist()
+    taken = table.take(pa.array(doc_indices))
+    texts = taken[text_col].to_pylist()
     return shard_id, [
-        {"text": texts[i], "char_count": len(texts[i]), "token_count": len(texts[i]) // 4}
-        for i in doc_indices
+        {"text": t, "char_count": len(t), "token_count": len(t) // 4}
+        for t in texts
     ]
 
 
-def read_docs_from_shards(shard_paths, selections, num_workers=None, desc=None, text_col="text"):
+def read_docs_from_shards(shard_paths, selections, num_workers=None, desc=None, text_col="text",
+                         max_char_repeat_ratio=0):
     if num_workers is None:
         num_workers = min(mp.cpu_count(), 256) or 1
     shard_to_docs = {}
@@ -242,6 +244,12 @@ def read_docs_from_shards(shard_paths, selections, num_workers=None, desc=None, 
         idx = shard_cursors[shard_id]
         result.append(shard_result_map[shard_id][idx])
         shard_cursors[shard_id] = idx + 1
+    if max_char_repeat_ratio > 0:
+        n_before = len(result)
+        result = [d for d in result if not _has_char_repetition(d["text"], max_char_repeat_ratio)]
+        n_filtered = n_before - len(result)
+        if n_filtered > 0:
+            print(f"  Filtered {n_filtered:,} docs (single char >{max_char_repeat_ratio*100:.0f}% repetition)")
     return result
 
 
@@ -254,7 +262,7 @@ def _scan_shard_indexed(args):
         columns_to_read.append(domain_col)
     if char_count_col and char_count_col in shard_col_set:
         columns_to_read.append(char_count_col)
-    need_text = (not char_count_col) or (char_count_col and char_count_col not in shard_col_set) or max_chars is not None or max_char_repeat_ratio > 0
+    need_text = (not char_count_col) or (char_count_col and char_count_col not in shard_col_set)
     if need_text and text_col in shard_col_set:
         columns_to_read.append(text_col)
     columns_to_read = list(set(columns_to_read))
@@ -277,7 +285,9 @@ def _scan_shard_indexed(args):
     text_data = None
     if text_col in table.column_names:
         text_data = table.column(text_col).to_pylist()
-    valid = []
+    valid_doc_ids = []
+    valid_char_counts = []
+    valid_domain_vals = []
     filtered_long = 0
     filtered_repeat = 0
     for i in range(n):
@@ -295,12 +305,16 @@ def _scan_shard_indexed(args):
             if _has_char_repetition(text_data[i], max_char_repeat_ratio):
                 filtered_repeat += 1
                 continue
-        domain_val = None
+        domain_val = -1
         if domain_data is not None:
             v = domain_data[i]
-            domain_val = int(v) if isinstance(v, (int, np.integer)) else v
-        valid.append((i, cc, domain_val))
-    return idx, valid, filtered_long, filtered_repeat
+            domain_val = int(v) if isinstance(v, (int, np.integer)) else -1
+        valid_doc_ids.append(i)
+        valid_char_counts.append(cc)
+        valid_domain_vals.append(domain_val)
+    return idx, (np.array(valid_doc_ids, dtype=np.int64),
+                 np.array(valid_char_counts, dtype=np.int64),
+                 np.array(valid_domain_vals, dtype=np.int64)), filtered_long, filtered_repeat
 
 
 def scan_shards(data_dir, file_pattern, domain_col=None, domain_names=None,
@@ -352,38 +366,53 @@ def trim_docs_to_target(docs, target_tokens):
 
 
 def select_quality_topk(prep_files, prep_metadata, quality_method, total_tokens,
-                        tokenizer_pkl=None, num_workers=None, enc=None, text_col="text"):
+                        tokenizer_pkl=None, num_workers=None, enc=None, text_col="text",
+                        max_char_repeat_ratio=0):
     quality_col = QUALITY_SCORE_MAP[quality_method]
     print(f"  Using {len(prep_files)} shards (pre-scanned)")
     print(f"  Reading quality scores ({quality_col})...")
-    all_quality_docs = []
-    for shard_id, docs in enumerate(tqdm(prep_metadata, desc=f"  Reading quality scores")):
-        if not docs:
+    q_doc_ids_list = []
+    q_shard_ids_list = []
+    q_est_tokens_list = []
+    q_scores_list = []
+    for shard_id, (doc_ids, char_counts, _domain_vals) in enumerate(
+        tqdm(prep_metadata, desc=f"  Reading quality scores")
+    ):
+        if len(doc_ids) == 0:
             continue
-        df = pq.read_table(str(prep_files[shard_id]), columns=[quality_col]).to_pandas()
-        scores = df[quality_col].to_numpy()
-        for entry in docs:
-            doc_id = entry[0]
-            char_count = entry[1]
-            all_quality_docs.append((shard_id, doc_id, float(scores[doc_id]), char_count // 4))
-    print(f"  Total candidate docs: {len(all_quality_docs):,}")
-    all_quality_docs.sort(key=lambda x: x[2], reverse=True)
-    q_selected = []
-    q_accumulated = 0
-    for shard_id, doc_id, score, est_tokens in all_quality_docs:
-        if q_accumulated >= total_tokens:
-            break
-        q_selected.append((shard_id, doc_id))
-        q_accumulated += est_tokens
+        scores = pq.read_table(str(prep_files[shard_id]), columns=[quality_col]).to_pandas()[quality_col].to_numpy()
+        q_scores_list.append(scores[doc_ids])
+        q_doc_ids_list.append(doc_ids)
+        q_shard_ids_list.append(np.full(len(doc_ids), shard_id, dtype=np.int32))
+        q_est_tokens_list.append(char_counts // 4)
+    q_doc_ids = np.concatenate(q_doc_ids_list)
+    q_shard_ids = np.concatenate(q_shard_ids_list)
+    q_est_tokens = np.concatenate(q_est_tokens_list)
+    q_scores = np.concatenate(q_scores_list)
+    del q_doc_ids_list, q_shard_ids_list, q_est_tokens_list, q_scores_list
+    print(f"  Total candidate docs: {len(q_doc_ids):,}")
+    order = np.argsort(-q_scores, kind='stable')
+    q_scores = q_scores[order]
+    q_doc_ids = q_doc_ids[order]
+    q_shard_ids = q_shard_ids[order]
+    q_est_tokens = q_est_tokens[order]
+    cumsum = np.cumsum(q_est_tokens)
+    if total_tokens <= 0 or len(cumsum) == 0:
+        cutoff = 0
+    else:
+        cutoff = min(int(np.searchsorted(cumsum, total_tokens, side='left')) + 1, len(q_doc_ids))
+    q_selected = list(zip(q_shard_ids[:cutoff].tolist(), q_doc_ids[:cutoff].tolist()))
+    q_accumulated = int(cumsum[cutoff - 1]) if cutoff > 0 else 0
     if not q_selected:
         raise RuntimeError("No quality docs selected -- check total_tokens and quality thresholds")
-    cutoff_idx = min(len(q_selected) - 1, len(all_quality_docs) - 1)
+    cutoff_idx = min(cutoff - 1, len(q_doc_ids) - 1)
     print(f"  Selected {len(q_selected):,} top-quality docs (estimated ~{q_accumulated:,} tokens)")
-    print(f"  Quality score range: {all_quality_docs[0][2]:.4f} (best) -> {all_quality_docs[cutoff_idx][2]:.4f} (cutoff)")
+    print(f"  Quality score range: {q_scores[0]:.4f} (best) -> {q_scores[cutoff_idx]:.4f} (cutoff)")
     quality_docs = read_docs_from_shards(
         prep_files, q_selected, num_workers=num_workers,
-        desc=f"  Reading quality docs ({num_workers or 'auto'} processes)", text_col=text_col)
-    del all_quality_docs
+        desc=f"  Reading quality docs ({num_workers or 'auto'} processes)", text_col=text_col,
+        max_char_repeat_ratio=max_char_repeat_ratio)
+    del q_doc_ids, q_shard_ids, q_est_tokens, q_scores, q_selected, order, cumsum
     gc.collect()
     quality_tokens = 0
     if enc and tokenizer_pkl:
@@ -427,7 +456,8 @@ def parse_manual_ratio(manual_ratio_str, domain_names):
 
 
 def select_manual_ratio(prep_files, domain_candidates, manual_ratio_map, domain_names,
-                        total_tokens, tokenizer_pkl=None, num_workers=None, enc=None, text_col="text"):
+                        total_tokens, tokenizer_pkl=None, num_workers=None, enc=None, text_col="text",
+                        max_char_repeat_ratio=0):
     if domain_names is None:
         raise ValueError("Manual Ratio requires domain_names in schema")
     name_to_id = {name: i for i, name in enumerate(domain_names)}
@@ -447,18 +477,25 @@ def select_manual_ratio(prep_files, domain_candidates, manual_ratio_map, domain_
     mr_est_tokens = 0
     domain_selected_counts = {}
     for domain_id, budget in domain_budgets.items():
-        candidates = domain_candidates.get(domain_id, [])
-        if not candidates:
+        if domain_id not in domain_candidates:
             print(f"    WARNING: No candidates for domain id={domain_id}, skipping")
             continue
-        random.shuffle(candidates)
-        domain_selected = []
-        accumulated = 0
-        for shard_id, doc_id, est_tokens in candidates:
-            if accumulated >= budget:
-                break
-            domain_selected.append((shard_id, doc_id))
-            accumulated += est_tokens
+        cand_shard_ids, cand_doc_ids, cand_est_tokens = domain_candidates[domain_id]
+        if len(cand_doc_ids) == 0:
+            print(f"    WARNING: No candidates for domain id={domain_id}, skipping")
+            continue
+        perm = np.random.permutation(len(cand_doc_ids))
+        shuffled_est_tokens = cand_est_tokens[perm]
+        cumsum = np.cumsum(shuffled_est_tokens)
+        if budget <= 0 or len(cumsum) == 0:
+            cutoff = 0
+        else:
+            cutoff = min(int(np.searchsorted(cumsum, budget, side='left')) + 1, len(cand_doc_ids))
+        domain_selected = list(zip(
+            cand_shard_ids[perm[:cutoff]].tolist(),
+            cand_doc_ids[perm[:cutoff]].tolist(),
+        ))
+        accumulated = int(cumsum[cutoff - 1]) if cutoff > 0 else 0
         domain_selected_counts[domain_id] = len(domain_selected)
         pct_filled = accumulated / budget * 100 if budget > 0 else 0
         print(f"    domain id={domain_id}: selected {len(domain_selected):,} docs, "
@@ -470,7 +507,8 @@ def select_manual_ratio(prep_files, domain_candidates, manual_ratio_map, domain_
 
     mr_docs = read_docs_from_shards(
         prep_files, mr_selected, num_workers=num_workers,
-        desc=f"  Reading manual-ratio docs ({num_workers or 'auto'} processes)", text_col=text_col)
+        desc=f"  Reading manual-ratio docs ({num_workers or 'auto'} processes)", text_col=text_col,
+        max_char_repeat_ratio=max_char_repeat_ratio)
 
     if enc and tokenizer_pkl:
         print(f"  Re-counting tokens for {len(mr_docs):,} docs (exact)...")
@@ -694,37 +732,50 @@ def main():
         num_workers=args.num_workers, max_shards=args.max_shards,
         max_chars=args.max_chars, max_char_repeat_ratio=args.max_char_repeat_ratio)
 
-    all_candidates = []
-    domain_candidates = defaultdict(list) if do_manual_ratio else None
+    print("  Building candidate index...")
+    all_doc_ids = np.concatenate([m[0] for m in prep_metadata])
+    all_char_counts = np.concatenate([m[1] for m in prep_metadata])
+    all_domain_vals = np.concatenate([m[2] for m in prep_metadata])
+    all_shard_ids = np.concatenate([
+        np.full(len(prep_metadata[sid][0]), sid, dtype=np.int32)
+        for sid in range(len(prep_metadata))
+    ])
+    all_est_tokens = all_char_counts // 4
+    print(f"  Total candidate docs: {len(all_doc_ids):,}")
+
+    domain_candidates = None
     if do_manual_ratio:
         name_to_id = {name: i for i, name in enumerate(domain_names)}
         domain_budgets_keys = set(name_to_id[name] for name in manual_ratio_map)
-    for shard_id, docs in enumerate(tqdm(prep_metadata, desc="  Building candidate index")):
-        for entry in docs:
-            doc_id = entry[0]
-            char_count = entry[1]
-            domain_val = entry[2] if len(entry) > 2 else None
-            est_tokens = char_count // 4
-            all_candidates.append((shard_id, doc_id, est_tokens, domain_val))
-            if domain_candidates is not None and domain_val is not None and domain_val in domain_budgets_keys:
-                domain_candidates[domain_val].append((shard_id, doc_id, est_tokens))
-    print(f"  Total candidate docs: {len(all_candidates):,}")
+        domain_candidates = {}
+        for dv in domain_budgets_keys:
+            mask = all_domain_vals == dv
+            domain_candidates[dv] = (
+                all_shard_ids[mask].copy(),
+                all_doc_ids[mask].copy(),
+                all_est_tokens[mask].copy(),
+            )
 
     print(f"\n[3/N] Random sampling (target: {budget_cap:,} tokens)...")
-    random.shuffle(all_candidates)
-    selected = []
-    accumulated_tokens = 0
-    for shard_id, doc_id, est_tokens, domain_val in all_candidates:
-        if accumulated_tokens >= budget_cap:
-            break
-        selected.append((shard_id, doc_id))
-        accumulated_tokens += est_tokens
+    perm = np.random.permutation(len(all_doc_ids))
+    shuffled_est_tokens = all_est_tokens[perm]
+    cumsum = np.cumsum(shuffled_est_tokens)
+    if budget_cap <= 0 or len(cumsum) == 0:
+        cutoff = 0
+    else:
+        cutoff = min(int(np.searchsorted(cumsum, budget_cap, side='left')) + 1, len(all_doc_ids))
+    selected = list(zip(
+        all_shard_ids[perm[:cutoff]].tolist(),
+        all_doc_ids[perm[:cutoff]].tolist(),
+    ))
+    accumulated_tokens = int(cumsum[cutoff - 1]) if cutoff > 0 else 0
     print(f"  Selected {len(selected):,} docs (estimated ~{accumulated_tokens:,} tokens)")
 
     print(f"\n  Reading selected documents...")
     random_docs = read_docs_from_shards(prep_files, selected, num_workers=args.num_workers,
                                          desc=f"  Reading random docs ({args.num_workers or 'auto'} processes)",
-                                         text_col=text_col)
+                                         text_col=text_col,
+                                         max_char_repeat_ratio=args.max_char_repeat_ratio)
 
     if enc and args.tokenizer_pkl:
         print(f"  Re-counting tokens for {len(random_docs):,} docs (exact)...")
@@ -742,7 +793,7 @@ def main():
             print(f"  Trimmed {n_before - len(random_docs):,} docs to match target")
 
     random_actual_tokens = sum(d["token_count"] for d in random_docs)
-    del all_candidates, selected
+    del all_doc_ids, all_char_counts, all_domain_vals, all_shard_ids, all_est_tokens, selected
     gc.collect()
 
     print(f"  Random docs: {len(random_docs):,}")
@@ -758,7 +809,8 @@ def main():
         manual_ratio_docs, manual_ratio_tokens = select_manual_ratio(
             prep_files, domain_candidates, manual_ratio_map, domain_names,
             budget_cap, tokenizer_pkl=args.tokenizer_pkl,
-            num_workers=args.num_workers, enc=enc, text_col=text_col)
+            num_workers=args.num_workers, enc=enc, text_col=text_col,
+            max_char_repeat_ratio=args.max_char_repeat_ratio)
 
     quality_datasets = {}
     step_num = 5 if do_manual_ratio else 4
@@ -768,7 +820,8 @@ def main():
             q_docs, q_tokens = select_quality_topk(
                 prep_files, prep_metadata, method, budget_cap,
                 tokenizer_pkl=args.tokenizer_pkl, num_workers=args.num_workers, enc=enc,
-                text_col=text_col)
+                text_col=text_col,
+                max_char_repeat_ratio=args.max_char_repeat_ratio)
             quality_datasets[method] = (q_docs, q_tokens)
     else:
         if not do_manual_ratio:
