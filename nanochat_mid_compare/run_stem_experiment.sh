@@ -54,7 +54,7 @@ BASE_MODEL_TAG="${BASE_MODEL_TAG:-d24}"
 NANOCHAT_REPO="${NANOCHAT_REPO:-/home/ma-user/work/nanochat-npu}"
 
 # Mid-training checkpoint output directory
-MID_CHECKPOINTS_OUTPUT_DIR="${MID_CHECKPOINTS_OUTPUT_DIR:-$HOME/.cache/nanochat_mid_compare_stem/mid_checkpoints}"
+MID_CHECKPOINTS_OUTPUT_DIR="${MID_CHECKPOINTS_OUTPUT_DIR:-$SCRIPT_DIR/checkpoints}"
 
 # Experiment output directory
 RESULT_DIR="${RESULT_DIR:-$SCRIPT_DIR/results_stem/$TIMESTAMP}"
@@ -381,6 +381,44 @@ if [ -n "$MID_CHECKPOINTS_OUTPUT_DIR" ]; then
     echo "╚══════════════════════════════════════════════════════════╝"
     echo ""
 fi
+
+# ══════════════════════════════════════════════════════════════
+#  PRE-FLIGHT: DISK SPACE CHECK
+# ══════════════════════════════════════════════════════════════
+
+echo ""
+echo "╔══ Pre-flight: Disk space check ══╗"
+echo ""
+
+CKPT_DIR="${MID_CHECKPOINTS_OUTPUT_DIR}"
+mkdir -p "$CKPT_DIR"
+
+AVAILABLE_KB=$(df -P "$CKPT_DIR" | awk 'NR==2{print $4}')
+AVAILABLE_GB=$((AVAILABLE_KB / 1024 / 1024))
+MIN_REQUIRED_GB=60
+
+echo "  Checkpoint dir:  $CKPT_DIR"
+echo "  Available space: ${AVAILABLE_GB}GB"
+echo "  Minimum needed:  ${MIN_REQUIRED_GB}GB (3 trainings × ~20GB/ckpt)"
+
+if [ "$AVAILABLE_GB" -lt "$MIN_REQUIRED_GB" ]; then
+    echo ""
+    echo "  ERROR: Insufficient disk space!"
+    echo "  Available: ${AVAILABLE_GB}GB < Required: ${MIN_REQUIRED_GB}GB"
+    echo ""
+    echo "  Options:"
+    echo "    1. Set MID_CHECKPOINTS_OUTPUT_DIR to a partition with more space:"
+    echo "       MID_CHECKPOINTS_OUTPUT_DIR=/path/to/larger/disk bash nanochat_mid_compare/run_stem_experiment.sh"
+    echo "    2. Free up space on the current partition"
+    echo ""
+    echo "╚══════════════════════════════════════════════════════════╝"
+    exit 1
+fi
+
+echo "  ✓ Disk space sufficient"
+echo ""
+echo "╚══════════════════════════════════════════════════════════╝"
+echo ""
 
 # ══════════════════════════════════════════════════════════════
 #  STEP 3: MID-TRAINING
