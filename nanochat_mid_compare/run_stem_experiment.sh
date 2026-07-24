@@ -1,81 +1,71 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────────
-# QuadMix vs Random: Nanochat Mid-Training Comparison Experiment
+# QuadMix vs Random vs Manual Ratio: STEM Mid-Training Comparison
 # ──────────────────────────────────────────────────────────────
 #
-# This script runs nanochat mid-training on two datasets:
-#   1. QuadMix-selected subset from essential-web
-#   2. Random subset from essential-web (token-count aligned)
+# This script runs nanochat mid-training on three datasets:
+#   1. QuadMix-selected subset from STEM data
+#   2. Random subset from STEM data (token-count aligned)
+#   3. Manual Ratio subset from STEM data (domain-proportional, token-count aligned)
 #
-# Usage (after running QuaDMix pipeline, e.g. bash scripts/demo_run_full.sh):
-#   bash nanochat_mid_compare/run_experiment.sh
-#
-# QUADMIX_SAMPLED_DATA auto-detects the latest result/*/sampled_dataset.parquet.
-# PREPROCESSED_DATA_DIR defaults to $HOME/.cache/QuaDMix/temp/preprocessed.
+# Usage (after running QuaDMix pipeline on STEM data):
+#   bash nanochat_mid_compare/run_stem_experiment.sh
 #
 # Override any config via environment variables:
-#   QUADMIX_SAMPLED_DATA=/path/to/sampled_dataset.parquet \
-#   PREPROCESSED_DATA_DIR=/path/to/preprocessed \
-#   NANOCHAT_MODEL_DIR=/path/to/.cache/nanochat \
-#   bash nanochat_mid_compare/run_experiment.sh
+#   QUADMIX_SAMPLED_DATA=/path/to/stem_sampled_dataset.parquet \
+#   STEM_DATA_DIR=/path/to/100B_stem_parquet_filtered \
+#   MANUAL_RATIO="数学=60:物理=15:化学=12.5:生物学=12.5" \
+#   bash nanochat_mid_compare/run_stem_experiment.sh
 #
 # ──────────────────────────────────────────────────────────────
 
 set -euo pipefail
 
 # ══════════════════════════════════════════════════════════════
-#  CONFIGURATION — edit these or set via environment variables
+#  CONFIGURATION
 # ══════════════════════════════════════════════════════════════
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 QUADMIX_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
-# QuadMix output: sampled_dataset.parquet from QuadMix pipeline
-# Auto-detects the latest result directory if not set
-if [ -z "${QUADMIX_SAMPLED_DATA:-}" ]; then
-    QUADMIX_SAMPLED_DATA="/home/ma-user/work/QuaDMix/result/revalidate_openhermes_20260702_193824/sampled_dataset.parquet"
-fi
+# QuadMix output: sampled_dataset.parquet from STEM pipeline
 QUADMIX_SAMPLED_DATA="${QUADMIX_SAMPLED_DATA:-}"
 
-# Preprocessed shards directory (preprocessed_*.parquet with quality scores)
-# Used for both random baseline and quality top-k baseline
-PREPROCESSED_DATA_DIR="${PREPROCESSED_DATA_DIR:-$HOME/.cache/QuaDMix/temp/preprocessed}"
+# STEM data directory (raw parquets with category_name, char_count_col, etc.)
+STEM_DATA_DIR="${STEM_DATA_DIR:-/home/ma-user/work/100B_stem_parquet_filtered}"
 
-# Quality score methods for top-k selection (comma-separated)
-# Options: dclm, fineweb_edu, english, math_general, math_openweb
-QUALITY_METHODS="${QUALITY_METHODS:-dclm,fineweb_edu}"
+# STEM schema config (relative to QUADMIX_DIR)
+SCHEMA_CONFIG="${SCHEMA_CONFIG:-configs/schema_stem.yaml}"
 
-# Nanochat model directory (contains tokenizer/, base_checkpoints/)
+# File pattern for STEM parquets (not preprocessed_*.parquet)
+FILE_PATTERN="${FILE_PATTERN:-*.parquet}"
+
+# Manual Ratio: domain=ratio format
+MANUAL_RATIO="${MANUAL_RATIO:-数学=60:物理=15:化学=12.5:生物学=12.5}"
+
+# Nanochat model directory
 NANOCHAT_MODEL_DIR="${NANOCHAT_MODEL_DIR:-/home/ma-user/work/nanochat_model_dir}"
 
-# Base model tag (pretrained model in $NANOCHAT_MODEL_DIR/base_checkpoints/<tag>/)
+# Base model tag
 BASE_MODEL_TAG="${BASE_MODEL_TAG:-d24_0320}"
 
 # Nanochat repo root
 NANOCHAT_REPO="${NANOCHAT_REPO:-/home/ma-user/work/nanochat_midtrain_326}"
 
-# Mid-training checkpoint output directory (where trained models are saved)
-# If set, $NANOCHAT_MODEL_DIR/mid_checkpoints will be symlinked here
-# to avoid filling up EVS storage with large checkpoint files
-MID_CHECKPOINTS_OUTPUT_DIR="${MID_CHECKPOINTS_OUTPUT_DIR:-$HOME/.cache/nanochat_mid_compare/mid_checkpoints}"
+# Mid-training checkpoint output directory
+MID_CHECKPOINTS_OUTPUT_DIR="${MID_CHECKPOINTS_OUTPUT_DIR:-$HOME/.cache/nanochat_mid_compare_stem/mid_checkpoints}"
 
-# Experiment output directory (logs, data, reports)
-RESULT_DIR="${RESULT_DIR:-$SCRIPT_DIR/results/$TIMESTAMP}"
+# Experiment output directory
+RESULT_DIR="${RESULT_DIR:-$SCRIPT_DIR/results_stem/$TIMESTAMP}"
 
 # ── Mid-training hyperparameters ──
-# Training token budget: min(target_ratio * num_scaling_params, dataset_tokens)
-# - If data < ratio * params: use all data (1 epoch, no overfitting)
-# - If data > ratio * params: cap at ratio * params (no over-training)
-# d24 model: num_scaling_params (total) ≈ 1.3B
 TARGET_PARAM_DATA_RATIO="${TARGET_PARAM_DATA_RATIO:-0.5}"
-NUM_SCALING_PARAMS="${NUM_SCALING_PARAMS:-}"
 DEVICE_BATCH_SIZE="${DEVICE_BATCH_SIZE:-8}"
 NUM_NPU="${NUM_NPU:-8}"
 CORE_METRIC_EVERY="${CORE_METRIC_EVERY:--1}"
-# Val BPB disabled by default (-1) because QuadMix and Random use different data,
-# so their val sets are not comparable. Use CORE metric for comparison instead.
 EVAL_EVERY="${EVAL_EVERY:--1}"
+EVAL_BENCHMARKS="${EVAL_BENCHMARKS:-stem}"
 
 # Data preparation
 SHARD_SIZE="${SHARD_SIZE:-10000}"
@@ -83,20 +73,18 @@ VAL_RATIO="${VAL_RATIO:-0}"
 SEED="${SEED:-42}"
 MAX_SHARDS="${MAX_SHARDS:-500}"
 
-# Mid-training model tags (auto-generated if empty)
-# The script creates a symlink from BASE_MODEL_TAG to MODEL_TAG in base_checkpoints/
-# so mid_train.py loads the base model and saves to mid_checkpoints/<MODEL_TAG>/
+# Model tags
 QUADMIX_MODEL_TAG="${QUADMIX_MODEL_TAG:-}"
 RANDOM_MODEL_TAG="${RANDOM_MODEL_TAG:-}"
+MANUAL_RATIO_MODEL_TAG="${MANUAL_RATIO_MODEL_TAG:-}"
 
 # ══════════════════════════════════════════════════════════════
 #  VALIDATION
 # ══════════════════════════════════════════════════════════════
 
 if [ -z "$QUADMIX_SAMPLED_DATA" ]; then
-    echo "ERROR: QUADMIX_SAMPLED_DATA not set and no sampled_dataset.parquet found under $QUADMIX_DIR/result/"
-    echo "  Run the QuaDMix pipeline first (e.g. bash scripts/demo_run_full.sh),"
-    echo "  or set via: QUADMIX_SAMPLED_DATA=/path/to/sampled_dataset.parquet"
+    echo "ERROR: QUADMIX_SAMPLED_DATA not set"
+    echo "  Set via: QUADMIX_SAMPLED_DATA=/path/to/stem_sampled_dataset.parquet"
     exit 1
 fi
 
@@ -105,15 +93,20 @@ if [ ! -f "$QUADMIX_SAMPLED_DATA" ]; then
     exit 1
 fi
 
-if [ ! -d "$PREPROCESSED_DATA_DIR" ]; then
-    echo "ERROR: Preprocessed directory not found: $PREPROCESSED_DATA_DIR"
-    echo "  Set via: PREPROCESSED_DATA_DIR=/path/to/preprocessed"
+if [ ! -d "$STEM_DATA_DIR" ]; then
+    echo "ERROR: STEM data directory not found: $STEM_DATA_DIR"
+    echo "  Set via: STEM_DATA_DIR=/path/to/100B_stem_parquet_filtered"
+    exit 1
+fi
+
+SCHEMA_PATH="$QUADMIX_DIR/$SCHEMA_CONFIG"
+if [ ! -f "$SCHEMA_PATH" ]; then
+    echo "ERROR: Schema config not found: $SCHEMA_PATH"
     exit 1
 fi
 
 if [ ! -d "$NANOCHAT_REPO" ]; then
     echo "ERROR: Nanochat repo not found: $NANOCHAT_REPO"
-    echo "  Set via: NANOCHAT_REPO=/path/to/nanochat-npu"
     exit 1
 fi
 
@@ -129,41 +122,28 @@ if [ ! -f "$TOKENIZER_DIR/tokenizer.pkl" ]; then
     exit 1
 fi
 
-# Auto-detect NUM_SCALING_PARAMS from checkpoint meta JSON if not set
-if [ -z "$NUM_SCALING_PARAMS" ]; then
-    MODEL_INFO=$(python3 "$SCRIPT_DIR/get_model_info.py" \
-        --ckpt-dir "$BASE_CKPT_DIR" \
-        --nanochat-repo "$NANOCHAT_REPO")
-    NUM_SCALING_PARAMS=$(echo "$MODEL_INFO" | grep NUM_SCALING_PARAMS | cut -d= -f2)
-    CKPT_TOTAL_BATCH_SIZE=$(echo "$MODEL_INFO" | grep TOTAL_BATCH_SIZE | cut -d= -f2)
-    echo "  Auto-detected: NUM_SCALING_PARAMS=$NUM_SCALING_PARAMS, TOTAL_BATCH_SIZE=$CKPT_TOTAL_BATCH_SIZE"
-else
-    CKPT_TOTAL_BATCH_SIZE=""
-    if [ -d "$BASE_CKPT_DIR" ]; then
-        CKPT_META_JSON=$(ls "$BASE_CKPT_DIR"/meta_*.json 2>/dev/null | sort | tail -1)
-        if [ -n "$CKPT_META_JSON" ]; then
-            CKPT_TOTAL_BATCH_SIZE=$(python3 -c "import json; print(json.load(open('$CKPT_META_JSON'))['total_batch_size'])")
-        fi
-    fi
-fi
+# Auto-detect num_scaling_params from checkpoint meta JSON
+MODEL_INFO=$(python3 "$SCRIPT_DIR/get_model_info.py" \
+    --ckpt-dir "$BASE_CKPT_DIR" \
+    --nanochat-repo "$NANOCHAT_REPO")
+NUM_SCALING_PARAMS=$(echo "$MODEL_INFO" | grep NUM_SCALING_PARAMS | cut -d= -f2)
+CKPT_TOTAL_BATCH_SIZE=$(echo "$MODEL_INFO" | grep TOTAL_BATCH_SIZE | cut -d= -f2)
+
+echo "  Auto-detected: NUM_SCALING_PARAMS=$NUM_SCALING_PARAMS, TOTAL_BATCH_SIZE=$CKPT_TOTAL_BATCH_SIZE"
 
 # Auto-generate model tags
 if [ -z "$QUADMIX_MODEL_TAG" ]; then
-    QUADMIX_MODEL_TAG="${BASE_MODEL_TAG}_quadmix_${TIMESTAMP}"
+    QUADMIX_MODEL_TAG="${BASE_MODEL_TAG}_stem_quadmix_${TIMESTAMP}"
 fi
 if [ -z "$RANDOM_MODEL_TAG" ]; then
-    RANDOM_MODEL_TAG="${BASE_MODEL_TAG}_random_${TIMESTAMP}"
+    RANDOM_MODEL_TAG="${BASE_MODEL_TAG}_stem_random_${TIMESTAMP}"
 fi
-
-IFS=',' read -ra QUALITY_METHOD_ARRAY <<< "$QUALITY_METHODS"
-
-DO_QUALITY=0
-if [ -n "$QUALITY_METHODS" ]; then
-    DO_QUALITY=1
+if [ -z "$MANUAL_RATIO_MODEL_TAG" ]; then
+    MANUAL_RATIO_MODEL_TAG="${BASE_MODEL_TAG}_stem_manual_ratio_${TIMESTAMP}"
 fi
 
 # ══════════════════════════════════════════════════════════════
-#  NPU ENVIRONMENT SETUP (from nanochat speedrun.sh)
+#  NPU ENVIRONMENT SETUP
 # ══════════════════════════════════════════════════════════════
 
 export OMP_NUM_THREADS=1
@@ -233,38 +213,33 @@ export NANOCHAT_DTYPE=bfloat16
 
 echo ""
 echo "════════════════════════════════════════════════════════════"
-echo "  QuadMix vs Random — Nanochat Mid-Training Comparison"
+echo "  QuadMix vs Random vs Manual Ratio — STEM Mid-Training"
 echo "════════════════════════════════════════════════════════════"
 echo ""
 echo "  QuadMix dataset:     $QUADMIX_SAMPLED_DATA"
-echo "  Preprocessed dir:    $PREPROCESSED_DATA_DIR"
+echo "  STEM data dir:       $STEM_DATA_DIR"
+echo "  Schema config:       $SCHEMA_PATH"
 echo "  Nanochat model dir:  $NANOCHAT_MODEL_DIR"
 echo "  Nanochat repo:       $NANOCHAT_REPO"
-echo "  Base model tag:      $BASE_MODEL_TAG (source for all runs)"
+echo "  Base model tag:      $BASE_MODEL_TAG"
 echo "  Experiment output:   $RESULT_DIR"
 if [ -n "$MID_CHECKPOINTS_OUTPUT_DIR" ]; then
-    echo "  Mid checkpoint output: $MID_CHECKPOINTS_OUTPUT_DIR"
+    echo "  Mid checkpoint dir:  $MID_CHECKPOINTS_OUTPUT_DIR"
 fi
-if [ "$DO_QUALITY" -eq 1 ]; then
-    echo "  Quality methods:     ${QUALITY_METHOD_ARRAY[*]}"
-else
-    echo "  Quality baseline:    DISABLED (set QUALITY_METHODS to enable)"
-fi
+echo ""
+echo "  Manual Ratio:        $MANUAL_RATIO"
 echo ""
 echo "  Mid-training config:"
 echo "    target-param-data-ratio: $TARGET_PARAM_DATA_RATIO"
-echo "    num-scaling-params:      $NUM_SCALING_PARAMS"
+echo "    num-scaling-params:      $NUM_SCALING_PARAMS (auto-detected)"
 echo "    device-batch-size:       $DEVICE_BATCH_SIZE"
 echo "    NPU cards:               $NUM_NPU"
+echo "    eval-benchmarks:         $EVAL_BENCHMARKS"
 echo ""
 echo "  Model tags (save):"
-echo "    QuadMix: $QUADMIX_MODEL_TAG"
-echo "    Random:  $RANDOM_MODEL_TAG"
-if [ "$DO_QUALITY" -eq 1 ]; then
-    for method in "${QUALITY_METHOD_ARRAY[@]}"; do
-        echo "    Quality ($method): ${BASE_MODEL_TAG}_quality_${method}_${TIMESTAMP}"
-    done
-fi
+echo "    QuadMix:       $QUADMIX_MODEL_TAG"
+echo "    Random:        $RANDOM_MODEL_TAG"
+echo "    Manual Ratio:  $MANUAL_RATIO_MODEL_TAG"
 echo ""
 echo "════════════════════════════════════════════════════════════"
 echo ""
@@ -278,7 +253,7 @@ DATA_DIR="$RESULT_DIR/data"
 # ══════════════════════════════════════════════════════════════
 
 echo ""
-echo "╔══ Step 1: Prepare datasets ══╗"
+echo "╔══ Step 1: Prepare STEM datasets ══╗"
 echo ""
 
 if [ -f "$DATA_DIR/dataset_stats.json" ]; then
@@ -287,26 +262,24 @@ if [ -f "$DATA_DIR/dataset_stats.json" ]; then
 else
     PREP_ARGS=(
         --quadmix-sampled-data "$QUADMIX_SAMPLED_DATA"
-        --preprocessed-data-dir "$PREPROCESSED_DATA_DIR"
+        --preprocessed-data-dir "$STEM_DATA_DIR"
         --output-dir "$DATA_DIR"
         --tokenizer-pkl "$TOKENIZER_DIR/tokenizer.pkl"
+        --schema "$SCHEMA_PATH"
+        --file-pattern "$FILE_PATTERN"
+        --manual-ratio "$MANUAL_RATIO"
+        --data-ratio "$TARGET_PARAM_DATA_RATIO"
+        --num-scaling-params "$NUM_SCALING_PARAMS"
         --shard-size "$SHARD_SIZE"
         --val-ratio "$VAL_RATIO"
         --seed "$SEED"
         --max-shards "$MAX_SHARDS"
         --num-npu "$NUM_NPU"
     )
-    if [ "$DO_QUALITY" -eq 1 ]; then
-        PREP_ARGS+=(--quality-method "$QUALITY_METHODS")
-    fi
     python3 "$SCRIPT_DIR/prepare_data.py" "${PREP_ARGS[@]}"
 fi
 
-CKPT_META_JSON=$(ls "$BASE_CKPT_DIR"/meta_*.json 2>/dev/null | sort | tail -1)
-if [ -z "$CKPT_TOTAL_BATCH_SIZE" ] && [ -n "$CKPT_META_JSON" ]; then
-    CKPT_TOTAL_BATCH_SIZE=$(python3 -c "import json; print(json.load(open('$CKPT_META_JSON'))['total_batch_size'])")
-fi
-
+# Update dataset_stats.json with experiment metadata
 DATA_DIR="$DATA_DIR" BASE_MODEL_TAG="$BASE_MODEL_TAG" \
 TARGET_PARAM_DATA_RATIO="$TARGET_PARAM_DATA_RATIO" \
 NUM_SCALING_PARAMS="$NUM_SCALING_PARAMS" \
@@ -319,6 +292,8 @@ NANOCHAT_MODEL_DIR="$NANOCHAT_MODEL_DIR" \
 MID_CHECKPOINTS_OUTPUT_DIR="$MID_CHECKPOINTS_OUTPUT_DIR" \
 QUADMIX_GIT_HASH="$(git -C "$QUADMIX_DIR" rev-parse --short HEAD 2>/dev/null || echo 'unknown')" \
 NANOCHAT_GIT_HASH="$(git -C "$NANOCHAT_REPO" rev-parse --short HEAD 2>/dev/null || echo 'unknown')" \
+MANUAL_RATIO="$MANUAL_RATIO" \
+EVAL_BENCHMARKS="$EVAL_BENCHMARKS" \
 python3 -c "
 import os, json
 stats_path = os.path.join(os.environ['DATA_DIR'], 'dataset_stats.json')
@@ -336,6 +311,8 @@ stats['config'].update({
     'mid_checkpoints_output_dir': os.environ.get('MID_CHECKPOINTS_OUTPUT_DIR', ''),
     'quadmix_git_hash': os.environ.get('QUADMIX_GIT_HASH', ''),
     'nanochat_git_hash': os.environ.get('NANOCHAT_GIT_HASH', ''),
+    'manual_ratio': os.environ.get('MANUAL_RATIO', ''),
+    'eval_benchmarks': os.environ.get('EVAL_BENCHMARKS', ''),
 })
 with open(stats_path, 'w') as f:
     json.dump(stats, f, indent=2)
@@ -351,15 +328,21 @@ method = stats['config'].get('token_method', 'unknown')
 print(f'    Token method: {method}')
 print(f'    QuadMix: {q[\"train_docs\"]:,} train docs, {q[\"tokens\"]:,} tokens, {q[\"shards\"]} shards')
 print(f'    Random:  {r[\"train_docs\"]:,} train docs, {r[\"tokens\"]:,} tokens, {r[\"shards\"]} shards')
+if 'manual_ratio' in stats:
+    mr = stats['manual_ratio']
+    print(f'    Manual Ratio: {mr[\"train_docs\"]:,} train docs, {mr[\"tokens\"]:,} tokens, {mr[\"shards\"]} shards')
 for key in stats:
     if key.startswith('quality_'):
         method = key[len('quality_'):]
         ql = stats[key]
         print(f'    Quality ({method}): {ql[\"train_docs\"]:,} train docs, {ql[\"tokens\"]:,} tokens, {ql[\"shards\"]} shards')
-print(f'    Shared val: {q[\"val_docs\"]:,} docs')
+budget = stats['config'].get('budget_cap', 'N/A')
+target = stats['config'].get('target_tokens', 'N/A')
+print(f'    Budget cap: {budget}')
+print(f'    Target tokens: {target}')
 "
 echo ""
-echo "╚════════════════════════════════╗"
+echo "╚════════════════════════════════════════════════════════════╝"
 echo ""
 
 # ══════════════════════════════════════════════════════════════
@@ -368,7 +351,7 @@ echo ""
 
 if [ -n "$MID_CHECKPOINTS_OUTPUT_DIR" ]; then
     echo ""
-    echo "╔══ Step 2: Setup mid-training checkpoint output directory ══╗"
+    echo "╔══ Step 2: Setup mid-training checkpoint output ══╗"
     echo ""
 
     mkdir -p "$MID_CHECKPOINTS_OUTPUT_DIR"
@@ -378,15 +361,14 @@ if [ -n "$MID_CHECKPOINTS_OUTPUT_DIR" ]; then
         echo "  Symlink already exists: $LINK_PATH -> $(readlink "$LINK_PATH")"
     elif [ -d "$LINK_PATH" ]; then
         echo "  WARNING: $LINK_PATH exists as a directory (not a symlink)."
-        echo "  Skipping symlink creation. Mid checkpoints will be saved here."
+        echo "  Skipping symlink creation."
     else
-        echo "  Mid-training checkpoints will be saved to: $MID_CHECKPOINTS_OUTPUT_DIR"
         echo "  Creating symlink: $LINK_PATH -> $MID_CHECKPOINTS_OUTPUT_DIR"
         ln -s "$MID_CHECKPOINTS_OUTPUT_DIR" "$LINK_PATH"
     fi
 
     echo ""
-    echo "╚════════════════════════════════════════════════════════════╝"
+    echo "╚══════════════════════════════════════════════════════════╝"
     echo ""
 fi
 
@@ -396,6 +378,7 @@ fi
 
 QUADMIX_DATA="$DATA_DIR/quadmix_data"
 RANDOM_DATA="$DATA_DIR/random_data"
+MANUAL_RATIO_DATA="$DATA_DIR/manual_ratio_data"
 
 run_mid_training() {
     local DATA_PATH="$1"
@@ -410,7 +393,7 @@ run_mid_training() {
         local TOTAL_BATCH_SIZE=$(python3 -c "import json; print(json.load(open('$META_JSON'))['total_batch_size'])")
         echo "    Read total_batch_size=$TOTAL_BATCH_SIZE from checkpoint"
     else
-        echo "    ERROR: No meta JSON found in $BASE_CKPT_DIR, cannot determine total_batch_size" >&2
+        echo "    ERROR: No meta JSON found in $BASE_CKPT_DIR" >&2
         exit 1
     fi
     local TARGET_TOKENS=$(python3 -c "print(int($TARGET_PARAM_DATA_RATIO * $NUM_SCALING_PARAMS))")
@@ -463,16 +446,24 @@ s = json.load(open(os.environ['STATS_FILE']))
 print(s['quadmix']['tokens'], s['random']['tokens'])
 "
 )
+MANUAL_RATIO_TOKENS=$(STATS_FILE="$STATS_FILE" python3 -c "
+import os, json
+s = json.load(open(os.environ['STATS_FILE']))
+if 'manual_ratio' in s:
+    print(s['manual_ratio']['tokens'])
+else:
+    print('0')
+")
 
 echo ""
 echo "╔══ Step 3a: Mid-training on QuadMix data ══╗"
 echo ""
 
 QUADMIX_LOG="$RESULT_DIR/mid_train_quadmix.log"
-run_mid_training "$QUADMIX_DATA" "$QUADMIX_MODEL_TAG" "quadmix_mid" "$QUADMIX_LOG" "$QUADMIX_TOKENS"
+run_mid_training "$QUADMIX_DATA" "$QUADMIX_MODEL_TAG" "stem_quadmix_mid" "$QUADMIX_LOG" "$QUADMIX_TOKENS"
 
 echo ""
-echo "╚════════════════════════════════════════════╝"
+echo "╚════════════════════════════════════════════════════════════╝"
 echo ""
 
 echo ""
@@ -480,33 +471,22 @@ echo "╔══ Step 3b: Mid-training on Random data ══╗"
 echo ""
 
 RANDOM_LOG="$RESULT_DIR/mid_train_random.log"
-run_mid_training "$RANDOM_DATA" "$RANDOM_MODEL_TAG" "random_mid" "$RANDOM_LOG" "$RANDOM_TOKENS"
+run_mid_training "$RANDOM_DATA" "$RANDOM_MODEL_TAG" "stem_random_mid" "$RANDOM_LOG" "$RANDOM_TOKENS"
 
 echo ""
-echo "╚═══════════════════════════════════════════╝"
+echo "╚════════════════════════════════════════════════════════════╝"
 echo ""
 
-if [ "$DO_QUALITY" -eq 1 ]; then
-    for method in "${QUALITY_METHOD_ARRAY[@]}"; do
-        echo ""
-        echo "╔══ Step 3c: Mid-training on Quality Top-K ($method) data ══╗"
-        echo ""
+echo ""
+echo "╔══ Step 3c: Mid-training on Manual Ratio data ══╗"
+echo ""
 
-        QUALITY_DATA="$DATA_DIR/quality_data_${method}"
-        QUALITY_MODEL_TAG="${BASE_MODEL_TAG}_quality_${method}_${TIMESTAMP}"
-        QUALITY_LOG="$RESULT_DIR/mid_train_quality_${method}.log"
-        QUALITY_TOKENS=$(STATS_FILE="$STATS_FILE" METHOD="$method" python3 -c "
-import os, json
-s = json.load(open(os.environ['STATS_FILE']))
-print(s[f'quality_{os.environ[\"METHOD\"]}']['tokens'])
-")
-        run_mid_training "$QUALITY_DATA" "$QUALITY_MODEL_TAG" "quality_${method}_mid" "$QUALITY_LOG" "$QUALITY_TOKENS"
+MANUAL_RATIO_LOG="$RESULT_DIR/mid_train_manual_ratio.log"
+run_mid_training "$MANUAL_RATIO_DATA" "$MANUAL_RATIO_MODEL_TAG" "stem_manual_ratio_mid" "$MANUAL_RATIO_LOG" "$MANUAL_RATIO_TOKENS"
 
-        echo ""
-        echo "╚════════════════════════════════════════════════╝"
-        echo ""
-    done
-fi
+echo ""
+echo "╚════════════════════════════════════════════════════════════╝"
+echo ""
 
 # ══════════════════════════════════════════════════════════════
 #  STEP 4: EVALUATION
@@ -522,6 +502,7 @@ run_eval() {
     pushd "$NANOCHAT_REPO" > /dev/null
     python3 -m torch.distributed.run --standalone --nproc_per_node="$NUM_NPU" -m scripts.base_eval -- \
         --eval=core \
+        --eval-benchmarks="$EVAL_BENCHMARKS" \
         --device-batch-size=32 \
         --model-tag="$MODEL_TAG" \
         --model-type="$MODEL_TYPE" \
@@ -530,7 +511,7 @@ run_eval() {
 }
 
 echo ""
-echo "╔══ Step 4: Evaluation ══╗"
+echo "╔══ Step 4: Evaluation (benchmarks=$EVAL_BENCHMARKS) ══╗"
 echo ""
 
 QUADMIX_EVAL_LOG="$RESULT_DIR/eval_quadmix.log"
@@ -539,16 +520,11 @@ run_eval "$QUADMIX_MODEL_TAG" "mid" "$QUADMIX_EVAL_LOG"
 RANDOM_EVAL_LOG="$RESULT_DIR/eval_random.log"
 run_eval "$RANDOM_MODEL_TAG" "mid" "$RANDOM_EVAL_LOG"
 
-if [ "$DO_QUALITY" -eq 1 ]; then
-    for method in "${QUALITY_METHOD_ARRAY[@]}"; do
-        QUALITY_MODEL_TAG="${BASE_MODEL_TAG}_quality_${method}_${TIMESTAMP}"
-        QUALITY_EVAL_LOG="$RESULT_DIR/eval_quality_${method}.log"
-        run_eval "$QUALITY_MODEL_TAG" "mid" "$QUALITY_EVAL_LOG"
-    done
-fi
+MANUAL_RATIO_EVAL_LOG="$RESULT_DIR/eval_manual_ratio.log"
+run_eval "$MANUAL_RATIO_MODEL_TAG" "mid" "$MANUAL_RATIO_EVAL_LOG"
 
 echo ""
-echo "╚══════════════════════════════════════════╝"
+echo "╚════════════════════════════════════════════════════════════╝"
 echo ""
 
 # ══════════════════════════════════════════════════════════════
@@ -564,23 +540,15 @@ REPORT_ARGS=(
     --dataset-stats "$DATA_DIR/dataset_stats.json"
     --quadmix-train-log "$QUADMIX_LOG"
     --random-train-log "$RANDOM_LOG"
+    --manual-ratio-train-log "$MANUAL_RATIO_LOG"
     --quadmix-eval-log "$QUADMIX_EVAL_LOG"
     --random-eval-log "$RANDOM_EVAL_LOG"
+    --manual-ratio-eval-log "$MANUAL_RATIO_EVAL_LOG"
 )
-if [ "$DO_QUALITY" -eq 1 ]; then
-    QUALITY_TRAIN_LOGS=()
-    QUALITY_EVAL_LOGS=()
-    for method in "${QUALITY_METHOD_ARRAY[@]}"; do
-        QUALITY_TRAIN_LOGS+=("$RESULT_DIR/mid_train_quality_${method}.log")
-        QUALITY_EVAL_LOGS+=("$RESULT_DIR/eval_quality_${method}.log")
-    done
-    REPORT_ARGS+=(--quality-train-log "${QUALITY_TRAIN_LOGS[@]}")
-    REPORT_ARGS+=(--quality-eval-log "${QUALITY_EVAL_LOGS[@]}")
-fi
 python3 "$SCRIPT_DIR/generate_report.py" "${REPORT_ARGS[@]}"
 
 echo ""
-echo "╚════════════════════════════════════════╝"
+echo "╚════════════════════════════════════════════════════════════╝"
 echo ""
 
 # ══════════════════════════════════════════════════════════════
@@ -589,44 +557,28 @@ echo ""
 
 echo ""
 echo "════════════════════════════════════════════════════════════"
-echo "  Experiment Complete!"
+echo "  STEM Experiment Complete!"
 echo "════════════════════════════════════════════════════════════"
 echo ""
 echo "  Output directory: $RESULT_DIR"
 echo ""
 echo "  Files:"
-echo "    ├── data/                    # Training datasets"
-echo "    │   ├── quadmix_data/        # QuadMix-selected shards"
-echo "    │   ├── random_data/         # Random baseline shards"
-if [ "$DO_QUALITY" -eq 1 ]; then
-    for method in "${QUALITY_METHOD_ARRAY[@]}"; do
-        echo "    │   ├── quality_data_${method}/  # Quality ($method) shards"
-    done
-fi
-echo "    │   └── dataset_stats.json   # Dataset statistics"
-echo "    ├── mid_train_quadmix.log    # QuadMix mid-training log"
-echo "    ├── mid_train_random.log     # Random mid-training log"
-if [ "$DO_QUALITY" -eq 1 ]; then
-    for method in "${QUALITY_METHOD_ARRAY[@]}"; do
-        echo "    ├── mid_train_quality_${method}.log  # Quality ($method) training log"
-    done
-fi
-echo "    ├── eval_quadmix.log         # QuadMix evaluation log"
-echo "    ├── eval_random.log          # Random evaluation log"
-if [ "$DO_QUALITY" -eq 1 ]; then
-    for method in "${QUALITY_METHOD_ARRAY[@]}"; do
-        echo "    ├── eval_quality_${method}.log     # Quality ($method) evaluation log"
-    done
-fi
-echo "    └── experiment_report.md     # Comparison report"
+echo "    ├── data/                        # Training datasets"
+echo "    │   ├── quadmix_data/            # QuadMix shards"
+echo "    │   ├── random_data/             # Random baseline shards"
+echo "    │   ├── manual_ratio_data/       # Manual Ratio shards"
+echo "    │   └── dataset_stats.json       # Statistics"
+echo "    ├── mid_train_quadmix.log"
+echo "    ├── mid_train_random.log"
+echo "    ├── mid_train_manual_ratio.log"
+echo "    ├── eval_quadmix.log"
+echo "    ├── eval_random.log"
+echo "    ├── eval_manual_ratio.log"
+echo "    └── experiment_report.md"
 echo ""
 echo "  Mid-training checkpoints:"
 echo "    $MID_CHECKPOINTS_OUTPUT_DIR/$QUADMIX_MODEL_TAG/"
 echo "    $MID_CHECKPOINTS_OUTPUT_DIR/$RANDOM_MODEL_TAG/"
-if [ "$DO_QUALITY" -eq 1 ]; then
-    for method in "${QUALITY_METHOD_ARRAY[@]}"; do
-        echo "    $MID_CHECKPOINTS_OUTPUT_DIR/${BASE_MODEL_TAG}_quality_${method}_${TIMESTAMP}/"
-    done
-fi
+echo "    $MID_CHECKPOINTS_OUTPUT_DIR/$MANUAL_RATIO_MODEL_TAG/"
 echo ""
 echo "════════════════════════════════════════════════════════════"

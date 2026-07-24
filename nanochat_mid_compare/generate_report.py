@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate experiment comparison report from mid-training logs.
 
-Supports N baselines: QuadMix, Random, and optionally multiple Quality-Only Top-K methods.
+Supports N baselines: QuadMix, Random, Manual Ratio, and optionally multiple Quality-Only Top-K methods.
 """
 
 import argparse
@@ -123,6 +123,8 @@ def generate_report(args):
         "quadmix": (args.quadmix_train_log, args.quadmix_eval_log),
         "random": (args.random_train_log, args.random_eval_log),
     }
+    if args.manual_ratio_train_log:
+        log_map["manual_ratio"] = (args.manual_ratio_train_log, args.manual_ratio_eval_log)
     if args.quality_train_log:
         for i, train_log in enumerate(args.quality_train_log):
             eval_log = args.quality_eval_log[i] if args.quality_eval_log and i < len(args.quality_eval_log) else None
@@ -134,7 +136,9 @@ def generate_report(args):
             train_logs[b] = parse_training_log(log_map[b][0])
             eval_logs[b] = parse_eval_log(log_map[b][1])
 
-    labels = {"quadmix": "QuadMix", "random": "Random"}
+    mr_info = stats.get("manual_ratio", {})
+    mr_label = mr_info.get("label", "Manual Ratio")
+    labels = {"quadmix": "QuadMix", "random": "Random", "manual_ratio": mr_label}
     for m in quality_methods:
         labels[f"quality_{m}"] = f"Quality ({m})"
 
@@ -150,6 +154,8 @@ def generate_report(args):
         for m in quality_methods:
             qcol = stats.get(f"quality_{m}", {}).get("quality_column", "N/A")
             lines.append(f"**Quality Method**: `{m}` ({qcol})")
+    if mr_info:
+        lines.append(f"**Manual Ratio**: `{mr_info.get('label', 'N/A')}`")
     lines.append("")
 
     lines.append("## Provenance")
@@ -258,15 +264,24 @@ def generate_report(args):
     if all_tasks:
         lines.append("## CORE Metric — Per-Task Breakdown")
         lines.append("")
-        task_header = "| Task | " + " (centered) | ".join(labels[b] for b in baselines) + " (centered) |"
+        task_header = "| Task | " + " | ".join(labels[b] for b in baselines) + " |"
         task_sep = "|---|" + "|".join("---" for _ in baselines) + "|"
         lines.append(task_header)
         lines.append(task_sep)
         for task in sorted(all_tasks):
             row = f"| {task} |"
             for b in baselines:
-                c = eval_logs.get(b, {}).get("tasks", {}).get(task, {}).get("centered")
-                row += f" {c:.4f} |" if c is not None else " - |"
+                task_info = eval_logs.get(b, {}).get("tasks", {}).get(task, {})
+                acc = task_info.get("accuracy")
+                c = task_info.get("centered")
+                if acc is not None and c is not None:
+                    row += f" {acc:.4f} ({c:.4f}) |"
+                elif c is not None:
+                    row += f" ({c:.4f}) |"
+                elif acc is not None:
+                    row += f" {acc:.4f} |"
+                else:
+                    row += " - |"
             lines.append(row)
         lines.append("")
 
@@ -275,7 +290,8 @@ def generate_report(args):
     lines.append("| Parameter | Value |")
     lines.append("|---|---|")
     lines.append(f"| Target param-data ratio | {config.get('target_param_data_ratio', 'N/A')} |")
-    lines.append(f"| Num scaling params | {config.get('num_scaling_params', 'N/A'):,} |")
+    nsp_val = config.get('num_scaling_params')
+    lines.append(f"| Num scaling params | {nsp_val:,} |" if nsp_val is not None else "| Num scaling params | N/A |")
     lines.append(f"| Device batch size | {config.get('device_batch_size', 'N/A')} |")
     lines.append(f"| Num NPU | {config.get('num_npu', 'N/A')} |")
     total_bs = config.get('total_batch_size')
@@ -284,6 +300,12 @@ def generate_report(args):
     lines.append(f"| Token method | {config.get('token_method', 'N/A')} |")
     if quality_methods:
         lines.append(f"| Quality methods | {', '.join(quality_methods)} |")
+    if mr_info:
+        lines.append(f"| Manual Ratio | {mr_info.get('label', 'N/A')} |")
+    if config.get('manual_ratio'):
+        lines.append(f"| Manual Ratio spec | {config.get('manual_ratio', 'N/A')} |")
+    if config.get('eval_benchmarks'):
+        lines.append(f"| Eval benchmarks | {config.get('eval_benchmarks', 'N/A')} |")
     lines.append("")
 
     report_text = "\n".join(lines)
@@ -305,6 +327,10 @@ def main():
     parser.add_argument("--random-train-log", required=True)
     parser.add_argument("--quadmix-eval-log", required=True)
     parser.add_argument("--random-eval-log", required=True)
+    parser.add_argument("--manual-ratio-train-log", type=str, default=None,
+                        help="Manual Ratio baseline training log")
+    parser.add_argument("--manual-ratio-eval-log", type=str, default=None,
+                        help="Manual Ratio baseline evaluation log")
     parser.add_argument("--quality-train-log", nargs="+", default=None,
                         help="Quality baseline training logs (one per method, in order)")
     parser.add_argument("--quality-eval-log", nargs="+", default=None,
