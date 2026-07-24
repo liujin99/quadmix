@@ -30,7 +30,7 @@ QUADMIX_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 # QuadMix output: sampled_dataset.parquet from STEM pipeline
-QUADMIX_SAMPLED_DATA="${QUADMIX_SAMPLED_DATA:-}"
+QUADMIX_SAMPLED_DATA="${QUADMIX_SAMPLED_DATA:-/home/ma-user/work/quadmix/result/reoptimize_20260724_095141/sampled_dataset.parquet}"
 
 # STEM data directory (raw parquets with category_name, char_count_col, etc.)
 STEM_DATA_DIR="${STEM_DATA_DIR:-/home/ma-user/work/100B_stem_parquet_filtered}"
@@ -48,10 +48,10 @@ MANUAL_RATIO="${MANUAL_RATIO:-数学=60:物理=15:化学=12.5:生物学=12.5}"
 NANOCHAT_MODEL_DIR="${NANOCHAT_MODEL_DIR:-/home/ma-user/work/nanochat_model_dir}"
 
 # Base model tag
-BASE_MODEL_TAG="${BASE_MODEL_TAG:-d24_0320}"
+BASE_MODEL_TAG="${BASE_MODEL_TAG:-d24}"
 
 # Nanochat repo root
-NANOCHAT_REPO="${NANOCHAT_REPO:-/home/ma-user/work/nanochat_midtrain_326}"
+NANOCHAT_REPO="${NANOCHAT_REPO:-/home/ma-user/work/nanochat-npu}"
 
 # Mid-training checkpoint output directory
 MID_CHECKPOINTS_OUTPUT_DIR="${MID_CHECKPOINTS_OUTPUT_DIR:-$HOME/.cache/nanochat_mid_compare_stem/mid_checkpoints}"
@@ -61,7 +61,7 @@ RESULT_DIR="${RESULT_DIR:-$SCRIPT_DIR/results_stem/$TIMESTAMP}"
 
 # ── Mid-training hyperparameters ──
 TARGET_PARAM_DATA_RATIO="${TARGET_PARAM_DATA_RATIO:-0.5}"
-DEVICE_BATCH_SIZE="${DEVICE_BATCH_SIZE:-8}"
+DEVICE_BATCH_SIZE="${DEVICE_BATCH_SIZE:-2}"
 NUM_NPU="${NUM_NPU:-8}"
 CORE_METRIC_EVERY="${CORE_METRIC_EVERY:--1}"
 EVAL_EVERY="${EVAL_EVERY:--1}"
@@ -71,7 +71,7 @@ EVAL_BENCHMARKS="${EVAL_BENCHMARKS:-stem}"
 SHARD_SIZE="${SHARD_SIZE:-10000}"
 VAL_RATIO="${VAL_RATIO:-0}"
 SEED="${SEED:-42}"
-MAX_SHARDS="${MAX_SHARDS:-500}"
+MAX_SHARDS="${MAX_SHARDS:-0}"
 
 # Model tags
 QUADMIX_MODEL_TAG="${QUADMIX_MODEL_TAG:-}"
@@ -503,7 +503,7 @@ run_eval() {
     python3 -m torch.distributed.run --standalone --nproc_per_node="$NUM_NPU" -m scripts.base_eval -- \
         --eval=core \
         --eval-benchmarks="$EVAL_BENCHMARKS" \
-        --device-batch-size=32 \
+        --device-batch-size=16 \
         --model-tag="$MODEL_TAG" \
         --model-type="$MODEL_TYPE" \
         2>&1 | tee "$LOG_FILE"
