@@ -392,7 +392,7 @@ def parse_manual_ratio(manual_ratio_str, domain_names):
     return ratio_map
 
 
-def select_manual_ratio(prep_files, prep_metadata, manual_ratio_map, domain_names,
+def select_manual_ratio(prep_files, domain_candidates, manual_ratio_map, domain_names,
                         total_tokens, tokenizer_pkl=None, num_workers=None, enc=None, text_col="text"):
     if domain_names is None:
         raise ValueError("Manual Ratio requires domain_names in schema")
@@ -408,15 +408,6 @@ def select_manual_ratio(prep_files, prep_metadata, manual_ratio_map, domain_name
         domain_id = name_to_id[domain_name]
         pct = ratio / total_ratio * 100
         print(f"    {domain_name} (id={domain_id}): {pct:.1f}% -> ~{int(domain_budgets[domain_id]):,} est tokens")
-
-    domain_candidates = defaultdict(list)
-    for shard_id, docs in enumerate(prep_metadata):
-        for entry in docs:
-            doc_id = entry[0]
-            char_count = entry[1]
-            domain_val = entry[2] if len(entry) > 2 else None
-            if domain_val is not None and domain_val in domain_budgets:
-                domain_candidates[domain_val].append((shard_id, doc_id, char_count // 4))
 
     mr_selected = []
     mr_est_tokens = 0
@@ -670,12 +661,19 @@ def main():
         max_chars=args.max_chars, max_char_repeat_ratio=args.max_char_repeat_ratio)
 
     all_candidates = []
-    for shard_id, docs in enumerate(prep_metadata):
+    domain_candidates = defaultdict(list) if do_manual_ratio else None
+    if do_manual_ratio:
+        name_to_id = {name: i for i, name in enumerate(domain_names)}
+        domain_budgets_keys = set(name_to_id[name] for name in manual_ratio_map)
+    for shard_id, docs in enumerate(tqdm(prep_metadata, desc="  Building candidate index")):
         for entry in docs:
             doc_id = entry[0]
             char_count = entry[1]
             domain_val = entry[2] if len(entry) > 2 else None
-            all_candidates.append((shard_id, doc_id, char_count // 4, domain_val))
+            est_tokens = char_count // 4
+            all_candidates.append((shard_id, doc_id, est_tokens, domain_val))
+            if domain_candidates is not None and domain_val is not None and domain_val in domain_budgets_keys:
+                domain_candidates[domain_val].append((shard_id, doc_id, est_tokens))
     print(f"  Total candidate docs: {len(all_candidates):,}")
 
     print(f"\n[3/N] Random sampling (target: {budget_cap:,} tokens)...")
@@ -724,7 +722,7 @@ def main():
         manual_ratio_label = "Manual Ratio (" + ", ".join(mr_label_parts) + ")"
         print(f"\n[4/N] Manual Ratio sampling ({manual_ratio_label})...")
         manual_ratio_docs, manual_ratio_tokens = select_manual_ratio(
-            prep_files, prep_metadata, manual_ratio_map, domain_names,
+            prep_files, domain_candidates, manual_ratio_map, domain_names,
             budget_cap, tokenizer_pkl=args.tokenizer_pkl,
             num_workers=args.num_workers, enc=enc, text_col=text_col)
 
