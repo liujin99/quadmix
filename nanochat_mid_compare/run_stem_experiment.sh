@@ -463,6 +463,8 @@ run_mid_training() {
         ln -s "$BASE_CKPT_DIR" "$LINK_DIR"
     fi
 
+    trap 'if [ -L "$LINK_DIR" ]; then echo "    Cleaning up symlink on exit: $LINK_DIR"; rm "$LINK_DIR"; fi' RETURN
+
     pushd "$NANOCHAT_REPO" > /dev/null
     python3 -m torch.distributed.run --standalone --nproc_per_node="$NUM_NPU" -m scripts.mid_train -- \
         --num-iterations="$NUM_ITERATIONS" \
@@ -476,11 +478,6 @@ run_mid_training() {
         --data-dir="$DATA_PATH" \
         2>&1 | tee "$LOG_FILE"
     popd > /dev/null
-
-    if [ -L "$LINK_DIR" ]; then
-        echo "    Cleaning up symlink: $LINK_DIR"
-        rm "$LINK_DIR"
-    fi
 }
 
 STATS_FILE="$DATA_DIR/dataset_stats.json"
