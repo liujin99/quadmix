@@ -397,6 +397,23 @@ if [ -n "$MID_CHECKPOINTS_OUTPUT_DIR" ]; then
 fi
 
 # ══════════════════════════════════════════════════════════════
+#  PRE-FLIGHT: DOWNLOAD EVAL DATA
+# ══════════════════════════════════════════════════════════════
+
+echo ""
+echo "╔══ Pre-flight: Download eval data ══╗"
+echo ""
+export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
+pushd "$NANOCHAT_REPO" > /dev/null
+python3 -c "from scripts.base_eval import prepare_eval_data; prepare_eval_data('${EVAL_BENCHMARKS:-all}')" || {
+    echo "  ERROR: eval data download failed"
+    exit 1
+}
+popd > /dev/null
+echo "╚══════════════════════════════════════════════════════════╝"
+echo ""
+
+# ══════════════════════════════════════════════════════════════
 #  MID-TRAINING
 # ══════════════════════════════════════════════════════════════
 
