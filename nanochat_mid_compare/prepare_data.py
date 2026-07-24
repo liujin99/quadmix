@@ -273,7 +273,7 @@ def scan_shards(data_dir, file_pattern, domain_col=None, domain_names=None,
     shard_files = sorted(Path(data_dir).glob(file_pattern))
     if not shard_files:
         raise FileNotFoundError(f"No {file_pattern} files found in {data_dir}")
-    if max_shards is not None:
+    if max_shards is not None and max_shards > 0:
         shard_files = shard_files[:max_shards]
     tasks = [(i, str(p), domain_col, domain_names, char_count_col, text_col, max_chars, max_char_repeat_ratio)
              for i, p in enumerate(shard_files)]
@@ -486,16 +486,16 @@ def main():
                         help="Target data:param ratio for token budget calculation")
     parser.add_argument("--num-scaling-params", type=int, default=None,
                         help="Number of scaling params. Used with --data-ratio to compute token budget.")
-    parser.add_argument("--quality-method", type=str, default="dclm",
-                        help="Comma-separated quality score methods for top-k selection")
+    parser.add_argument("--quality-method", type=str, default="",
+                        help="Comma-separated quality score methods for top-k selection (empty = disabled)")
     parser.add_argument("--shard-size", type=int, default=10000,
                         help="Documents per output shard (default: 10000)")
     parser.add_argument("--val-ratio", type=float, default=0.05,
                         help="Fraction of documents reserved for validation (default: 0.05)")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for reproducibility")
-    parser.add_argument("--max-shards", type=int, default=500,
-                        help="Max source shards to scan (default: 500)")
+    parser.add_argument("--max-shards", type=int, default=0,
+                        help="Max source shards to scan (0 = no limit)")
     parser.add_argument("--num-workers", type=int, default=None,
                         help="Number of parallel workers. Default: auto")
     parser.add_argument("--num-npu", type=int, default=8,
