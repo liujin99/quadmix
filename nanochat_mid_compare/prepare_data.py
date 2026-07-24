@@ -142,7 +142,7 @@ def count_tokens_mp(texts, tokenizer_pkl_path, num_workers=None, chunk_timeout=6
     async_results = [(i, pool.apply_async(_worker_encode_batch, (chunk,)))
                      for i, chunk in enumerate(chunks)]
     results = [None] * len(chunks)
-    pbar = tqdm(total=len(chunks), desc=f"  Tokenizing ({num_workers} processes x 4 rust threads)")
+    pbar = tqdm(total=len(chunks), desc=f"  Tokenizing ({num_workers} processes x 4 rust threads)", file=sys.stdout, mininterval=1.0)
     for i, ar in async_results:
         try:
             results[i] = ar.get(timeout=chunk_timeout)
@@ -236,6 +236,7 @@ def read_docs_from_shards(shard_paths, selections, num_workers=None, desc=None, 
         pool.imap_unordered(_read_docs_from_shard_tagged, tasks, chunksize=1),
         total=len(tasks),
         desc=desc or f"  Reading selected docs ({num_workers} processes)",
+        file=sys.stdout, mininterval=1.0,
     ))
     shard_result_map = {sid: docs for sid, docs in unordered}
     shard_cursors = {sid: 0 for sid in shard_to_docs}
@@ -337,6 +338,7 @@ def scan_shards(data_dir, file_pattern, domain_col=None, domain_names=None,
         pool.imap_unordered(_scan_shard_indexed, tasks, chunksize=1),
         total=len(tasks),
         desc=f"  Scanning shards ({num_workers} processes)",
+        file=sys.stdout, mininterval=1.0,
     ):
         results[idx] = docs
         total_filtered_long += fl
@@ -376,7 +378,7 @@ def select_quality_topk(prep_files, prep_metadata, quality_method, total_tokens,
     q_est_tokens_list = []
     q_scores_list = []
     for shard_id, (doc_ids, char_counts, _domain_vals) in enumerate(
-        tqdm(prep_metadata, desc=f"  Reading quality scores")
+        tqdm(prep_metadata, desc=f"  Reading quality scores", file=sys.stdout, mininterval=1.0)
     ):
         if len(doc_ids) == 0:
             continue
@@ -677,6 +679,7 @@ def main():
         pool.imap_unordered(_filter_docs_chunk, filter_tasks, chunksize=1),
         total=len(filter_tasks),
         desc=f"  Filtering QuadMix docs ({num_workers} processes)",
+        file=sys.stdout, mininterval=1.0,
     ):
         valid_texts.extend(valid)
         n_empty += ne
