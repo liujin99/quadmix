@@ -78,7 +78,7 @@ def parse_eval_log(path):
     task_pattern = re.compile(
         r"Evaluating:\s+(.+?)\s+\(.*?\)\.\.\.\s+accuracy:\s+([\d.]+)\s+\|\s+centered:\s+([\d.-]+)\s+\|\s+time:\s+([\d.]+)s"
     )
-    core_pattern = re.compile(r"CORE metric:\s+([\d.]+)")
+    core_pattern = re.compile(r"(?:CORE|STEM) metric:\s+([\d.-]+)")
 
     with open(path) as f:
         for line in f:

@@ -4,7 +4,7 @@
 3-tier fallback:
   1. meta_*.json → model_config → GPTConfig → num_scaling_params()
   2. Approximate formula from model_config dimensions
-  3. Hardcoded default 1.3B (d24 model)
+  3. Hardcoded default 730M (d24 model)
 
 Output (stdout, for shell script capture):
   NUM_SCALING_PARAMS=<int>
@@ -92,7 +92,7 @@ def _try_meta_json(ckpt_dir):
         params_counts = model.num_scaling_params()
         num_scaling_params = params_counts["transformer_matrices"] + params_counts["lm_head"]
         return num_scaling_params, total_batch_size
-    except ImportError:
+    except Exception:
         num_scaling_params = _approx_scaling_params(model_config)
         if num_scaling_params is None:
             return None, total_batch_size

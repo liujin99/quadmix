@@ -10,7 +10,7 @@ compatible with nanochat's dataloader (last shard = validation).
 
 Token budget logic:
   target_tokens = data_ratio x num_scaling_params
-  budget_cap    = min(quadmix_total_tokens, target_tokens) x 1.1
+  budget_cap    = target_tokens x 1.1
   All baselines prepare data up to budget_cap to ensure fair comparison.
 
 Usage (essential-web, backward compatible):
@@ -213,12 +213,15 @@ def read_docs_from_shards(shard_paths, selections, num_workers=None, desc=None, 
 
 def _scan_shard_indexed(args):
     idx, shard_path, domain_col, domain_names, char_count_col, text_col, max_chars, max_char_repeat_ratio = args
+    shard_schema = pq.read_schema(shard_path)
+    shard_col_set = set(shard_schema.names)
     columns_to_read = []
-    if domain_col:
+    if domain_col and domain_col in shard_col_set:
         columns_to_read.append(domain_col)
-    if char_count_col:
+    if char_count_col and char_count_col in shard_col_set:
         columns_to_read.append(char_count_col)
-    if not char_count_col or max_chars is not None or max_char_repeat_ratio > 0:
+    need_text = (not char_count_col) or (char_count_col and char_count_col not in shard_col_set) or max_chars is not None or max_char_repeat_ratio > 0
+    if need_text and text_col in shard_col_set:
         columns_to_read.append(text_col)
     columns_to_read = list(set(columns_to_read))
     table = pq.read_table(shard_path, columns=columns_to_read)
@@ -260,7 +263,8 @@ def _scan_shard_indexed(args):
                 continue
         domain_val = None
         if domain_data is not None:
-            domain_val = int(domain_data[i]) if domain_data is not None else None
+            v = domain_data[i]
+            domain_val = int(v) if isinstance(v, (int, np.integer)) else v
         valid.append((i, cc, domain_val))
     return idx, valid, filtered_long, filtered_repeat
 
@@ -455,8 +459,9 @@ def select_manual_ratio(prep_files, prep_metadata, manual_ratio_map, domain_name
         print(f"  Exact tokens before trim: {mr_tokens:,} (target: {total_tokens:,})")
         if mr_tokens > total_tokens:
             n_before = len(mr_docs)
+            random.shuffle(mr_docs)
             mr_docs, mr_tokens = trim_docs_to_target(mr_docs, total_tokens)
-            print(f"  Trimmed {n_before - len(mr_docs):,} docs to match target")
+            print(f"  Trimmed {n_before - len(mr_docs):,} docs to match target (shuffled first for fair trimming)")
     else:
         mr_tokens = sum(d["token_count"] for d in mr_docs)
 

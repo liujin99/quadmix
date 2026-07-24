@@ -281,7 +281,17 @@ echo ""
 echo "╔══ Step 1: Prepare datasets ══╗"
 echo ""
 
-if [ -f "$DATA_DIR/dataset_stats.json" ]; then
+_DATA_READY=true
+if [ ! -f "$DATA_DIR/dataset_stats.json" ]; then
+    _DATA_READY=false
+fi
+for _subdir in quadmix random; do
+    if [ ! -d "$DATA_DIR/$_subdir" ]; then
+        _DATA_READY=false
+        break
+    fi
+done
+if $_DATA_READY; then
     echo "  Datasets already exist. Skipping preparation."
     echo "  (Delete $DATA_DIR to regenerate)"
 else
@@ -290,6 +300,8 @@ else
         --preprocessed-data-dir "$PREPROCESSED_DATA_DIR"
         --output-dir "$DATA_DIR"
         --tokenizer-pkl "$TOKENIZER_DIR/tokenizer.pkl"
+        --data-ratio "$TARGET_PARAM_DATA_RATIO"
+        --num-scaling-params "$NUM_SCALING_PARAMS"
         --shard-size "$SHARD_SIZE"
         --val-ratio "$VAL_RATIO"
         --seed "$SEED"
@@ -414,15 +426,14 @@ run_mid_training() {
         echo "    ERROR: No meta JSON found in $BASE_CKPT_DIR, cannot determine total_batch_size" >&2
         exit 1
     fi
-    local NUM_ITERATIONS=$((TRAIN_TOKENS / TOTAL_BATCH_SIZE))
-    local ACTUAL_RATIO=$(python3 -c "print(f'{$TRAIN_TOKENS / $NUM_SCALING_PARAMS:.4f}')")
+    local NUM_ITERATIONS=$(( (TRAIN_TOKENS + TOTAL_BATCH_SIZE - 1) / TOTAL_BATCH_SIZE ))
 
     echo "  Starting mid-training: $RUN_NAME"
     echo "    Data:       $DATA_PATH"
     echo "    Source:     $BASE_MODEL_TAG (base)"
     echo "    Save as:    $MODEL_TAG (mid)"
     echo "    Dataset:    $DATASET_TOKENS tokens"
-    echo "    Train:      $TRAIN_TOKENS tokens (budget_cap, ratio=$ACTUAL_RATIO)"
+    echo "    Train:      $TRAIN_TOKENS tokens (budget_cap, ratio=$TARGET_PARAM_DATA_RATIO)"
     echo "    Steps:      $NUM_ITERATIONS"
     echo "    Log:        $LOG_FILE"
 
@@ -436,7 +447,7 @@ run_mid_training() {
     pushd "$NANOCHAT_REPO" > /dev/null
     python3 -m torch.distributed.run --standalone --nproc_per_node="$NUM_NPU" -m scripts.mid_train -- \
         --num-iterations="$NUM_ITERATIONS" \
-        --target-param-data-ratio="$ACTUAL_RATIO" \
+        --target-param-data-ratio="$TARGET_PARAM_DATA_RATIO" \
         --device-batch-size="$DEVICE_BATCH_SIZE" \
         --total-batch-size="$TOTAL_BATCH_SIZE" \
         --run="$RUN_NAME" \
@@ -459,6 +470,11 @@ import os, json
 s = json.load(open(os.environ['STATS_FILE']))
 print(s['config'].get('budget_cap', '0'))
 ")
+if [ "$BUDGET_CAP" -le 0 ] 2>/dev/null || [ -z "$BUDGET_CAP" ]; then
+    echo "ERROR: budget_cap is missing or zero in dataset_stats.json" >&2
+    echo "       Delete $DATA_DIR and re-run prepare_data to regenerate." >&2
+    exit 1
+fi
 read -r QUADMIX_TOKENS RANDOM_TOKENS < <(
     STATS_FILE="$STATS_FILE" python3 -c "
 import os, json
