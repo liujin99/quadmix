@@ -17,6 +17,7 @@ QuaDMix Input Contract:
 
 import numpy as np
 import numpy.typing as npt
+from scipy.stats import rankdata as _scipy_rankdata
 
 from quadmix.core.types import MergedQualityConfig
 from quadmix.utils.normalization import get_normalizer
@@ -44,17 +45,17 @@ def compute_merged_quality_scores(
         Shape: (num_docs,) — higher = better quality.
     """
     num_docs, num_criteria = quality_matrix.shape
-    normalize_fn = get_normalizer(normalizer)
 
-    # Normalize each quality criterion independently
     normalized_quality = np.zeros_like(quality_matrix)
-    for n in range(num_criteria):
-        normalized_quality[:, n] = normalize_fn(quality_matrix[:, n])
+    if normalizer == "rank":
+        for n in range(num_criteria):
+            ranks = _scipy_rankdata(quality_matrix[:, n], method='average')
+            normalized_quality[:, n] = (ranks - 1) / num_docs
+    else:
+        normalize_fn = get_normalizer(normalizer)
+        for n in range(num_criteria):
+            normalized_quality[:, n] = normalize_fn(quality_matrix[:, n])
 
-    # Compute merged score per document
-    merged_scores = np.zeros(num_docs, dtype=np.float64)
-
-    # Get all unique domains
     unique_domains = np.unique(domain_labels)
 
     neg_count = int((domain_labels < 0).sum())
@@ -76,18 +77,13 @@ def compute_merged_quality_scores(
             f"0..M-1 or provide domain_names in schema."
         )
 
-    for m in unique_domains:
-        if m < 0:  # skip unlabeled docs
-            continue
-        mask = domain_labels == m
-        num_masked = mask.sum()
-        if num_masked == 0:
-            continue
+    weight_matrix = np.zeros((max_idx + 1, num_criteria), dtype=np.float64)
+    for m in range(max_idx + 1):
+        weight_matrix[m] = merge_config.get_final_weights(m)
 
-        # Get final weights α_m for this domain
-        alpha_m = merge_config.get_final_weights(m)
-
-        # Weighted sum: ¯q = Σ σ(q_n) · α_{n,m}
-        merged_scores[mask] = normalized_quality[mask] @ alpha_m
+    valid_mask = (domain_labels >= 0) & (domain_labels <= max_idx)
+    merged_scores = np.zeros(num_docs, dtype=np.float64)
+    doc_weights = weight_matrix[domain_labels[valid_mask]]
+    merged_scores[valid_mask] = (normalized_quality[valid_mask] * doc_weights).sum(axis=1)
 
     return merged_scores

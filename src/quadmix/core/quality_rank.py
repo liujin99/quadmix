@@ -46,7 +46,6 @@ def compute_quality_ranks(
     num_docs = len(merged_scores)
     ranks = np.zeros(num_docs, dtype=np.float64)
 
-    # Default: equal weight per document
     if token_counts is None:
         token_counts = np.ones(num_docs, dtype=np.int64)
 
@@ -59,13 +58,12 @@ def compute_quality_ranks(
         if len(indices) == 0:
             continue
 
-        # Get scores and token counts for this domain
         domain_scores = merged_scores[indices]
         domain_tokens = token_counts[indices].astype(np.float64)
         total_tokens = domain_tokens.sum()
 
         if total_tokens < 1e-10:
-            ranks[indices] = 0.5  # Edge case: all tokens 0
+            ranks[indices] = 0.5
             continue
 
         sort_order = np.argsort(-domain_scores, kind='mergesort')
@@ -73,15 +71,14 @@ def compute_quality_ranks(
         sorted_tokens = domain_tokens[sort_order]
         cumulative = np.cumsum(sorted_tokens)
 
-        tied_ranks = np.empty(len(domain_scores), dtype=np.float64)
-        i = 0
-        while i < len(sorted_scores):
-            j = i + 1
-            while j < len(sorted_scores) and sorted_scores[j] == sorted_scores[i]:
-                j += 1
-            group_rank = cumulative[j - 1] / total_tokens
-            tied_ranks[i:j] = group_rank
-            i = j
+        diff = np.diff(sorted_scores)
+        tie_start = np.concatenate([[True], diff != 0])
+        groups = np.cumsum(tie_start) - 1
+
+        group_end_cumsum = np.zeros(np.max(groups) + 1, dtype=np.float64)
+        np.maximum.at(group_end_cumsum, groups, cumulative)
+
+        tied_ranks = group_end_cumsum[groups] / total_tokens
 
         inv_sort = np.argsort(sort_order)
         ranks[indices] = tied_ranks[inv_sort]
