@@ -716,9 +716,23 @@ def main():
     print(f"  Random docs: {len(random_docs):,}")
     print(f"  Random tokens ({token_method}): {random_actual_tokens:,}")
 
+    import tempfile
+    _tmp_dir = tempfile.mkdtemp(prefix="prepare_data_")
+    _qm_tmp = os.path.join(_tmp_dir, "quadmix.parquet")
+    _rd_tmp = os.path.join(_tmp_dir, "random.parquet")
+    print(f"\n  Saving quadmix+random to temp to free memory: {_tmp_dir}")
+    pq.write_table(pa.table({"text": [d["text"] for d in quadmix_docs],
+                              "token_count": [d["token_count"] for d in quadmix_docs]}), _qm_tmp)
+    pq.write_table(pa.table({"text": [d["text"] for d in random_docs],
+                              "token_count": [d["token_count"] for d in random_docs]}), _rd_tmp)
+    del quadmix_docs, random_docs
+    gc.collect()
+    print(f"  Freed quadmix+random from memory")
+
     manual_ratio_docs = None
     manual_ratio_tokens = 0
     manual_ratio_label = ""
+    _mr_tmp = None
     if do_manual_ratio:
         mr_label_parts = [f"{d}={r}" for d, r in sorted(manual_ratio_map.items())]
         manual_ratio_label = "Manual Ratio (" + ", ".join(mr_label_parts) + ")"
@@ -727,6 +741,12 @@ def main():
             prep_files, prep_metadata, manual_ratio_map, domain_names,
             budget_cap, tokenizer_pkl=args.tokenizer_pkl,
             num_workers=args.num_workers, enc=enc, text_col=text_col)
+        _mr_tmp = os.path.join(_tmp_dir, "manual_ratio.parquet")
+        pq.write_table(pa.table({"text": [d["text"] for d in manual_ratio_docs],
+                                  "token_count": [d["token_count"] for d in manual_ratio_docs]}), _mr_tmp)
+        del manual_ratio_docs
+        gc.collect()
+        print(f"  Saved manual_ratio to temp, freed from memory")
 
     quality_datasets = {}
     step_num = 5 if do_manual_ratio else 4
@@ -741,26 +761,6 @@ def main():
     else:
         if not do_manual_ratio:
             print(f"\n[{step_num}/N] Quality baseline skipped")
-
-    import tempfile
-    _tmp_dir = tempfile.mkdtemp(prefix="prepare_data_")
-    print(f"\n  Saving docs to temp dir to free memory: {_tmp_dir}")
-    _qm_tmp = os.path.join(_tmp_dir, "quadmix.parquet")
-    _rd_tmp = os.path.join(_tmp_dir, "random.parquet")
-    pq.write_table(pa.table({"text": [d["text"] for d in quadmix_docs],
-                              "token_count": [d["token_count"] for d in quadmix_docs]}), _qm_tmp)
-    pq.write_table(pa.table({"text": [d["text"] for d in random_docs],
-                              "token_count": [d["token_count"] for d in random_docs]}), _rd_tmp)
-    _mr_tmp = None
-    if do_manual_ratio:
-        _mr_tmp = os.path.join(_tmp_dir, "manual_ratio.parquet")
-        pq.write_table(pa.table({"text": [d["text"] for d in manual_ratio_docs],
-                                  "token_count": [d["token_count"] for d in manual_ratio_docs]}), _mr_tmp)
-    del quadmix_docs, random_docs
-    if manual_ratio_docs is not None:
-        del manual_ratio_docs
-    gc.collect()
-    print(f"  Freed docs from memory")
 
     print(f"\n  Reloading docs from temp dir...")
     _qm_df = pq.read_table(_qm_tmp).to_pandas()
