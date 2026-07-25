@@ -328,7 +328,10 @@ def write_analysis_summary(
         )
         lines.append(f"ω range         : [{dsp.get('omega_min', '?')}, {dsp.get('omega_max', '?')}]")
         lines.append(f"ω average       : {dsp.get('omega_avg', '?')}")
-        lines.append(f"ε average       : {dsp.get('epsilon_avg', '?')}")
+        epsilon_avg = dsp.get("epsilon_avg")
+        if epsilon_avg is None:
+            epsilon_avg = float(np.mean([sc.epsilon for sc in params.sampling_configs]))
+        lines.append(f"ε average       : {epsilon_avg}")
         lines.append(
             f"Estimated output: {dsp.get('estimated_tokens', '?')}"
         )
@@ -361,7 +364,7 @@ def write_analysis_summary(
             f"{scores.mean():>10.6f} {scores.std():>10.6f} "
             f"{len(unique_scores):>10,} {max_frac:>10.4%}"
         )
-        if max_frac > 0.5:
+        if max_frac > 0.05:
             tie_warning_domains.append((domain_short[m], max_frac))
 
     lines.append("")
@@ -406,9 +409,16 @@ def write_analysis_summary(
     lines.append("-" * 70)
 
     if tie_warning_domains:
+        max_domain_frac = max(f for _, f in tie_warning_domains)
+        if max_domain_frac > 0.5:
+            severity = "CRITICAL"
+        elif max_domain_frac > 0.10:
+            severity = "SEVERE"
+        else:
+            severity = "MODERATE"
         lines.append(
-            "⚠ TIE PROBLEM DETECTED in the following domains "
-            "(>50% docs share the same merged score):"
+            f"⚠ {severity} TIE PROBLEM DETECTED in the following domains "
+            f"(>5% docs share the same merged score):"
         )
         for name, frac in tie_warning_domains:
             lines.append(f"    {name}: {frac:.4%} of docs share the same q̄")
@@ -426,7 +436,7 @@ def write_analysis_summary(
             "Check if the fix is applied in quality_rank.py (seed param)."
         )
     else:
-        lines.append("✓ No severe tie problem detected (all domains <50% same score).")
+        lines.append("✓ No severe tie problem detected (all domains <5% same score).")
     lines.append("")
 
     # ── Selection Analysis ──
