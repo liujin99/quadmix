@@ -15,6 +15,7 @@ QuaDMix Input Contract:
     Most real-world quality scorers output "higher = better" naturally.
 """
 
+import os
 import numpy as np
 import numpy.typing as npt
 from scipy.stats import rankdata as _scipy_rankdata
@@ -28,6 +29,7 @@ def compute_merged_quality_scores(
     domain_labels: npt.NDArray[np.int64],
     merge_config: MergedQualityConfig,
     normalizer: str = "rank",
+    n_jobs: int = 1,
 ) -> npt.NDArray[np.float64]:
     """
     Compute merged quality scores ¯q for all documents (Equation 1).
@@ -39,6 +41,11 @@ def compute_merged_quality_scores(
         domain_labels: Shape (num_docs,) — domain label for each doc.
         merge_config: Merging parameters α_m for each domain.
         normalizer: Name of normalization function σ to use.
+        n_jobs: Number of parallel workers for the normalization loop.
+                Default 1 (sequential). Use -1 for all CPU cores.
+                The per-criterion normalization (e.g., rankdata) is
+                parallelized across criteria using threads (scipy's
+                rankdata releases the GIL during its Cython sort).
 
     Returns:
         Array of merged quality scores ¯q for each document.
@@ -48,13 +55,27 @@ def compute_merged_quality_scores(
 
     normalized_quality = np.zeros_like(quality_matrix)
     if normalizer == "rank":
-        for n in range(num_criteria):
+        def _normalize_col(n):
             ranks = _scipy_rankdata(quality_matrix[:, n], method='average')
-            normalized_quality[:, n] = (ranks - 1) / num_docs
+            return (ranks - 1) / num_docs
     else:
         normalize_fn = get_normalizer(normalizer)
+        def _normalize_col(n):
+            return normalize_fn(quality_matrix[:, n])
+
+    effective_jobs = n_jobs if n_jobs != -1 else (os.cpu_count() or 1)
+    if effective_jobs > 1 and num_criteria > 1:
+        from joblib import Parallel, delayed
+        results = Parallel(
+            n_jobs=min(effective_jobs, num_criteria), prefer="threads"
+        )(
+            delayed(_normalize_col)(n) for n in range(num_criteria)
+        )
+        for n, result in enumerate(results):
+            normalized_quality[:, n] = result
+    else:
         for n in range(num_criteria):
-            normalized_quality[:, n] = normalize_fn(quality_matrix[:, n])
+            normalized_quality[:, n] = _normalize_col(n)
 
     unique_domains = np.unique(domain_labels)
 

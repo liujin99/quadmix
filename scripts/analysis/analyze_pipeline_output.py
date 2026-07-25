@@ -80,6 +80,13 @@ def parse_args():
         default=42,
         help="Seed for tie-breaking in rank computation (default: 42)",
     )
+    parser.add_argument(
+        "--n-jobs",
+        type=int,
+        default=-1,
+        help="Number of parallel workers for score/rank computation "
+        "(default: -1 = all CPU cores)",
+    )
     return parser.parse_args()
 
 
@@ -536,12 +543,14 @@ def main():
         domain_labels,
         params.merge_config,
         normalizer=normalizer,
+        n_jobs=args.n_jobs,
     )
 
     print(f"       Computing quality ranks (Eq.2)...")
     token_counts = mgr.estimate_token_counts()
     ranks = compute_quality_ranks(
-        merged_scores, domain_labels, token_counts, seed=args.seed
+        merged_scores, domain_labels, token_counts,
+        seed=args.seed, n_jobs=args.n_jobs,
     )
 
     selected_ranks = ranks[selected_doc_ids]
