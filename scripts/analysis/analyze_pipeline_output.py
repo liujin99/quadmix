@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Analyze QuaDMix pipeline output: quality score and rank distributions.
 
-Generates three outputs in <exp-dir>/figures/:
+Generates three outputs directly in <exp-dir> (the experiment result directory):
   1. fig_quality_score_dist.png — full corpus q̄ distribution by domain (overlaid)
   2. fig_quality_rank_dist.png  — full corpus r̄ (solid) vs selected r̄ (dashed) by domain
   3. analysis_summary.txt       — key diagnostics (tie detection, selection stats, etc.)
@@ -548,12 +548,9 @@ def main():
     selected_domain_labels = domain_labels[selected_doc_ids]
 
     # ── Generate figures ──
-    figures_dir = os.path.join(args.exp_dir, "figures")
-    os.makedirs(figures_dir, exist_ok=True)
-
-    print(f"\nGenerating figures in: {figures_dir}")
+    print(f"\nGenerating outputs in: {args.exp_dir}")
     fig_score = plot_quality_score_dist(
-        merged_scores, domain_labels, domain_names, num_domains, figures_dir
+        merged_scores, domain_labels, domain_names, num_domains, args.exp_dir
     )
     fig_rank = plot_quality_rank_dist(
         ranks,
@@ -562,12 +559,12 @@ def main():
         selected_domain_labels,
         domain_names,
         num_domains,
-        figures_dir,
+        args.exp_dir,
     )
 
     # ── Generate analysis summary ──
     print("\nGenerating analysis summary...")
-    summary_out = os.path.join(figures_dir, "analysis_summary.txt")
+    summary_out = os.path.join(args.exp_dir, "analysis_summary.txt")
     write_analysis_summary(
         summary_out,
         args,
