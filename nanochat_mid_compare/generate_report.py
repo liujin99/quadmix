@@ -121,8 +121,9 @@ def generate_report(args):
     eval_logs = {}
     log_map = {
         "quadmix": (args.quadmix_train_log, args.quadmix_eval_log),
-        "random": (args.random_train_log, args.random_eval_log),
     }
+    if args.random_train_log:
+        log_map["random"] = (args.random_train_log, args.random_eval_log)
     if args.manual_ratio_train_log:
         log_map["manual_ratio"] = (args.manual_ratio_train_log, args.manual_ratio_eval_log)
     if args.quality_train_log:
@@ -324,9 +325,9 @@ def main():
     parser.add_argument("--result-dir", required=True)
     parser.add_argument("--dataset-stats", required=True)
     parser.add_argument("--quadmix-train-log", required=True)
-    parser.add_argument("--random-train-log", required=True)
+    parser.add_argument("--random-train-log", default=None)
     parser.add_argument("--quadmix-eval-log", required=True)
-    parser.add_argument("--random-eval-log", required=True)
+    parser.add_argument("--random-eval-log", default=None)
     parser.add_argument("--manual-ratio-train-log", type=str, default=None,
                         help="Manual Ratio baseline training log")
     parser.add_argument("--manual-ratio-eval-log", type=str, default=None,

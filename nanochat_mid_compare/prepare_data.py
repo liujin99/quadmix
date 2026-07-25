@@ -632,7 +632,9 @@ def main():
             qd.mkdir(parents=True, exist_ok=True)
             quality_dirs[m] = qd
 
-    baselines = ["quadmix", "random"]
+    baselines = ["quadmix"]
+    if os.environ.get("SKIP_RANDOM") != "1":
+        baselines.append("random")
     if do_manual_ratio:
         baselines.append("manual_ratio")
     if do_quality:
