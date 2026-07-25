@@ -90,6 +90,9 @@ def _presample_one(args):
         n_m = len(sub_q)
         alpha_m = params.merge_config.get_final_weights(m)
         domain_scores = sub_q @ alpha_m
+        # Break exact ties so searchsorted does not collapse
+        # tied docs to the same position (≈ end of tie group).
+        domain_scores = domain_scores + rng_eq2.uniform(0, 1e-12, n_m)
 
         k = min(data.rank_ref_size, n_m)
         ref_idx = rng_eq2.choice(n_m, k, replace=False)
@@ -870,6 +873,9 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             if n_domain == 0:
                 continue
             domain_scores = merged_scores[indices]
+            # Break exact ties so searchsorted does not collapse
+            # tied docs to the same position (≈ end of tie group).
+            domain_scores = domain_scores + rng.uniform(0, 1e-12, n_domain)
 
             k = min(self.rank_ref_size, n_domain)
             ref_idx = rng.choice(n_domain, k, replace=False)

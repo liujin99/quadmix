@@ -23,6 +23,7 @@ def compute_quality_ranks(
     merged_scores: npt.NDArray[np.float64],
     domain_labels: npt.NDArray[np.int64],
     token_counts: Optional[npt.NDArray[np.int64]] = None,
+    seed: Optional[int] = None,
 ) -> npt.NDArray[np.float64]:
     """
     Compute quality percentile ranks ¯r within each domain (Equation 2).
@@ -38,6 +39,8 @@ def compute_quality_ranks(
                       If provided, token-count-weighted percentiles are
                       used, as in the paper: "calculate the size of the set
                       by adding up the number of tokens for all samples within the set."
+        seed: Optional RNG seed for deterministic tie-breaking.
+              If None, uses OS entropy (non-deterministic).
 
     Returns:
         Quality rank ¯r for each document.
@@ -45,6 +48,7 @@ def compute_quality_ranks(
     """
     num_docs = len(merged_scores)
     ranks = np.zeros(num_docs, dtype=np.float64)
+    rng = np.random.default_rng(seed)
 
     if token_counts is None:
         token_counts = np.ones(num_docs, dtype=np.int64)
@@ -66,8 +70,12 @@ def compute_quality_ranks(
             ranks[indices] = 0.5
             continue
 
-        sort_order = np.argsort(-domain_scores, kind='mergesort')
-        sorted_scores = domain_scores[sort_order]
+        # Break exact ties with negligible noise (~8600x smaller than
+        # the minimum rank-normalized score gap of 1/num_docs) so that
+        # max-rank tie handling does not collapse tied docs to rank ≈ 1.0.
+        jittered_scores = domain_scores + rng.uniform(0, 1e-12, len(domain_scores))
+        sort_order = np.argsort(-jittered_scores, kind='mergesort')
+        sorted_scores = jittered_scores[sort_order]
         sorted_tokens = domain_tokens[sort_order]
         cumulative = np.cumsum(sorted_tokens)
 

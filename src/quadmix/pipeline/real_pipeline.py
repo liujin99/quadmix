@@ -311,6 +311,7 @@ class QuaDMixPipeline:
         print(f"[Stage {stage_idx}] Computing quality ranks (Eq.2)...")
         ranks = compute_quality_ranks(
             merged, domain_labels, token_counts,
+            seed=self.config.seed,
         )
         print(f"  Quality ranks: [{ranks.min():.4f}, "
               f"{ranks.max():.4f}]")
@@ -825,10 +826,13 @@ class QuaDMixPipeline:
             self._dataset_size_prediction = None
             return
 
-        estimated_tokens = int(total_tokens_est * avg_omega)
+        epsilon_values = [sc.epsilon for sc in optimal_params.sampling_configs]
+        avg_epsilon = float(np.mean(epsilon_values))
+        estimated_tokens = int(total_tokens_est * (avg_omega + (1 - avg_omega) * avg_epsilon))
         print(f"\n  ── θ* 数据量预测 ────────────────────────")
         print(f"    数据集总大小:     {total_tokens_est/1e9:.1f}B tokens")
         print(f"    ω 范围:          [{min_omega:.3f}, {max_omega:.3f}] (平均 {avg_omega:.3f})")
+        print(f"    ε 平均:          {avg_epsilon:.6f}")
         print(f"    预计数据量:       ~{estimated_tokens/1e9:.2f}B tokens")
 
         target_tokens = self.config.target_tokens
@@ -851,6 +855,7 @@ class QuaDMixPipeline:
             "omega_min": round(min_omega, 6),
             "omega_max": round(max_omega, 6),
             "omega_avg": round(avg_omega, 6),
+            "epsilon_avg": round(avg_epsilon, 6),
             "estimated_tokens": estimated_tokens,
             "estimated_tokens_B": round(estimated_tokens / 1e9, 2),
             "target_tokens": target_tokens if target_tokens > 0 else None,
