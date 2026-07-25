@@ -35,6 +35,7 @@ EVAL_EVERY="${EVAL_EVERY:--1}"
 TARGET_PARAM_DATA_RATIO="${TARGET_PARAM_DATA_RATIO:-0.5}"
 NUM_SCALING_PARAMS="${NUM_SCALING_PARAMS:-}"
 MID_CHECKPOINTS_OUTPUT_DIR="${MID_CHECKPOINTS_OUTPUT_DIR:-$HOME/.cache/nanochat_mid_compare/mid_checkpoints}"
+EVAL_BENCHMARKS="${EVAL_BENCHMARKS:-all}"
 
 # Extract timestamp from result directory name
 TIMESTAMP="$(basename "$RESULT_DIR")"
@@ -97,6 +98,11 @@ import os, json
 s = json.load(open(os.environ['STATS_FILE']))
 print(s['config'].get('total_batch_size', '524288'))
 ")
+fi
+
+if [ -z "$CKPT_TOTAL_BATCH_SIZE" ]; then
+    CKPT_TOTAL_BATCH_SIZE=524288
+    echo "  WARNING: CKPT_TOTAL_BATCH_SIZE not found, using default 524288"
 fi
 
 # ══════ NPU ENVIRONMENT ══════
@@ -167,6 +173,7 @@ echo "  Result dir:        $RESULT_DIR"
 echo "  Data dir:          $DATA_DIR"
 echo "  Base model:        $BASE_MODEL_TAG"
 echo "  Timestamp:         $TIMESTAMP"
+echo "  Eval benchmarks:   $EVAL_BENCHMARKS"
 echo ""
 echo "  Model tags:"
 echo "    QuadMix:         $QUADMIX_MODEL_TAG"
@@ -215,20 +222,17 @@ run_mid_training() {
     local RUN_NAME="$3"
     local LOG_FILE="$4"
     local DATASET_TOKENS="$5"
+    local TRAIN_TOKENS="$6"
 
     local TOTAL_BATCH_SIZE="${CKPT_TOTAL_BATCH_SIZE:-524288}"
-    local TARGET_TOKENS=$(python3 -c "print(int($TARGET_PARAM_DATA_RATIO * $NUM_SCALING_PARAMS))")
-    local ACTUAL_TOKENS=$(python3 -c "print(min($TARGET_TOKENS, $DATASET_TOKENS))")
-    local NUM_ITERATIONS=$(( (ACTUAL_TOKENS + TOTAL_BATCH_SIZE - 1) / TOTAL_BATCH_SIZE ))
-    local ACTUAL_RATIO=$(python3 -c "print(f'{$ACTUAL_TOKENS / $NUM_SCALING_PARAMS:.4f}')")
+    local NUM_ITERATIONS=$(( (TRAIN_TOKENS + TOTAL_BATCH_SIZE - 1) / TOTAL_BATCH_SIZE ))
 
     echo "  Starting mid-training: $RUN_NAME"
     echo "    Data:       $DATA_PATH"
     echo "    Source:     $BASE_MODEL_TAG (base)"
     echo "    Save as:    $MODEL_TAG (mid)"
     echo "    Dataset:    $DATASET_TOKENS tokens"
-    echo "    Target:     $TARGET_TOKENS tokens (ratio=$TARGET_PARAM_DATA_RATIO)"
-    echo "    Actual:     $ACTUAL_TOKENS tokens (ratio=$ACTUAL_RATIO)"
+    echo "    Train:      $TRAIN_TOKENS tokens (budget_cap, ratio=$TARGET_PARAM_DATA_RATIO)"
     echo "    Steps:      $NUM_ITERATIONS"
     echo "    Log:        $LOG_FILE"
 
@@ -239,23 +243,22 @@ run_mid_training() {
         ln -s "$BASE_CKPT_DIR" "$LINK_DIR"
     fi
 
+    trap 'if [ -L "$LINK_DIR" ]; then echo "    Cleaning up symlink on exit: $LINK_DIR"; rm "$LINK_DIR"; fi' RETURN
+
     pushd "$NANOCHAT_REPO" > /dev/null
     python3 -m torch.distributed.run --standalone --nproc_per_node="$NUM_NPU" -m scripts.mid_train -- \
         --num-iterations="$NUM_ITERATIONS" \
-        --target-param-data-ratio="$ACTUAL_RATIO" \
+        --target-param-data-ratio="$TARGET_PARAM_DATA_RATIO" \
         --device-batch-size="$DEVICE_BATCH_SIZE" \
         --total-batch-size="$TOTAL_BATCH_SIZE" \
         --run="$RUN_NAME" \
         --model-tag="$MODEL_TAG" \
         --core-metric-every="$CORE_METRIC_EVERY" \
         --eval-every="$EVAL_EVERY" \
+        --eval-benchmarks="$EVAL_BENCHMARKS" \
         --data-dir="$DATA_PATH" \
         2>&1 | tee "$LOG_FILE"
     popd > /dev/null
-
-    if [ -L "$LINK_DIR" ]; then
-        rm "$LINK_DIR"
-    fi
 }
 
 run_eval() {
@@ -268,6 +271,7 @@ run_eval() {
     pushd "$NANOCHAT_REPO" > /dev/null
     python3 -m torch.distributed.run --standalone --nproc_per_node="$NUM_NPU" -m scripts.base_eval -- \
         --eval=core \
+        --eval-benchmarks="$EVAL_BENCHMARKS" \
         --device-batch-size=32 \
         --model-tag="$MODEL_TAG" \
         --model-type="$MODEL_TYPE" \
@@ -289,6 +293,39 @@ python3 -c "from scripts.base_eval import prepare_eval_data; prepare_eval_data('
     exit 1
 }
 popd > /dev/null
+echo "╚══════════════════════════════════════════════════════════╝"
+echo ""
+
+# ══════════════════════════════════════════════════════════════
+#  PRE-FLIGHT: DISK SPACE CHECK
+# ══════════════════════════════════════════════════════════════
+
+echo ""
+echo "╔══ Pre-flight: Disk space check ══╗"
+echo ""
+
+CKPT_DIR="${MID_CHECKPOINTS_OUTPUT_DIR}"
+mkdir -p "$CKPT_DIR"
+
+AVAILABLE_KB=$(df -P "$CKPT_DIR" | awk 'NR==2{print $4}')
+AVAILABLE_GB=$((AVAILABLE_KB / 1024 / 1024))
+MIN_REQUIRED_GB=25
+
+echo "  Checkpoint dir:  $CKPT_DIR"
+echo "  Available space: ${AVAILABLE_GB}GB"
+echo "  Minimum needed:  ${MIN_REQUIRED_GB}GB (1 training × ~20GB/ckpt)"
+
+if [ "$AVAILABLE_GB" -lt "$MIN_REQUIRED_GB" ]; then
+    echo ""
+    echo "  ERROR: Insufficient disk space!"
+    echo "  Available: ${AVAILABLE_GB}GB < Required: ${MIN_REQUIRED_GB}GB"
+    echo ""
+    echo "╚══════════════════════════════════════════════════════════╝"
+    exit 1
+fi
+
+echo "  ✓ Disk space sufficient"
+echo ""
 echo "╚══════════════════════════════════════════════════════════╝"
 echo ""
 
@@ -315,7 +352,11 @@ echo ""
 echo "╔══ Step 1: Mid-training on Quality Top-K (fineweb_edu) data ══╗"
 echo ""
 
-run_mid_training "$FINWEB_DATA" "$FINWEB_MODEL_TAG" "quality_fineweb_edu_mid" "$FINWEB_LOG" "$FINWEB_TOKENS"
+TARGET_TOKENS=$(python3 -c "print(int($TARGET_PARAM_DATA_RATIO * $NUM_SCALING_PARAMS))")
+BUDGET_CAP=$(( TARGET_TOKENS * 11 / 10 ))
+echo "  Common training budget: $BUDGET_CAP tokens (budget_cap = target × 1.1)"
+
+run_mid_training "$FINWEB_DATA" "$FINWEB_MODEL_TAG" "quality_fineweb_edu_mid" "$FINWEB_LOG" "$FINWEB_TOKENS" "$BUDGET_CAP"
 
 echo ""
 echo "╚══════════════════════════════════════════════════════════════╝"

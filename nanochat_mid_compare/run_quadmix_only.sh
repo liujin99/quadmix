@@ -49,6 +49,7 @@ DEVICE_BATCH_SIZE="${DEVICE_BATCH_SIZE:-8}"
 NUM_NPU="${NUM_NPU:-8}"
 CORE_METRIC_EVERY="${CORE_METRIC_EVERY:--1}"
 EVAL_EVERY="${EVAL_EVERY:--1}"
+EVAL_BENCHMARKS="${EVAL_BENCHMARKS:-all}"
 SHARD_SIZE="${SHARD_SIZE:-10000}"
 
 QUADMIX_MODEL_TAG="${QUADMIX_MODEL_TAG:-${BASE_MODEL_TAG}_quadmix_${TIMESTAMP}}"
@@ -81,6 +82,11 @@ else
     if [ -n "$CKPT_META_JSON" ]; then
         CKPT_TOTAL_BATCH_SIZE=$(python3 -c "import json; print(json.load(open('$CKPT_META_JSON'))['total_batch_size'])")
     fi
+fi
+
+if [ -z "$CKPT_TOTAL_BATCH_SIZE" ]; then
+    CKPT_TOTAL_BATCH_SIZE=524288
+    echo "  WARNING: CKPT_TOTAL_BATCH_SIZE not found, using default 524288"
 fi
 
 # ══════════════════════════════════════════════════════════════
@@ -358,6 +364,7 @@ echo "    target-param-data-ratio: $TARGET_PARAM_DATA_RATIO"
 echo "    num-scaling-params:      $NUM_SCALING_PARAMS"
 echo "    device-batch-size:       $DEVICE_BATCH_SIZE"
 echo "    NPU cards:               $NUM_NPU"
+echo "    eval-benchmarks:         $EVAL_BENCHMARKS"
 echo ""
 echo "════════════════════════════════════════════════════════════"
 echo ""
@@ -424,10 +431,9 @@ print(s['quadmix']['tokens'])
 ")
 
 TARGET_TOKENS=$(python3 -c "print(int($TARGET_PARAM_DATA_RATIO * $NUM_SCALING_PARAMS))")
-ACTUAL_TOKENS=$(python3 -c "print(min($TARGET_TOKENS, $QUADMIX_TOKENS))")
+BUDGET_CAP=$(( TARGET_TOKENS * 11 / 10 ))
 TOTAL_BATCH_SIZE="${CKPT_TOTAL_BATCH_SIZE:-524288}"
-NUM_ITERATIONS=$(( (ACTUAL_TOKENS + TOTAL_BATCH_SIZE - 1) / TOTAL_BATCH_SIZE ))
-ACTUAL_RATIO=$(python3 -c "print(f'{$ACTUAL_TOKENS / $NUM_SCALING_PARAMS:.4f}')")
+NUM_ITERATIONS=$(( (BUDGET_CAP + TOTAL_BATCH_SIZE - 1) / TOTAL_BATCH_SIZE ))
 
 echo "╔══ Mid-training on QuadMix data ══╗"
 echo ""
@@ -435,8 +441,7 @@ echo "  Data:       $QUADMIX_DATA"
 echo "  Source:     $BASE_MODEL_TAG (base)"
 echo "  Save as:    $QUADMIX_MODEL_TAG (mid)"
 echo "  Dataset:    $QUADMIX_TOKENS tokens"
-echo "  Target:     $TARGET_TOKENS tokens (ratio=$TARGET_PARAM_DATA_RATIO)"
-echo "  Actual:     $ACTUAL_TOKENS tokens (ratio=$ACTUAL_RATIO)"
+echo "  Train:      $BUDGET_CAP tokens (budget_cap = target × 1.1, ratio=$TARGET_PARAM_DATA_RATIO)"
 echo "  Steps:      $NUM_ITERATIONS"
 
 QUADMIX_LOG="$RESULT_DIR/mid_train_quadmix.log"
@@ -447,23 +452,22 @@ if [ ! -e "$LINK_DIR" ]; then
     ln -s "$BASE_CKPT_DIR" "$LINK_DIR"
 fi
 
+trap 'if [ -L "$LINK_DIR" ]; then echo "  Cleaning up symlink on exit: $LINK_DIR"; rm "$LINK_DIR"; fi' RETURN
+
 pushd "$NANOCHAT_REPO" > /dev/null
 python3 -m torch.distributed.run --standalone --nproc_per_node="$NUM_NPU" -m scripts.mid_train -- \
     --num-iterations="$NUM_ITERATIONS" \
-    --target-param-data-ratio="$ACTUAL_RATIO" \
+    --target-param-data-ratio="$TARGET_PARAM_DATA_RATIO" \
     --device-batch-size="$DEVICE_BATCH_SIZE" \
     --total-batch-size="$TOTAL_BATCH_SIZE" \
     --run="quadmix_mid" \
     --model-tag="$QUADMIX_MODEL_TAG" \
     --core-metric-every="$CORE_METRIC_EVERY" \
     --eval-every="$EVAL_EVERY" \
+    --eval-benchmarks="$EVAL_BENCHMARKS" \
     --data-dir="$QUADMIX_DATA" \
     2>&1 | tee "$QUADMIX_LOG"
 popd > /dev/null
-
-if [ -L "$LINK_DIR" ]; then
-    rm "$LINK_DIR"
-fi
 
 echo ""
 echo "╚══════════════════════════════════════════╗"
@@ -482,6 +486,7 @@ QUADMIX_EVAL_LOG="$RESULT_DIR/eval_quadmix.log"
 pushd "$NANOCHAT_REPO" > /dev/null
 python3 -m torch.distributed.run --standalone --nproc_per_node="$NUM_NPU" -m scripts.base_eval -- \
     --eval=core \
+    --eval-benchmarks="$EVAL_BENCHMARKS" \
     --device-batch-size=32 \
     --model-tag="$QUADMIX_MODEL_TAG" \
     --model-type="mid" \
@@ -504,7 +509,7 @@ export QUADMIX_LOG QUADMIX_EVAL_LOG QUADMIX_MODEL_TAG BASE_MODEL_TAG \
     NANOCHAT_MODEL_DIR MID_CHECKPOINTS_OUTPUT_DIR \
     TARGET_PARAM_DATA_RATIO NUM_SCALING_PARAMS \
     DEVICE_BATCH_SIZE TOTAL_BATCH_SIZE NUM_NPU \
-    QUADMIX_TOKENS ACTUAL_TOKENS ACTUAL_RATIO NUM_ITERATIONS
+    QUADMIX_TOKENS BUDGET_CAP NUM_ITERATIONS
 export QUADMIX_GIT_HASH="$(git -C "$QUADMIX_DIR" rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
 export NANOCHAT_GIT_HASH="$(git -C "$NANOCHAT_REPO" rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
 python3 "$SCRIPT_DIR/generate_quadmix_report.py"

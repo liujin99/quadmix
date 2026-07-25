@@ -129,6 +129,11 @@ MODEL_INFO=$(python3 "$SCRIPT_DIR/get_model_info.py" \
 NUM_SCALING_PARAMS=$(echo "$MODEL_INFO" | grep NUM_SCALING_PARAMS | cut -d= -f2)
 CKPT_TOTAL_BATCH_SIZE=$(echo "$MODEL_INFO" | grep TOTAL_BATCH_SIZE | cut -d= -f2)
 
+if [ -z "$CKPT_TOTAL_BATCH_SIZE" ]; then
+    CKPT_TOTAL_BATCH_SIZE=524288
+    echo "  WARNING: CKPT_TOTAL_BATCH_SIZE not found, using default 524288"
+fi
+
 echo "  Auto-detected: NUM_SCALING_PARAMS=$NUM_SCALING_PARAMS, TOTAL_BATCH_SIZE=$CKPT_TOTAL_BATCH_SIZE"
 
 # Auto-generate model tags

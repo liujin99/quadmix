@@ -9,7 +9,7 @@ def parse_train(path):
     if not path or not os.path.exists(path):
         return info
     step_pat = re.compile(r'step\s+(\d+)/(\d+)\s+\(.*?\)\s+\|\s+loss:\s+([\d.]+)\s+\|.*?\|\s+tok/sec:\s+([\d,]+)\s+\|\s+bf16_mfu:\s+([\d.]+)')
-    core_pat = re.compile(r'Step\s+(\d+)\s+\|\s+CORE metric:\s+([\d.]+)')
+    core_pat = re.compile(r'Step\s+(\d+)\s+\|\s+(?:CORE|STEM) metric:\s+([\d.]+)')
     time_pat = re.compile(r'Total training time:\s+([\d.]+)m')
     mem_pat = re.compile(r'Peak memory usage:\s+([\d.]+)MiB')
     for line in open(path):
@@ -36,7 +36,7 @@ def parse_eval(path):
     if not path or not os.path.exists(path):
         return info
     task_pat = re.compile(r'Evaluating:\s+(.+?)\s+\(.*?\)\.\.\.\s+accuracy:\s+([\d.]+)\s+\|\s+centered:\s+([\d.-]+)\s+\|\s+time:\s+([\d.]+)s')
-    core_pat = re.compile(r'CORE metric:\s+([\d.]+)')
+    core_pat = re.compile(r'(?:CORE|STEM) metric:\s+([\d.]+)')
     for line in open(path):
         m = task_pat.search(line)
         if m:
@@ -85,7 +85,7 @@ lines.append('')
 
 lines.append('## Result')
 lines.append('')
-lines.append(f'**CORE metric: {fmt(evl["core_metric"], ".4f")}**')
+lines.append(f'**Eval metric: {fmt(evl["core_metric"], ".4f")}**')
 lines.append('')
 
 lines.append('## Training')
@@ -101,9 +101,9 @@ lines.append(f'| Peak memory | {fmt(train["peak_memory"], ".0f", " MiB")} |')
 lines.append('')
 
 if train['core_metrics']:
-    lines.append('### CORE During Training')
+    lines.append('### Metric During Training')
     lines.append('')
-    lines.append('| Step | CORE |')
+    lines.append('| Step | Metric |')
     lines.append('|---|---|')
     for step, val in train['core_metrics']:
         lines.append(f'| {step} | {val:.4f} |')
@@ -133,11 +133,9 @@ lines.append('')
 lines.append('| Parameter | Value |')
 lines.append('|---|---|')
 lines.append(f'| Dataset tokens | {q.get("tokens", "N/A"):,} |' if isinstance(q.get('tokens'), int) else '| Dataset tokens | N/A |')
-actual_tokens = os.environ.get('ACTUAL_TOKENS')
-actual_ratio = os.environ.get('ACTUAL_RATIO')
+budget_cap = os.environ.get('BUDGET_CAP')
 num_iterations = os.environ.get('NUM_ITERATIONS')
-lines.append(f'| Actual training tokens | {int(actual_tokens):,} |' if actual_tokens else '| Actual training tokens | N/A |')
-lines.append(f'| Actual param-data ratio | {actual_ratio} |' if actual_ratio else '| Actual param-data ratio | N/A |')
+lines.append(f'| Training tokens | {int(budget_cap):,} |' if budget_cap else '| Training tokens | N/A |')
 lines.append(f'| Iterations | {num_iterations} |' if num_iterations else '| Iterations | N/A |')
 lines.append('')
 
