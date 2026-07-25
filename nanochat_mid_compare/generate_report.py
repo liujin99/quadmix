@@ -76,24 +76,26 @@ def parse_eval_log(path):
         return info
 
     task_pattern = re.compile(
-        r"Evaluating:\s+(.+?)\s+\(.*?\)\.\.\.\s+accuracy:\s+([\d.]+)\s+\|\s+centered:\s+([\d.-]+)\s+\|\s+time:\s+([\d.]+)s"
+        r"Evaluating:\s+(.+?)\s+\(.*?\)\.\.\..*?accuracy:\s+([\d.]+)\s+\|\s+centered:\s+([\d.-]+)\s+\|\s+time:\s+([\d.]+)s",
+        re.DOTALL
     )
     core_pattern = re.compile(r"(?:CORE|STEM) metric:\s+([\d.-]+)")
 
     with open(path) as f:
-        for line in f:
-            m = task_pattern.search(line)
-            if m:
-                label, acc, centered, elapsed = m.groups()
-                info["tasks"][label] = {
-                    "accuracy": float(acc),
-                    "centered": float(centered),
-                    "time": float(elapsed),
-                }
+        content = f.read()
 
-            m = core_pattern.search(line)
-            if m:
-                info["core_metric"] = float(m.group(1))
+    for m in task_pattern.finditer(content):
+        label, acc, centered, elapsed = m.groups()
+        info["tasks"][label] = {
+            "accuracy": float(acc),
+            "centered": float(centered),
+            "time": float(elapsed),
+        }
+
+    for line in content.splitlines():
+        m = core_pattern.search(line)
+        if m:
+            info["core_metric"] = float(m.group(1))
 
     return info
 
