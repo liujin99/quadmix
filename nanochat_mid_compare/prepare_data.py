@@ -548,8 +548,8 @@ def select_manual_ratio(prep_files, domain_candidates, manual_ratio_map, domain_
 
 def main():
     parser = argparse.ArgumentParser(description="Prepare comparison datasets for nanochat mid-training")
-    parser.add_argument("--quadmix-sampled-data", type=str, required=True,
-                        help="Path to QuadMix sampled_dataset.parquet")
+    parser.add_argument("--quadmix-sampled-data", type=str, default=None,
+                        help="Path to QuadMix sampled_dataset.parquet (optional — skip QuadMix baseline if not provided)")
     parser.add_argument("--preprocessed-data-dir", type=str, required=True,
                         help="Path to source shards directory")
     parser.add_argument("--output-dir", type=str, required=True,
@@ -624,6 +624,10 @@ def main():
     do_quality = len(quality_methods) > 0
     do_manual_ratio = manual_ratio_map is not None
     skip_random = os.environ.get("SKIP_RANDOM") == "1"
+    skip_quadmix = args.quadmix_sampled_data is None
+    if skip_quadmix and (args.data_ratio is None or args.num_scaling_params is None):
+        print("ERROR: --data-ratio and --num-scaling-params are required when --quadmix-sampled-data is not provided")
+        sys.exit(1)
 
     if not os.path.isdir(args.preprocessed_data_dir):
         print(f"ERROR: Source directory not found: {args.preprocessed_data_dir}")
@@ -634,7 +638,8 @@ def main():
     random_dir = output_dir / "random_data"
     manual_ratio_dir = output_dir / "manual_ratio_data" if do_manual_ratio else None
     quality_dirs = {}
-    quadmix_dir.mkdir(parents=True, exist_ok=True)
+    if not skip_quadmix:
+        quadmix_dir.mkdir(parents=True, exist_ok=True)
     if not skip_random:
         random_dir.mkdir(parents=True, exist_ok=True)
     if do_manual_ratio:
@@ -645,8 +650,10 @@ def main():
             qd.mkdir(parents=True, exist_ok=True)
             quality_dirs[m] = qd
 
-    baselines = ["quadmix"]
-    if os.environ.get("SKIP_RANDOM") != "1":
+    baselines = []
+    if not skip_quadmix:
+        baselines.append("quadmix")
+    if not skip_random:
         baselines.append("random")
     if do_manual_ratio:
         baselines.append("manual_ratio")
@@ -676,71 +683,78 @@ def main():
             print(f"  Quality method: {m} ({QUALITY_SCORE_MAP[m]})")
 
     print(f"\n[1] Reading QuadMix selected dataset...")
-    quadmix_table = pq.read_table(args.quadmix_sampled_data, columns=["text"])
-    texts = quadmix_table["text"].to_pylist()
-    del quadmix_table
-    max_chars = args.max_chars
-    max_char_repeat_ratio = args.max_char_repeat_ratio
-    num_workers = args.num_workers or min(mp.cpu_count(), 256) or 1
-    chunk_size = max(1, len(texts) // (num_workers * 4))
-    chunks = [texts[i:i + chunk_size] for i in range(0, len(texts), chunk_size)]
-    filter_tasks = [(c, max_chars, max_char_repeat_ratio) for c in chunks]
-    valid_texts = []
-    n_empty = 0
-    n_too_long = 0
-    n_repeat = 0
-    pool = _get_io_pool(num_workers)
-    for valid, ne, tl, tr in tqdm(
-        pool.imap_unordered(_filter_docs_chunk, filter_tasks, chunksize=1),
-        total=len(filter_tasks),
-        desc=f"  Filtering QuadMix docs ({num_workers} processes)",
-        file=sys.stdout, mininterval=1.0,
-    ):
-        valid_texts.extend(valid)
-        n_empty += ne
-        n_too_long += tl
-        n_repeat += tr
-    n_filtered = n_empty + n_too_long + n_repeat
-    if n_filtered > 0:
-        print(f"  Filtered {n_empty:,} docs (empty), "
-              f"{n_too_long:,} docs (>{max_chars:,} chars), "
-              f"{n_repeat:,} docs (single char >{max_char_repeat_ratio*100:.0f}% repetition)")
-    print(f"  Counting tokens for {len(valid_texts):,} docs...")
-    if enc and args.tokenizer_pkl:
-        token_counts = count_tokens_mp(valid_texts, args.tokenizer_pkl, num_workers=args.num_workers)
+    if not skip_quadmix:
+        quadmix_table = pq.read_table(args.quadmix_sampled_data, columns=["text"])
+        texts = quadmix_table["text"].to_pylist()
+        del quadmix_table
+        max_chars = args.max_chars
+        max_char_repeat_ratio = args.max_char_repeat_ratio
+        num_workers = args.num_workers or min(mp.cpu_count(), 256) or 1
+        chunk_size = max(1, len(texts) // (num_workers * 4))
+        chunks = [texts[i:i + chunk_size] for i in range(0, len(texts), chunk_size)]
+        filter_tasks = [(c, max_chars, max_char_repeat_ratio) for c in chunks]
+        valid_texts = []
+        n_empty = 0
+        n_too_long = 0
+        n_repeat = 0
+        pool = _get_io_pool(num_workers)
+        for valid, ne, tl, tr in tqdm(
+            pool.imap_unordered(_filter_docs_chunk, filter_tasks, chunksize=1),
+            total=len(filter_tasks),
+            desc=f"  Filtering QuadMix docs ({num_workers} processes)",
+            file=sys.stdout, mininterval=1.0,
+        ):
+            valid_texts.extend(valid)
+            n_empty += ne
+            n_too_long += tl
+            n_repeat += tr
+        n_filtered = n_empty + n_too_long + n_repeat
+        if n_filtered > 0:
+            print(f"  Filtered {n_empty:,} docs (empty), "
+                  f"{n_too_long:,} docs (>{max_chars:,} chars), "
+                  f"{n_repeat:,} docs (single char >{max_char_repeat_ratio*100:.0f}% repetition)")
+        print(f"  Counting tokens for {len(valid_texts):,} docs...")
+        if enc and args.tokenizer_pkl:
+            token_counts = count_tokens_mp(valid_texts, args.tokenizer_pkl, num_workers=args.num_workers)
+        else:
+            token_counts = [estimate_tokens(t) for t in valid_texts]
+        quadmix_docs = [
+            {"text": t, "token_count": tc}
+            for t, tc in zip(valid_texts, token_counts)
+        ]
+        quadmix_total_tokens = sum(token_counts)
+
+        del texts, valid_texts, token_counts
+        gc.collect()
+
+        print(f"  QuadMix docs: {len(quadmix_docs):,}")
+        print(f"  QuadMix total tokens ({token_method}): {quadmix_total_tokens:,}")
+
+        if args.data_ratio is not None and args.num_scaling_params is not None:
+            target_tokens = int(args.data_ratio * args.num_scaling_params)
+            budget_cap = int(target_tokens * 1.1)
+            print(f"\n  Token budget: target={target_tokens:,}, "
+                  f"quadmix_total={quadmix_total_tokens:,}, "
+                  f"budget_cap={budget_cap:,}")
+        else:
+            budget_cap = int(quadmix_total_tokens * 1.1)
+            target_tokens = quadmix_total_tokens
+            print(f"\n  Token budget: no data-ratio specified, using quadmix_total={quadmix_total_tokens:,} "
+                  f"x 1.1 = {budget_cap:,}")
+
+        random.shuffle(quadmix_docs)
+        if sum(d["token_count"] for d in quadmix_docs) > budget_cap:
+            quadmix_docs, quadmix_actual_tokens = trim_docs_to_target(quadmix_docs, budget_cap)
+            print(f"  QuadMix capped to budget: {len(quadmix_docs):,} docs, {quadmix_actual_tokens:,} tokens")
+        else:
+            quadmix_actual_tokens = sum(d["token_count"] for d in quadmix_docs)
+            print(f"  QuadMix within budget: {len(quadmix_docs):,} docs, {quadmix_actual_tokens:,} tokens")
     else:
-        token_counts = [estimate_tokens(t) for t in valid_texts]
-    quadmix_docs = [
-        {"text": t, "token_count": tc}
-        for t, tc in zip(valid_texts, token_counts)
-    ]
-    quadmix_total_tokens = sum(token_counts)
-
-    del texts, valid_texts, token_counts
-    gc.collect()
-
-    print(f"  QuadMix docs: {len(quadmix_docs):,}")
-    print(f"  QuadMix total tokens ({token_method}): {quadmix_total_tokens:,}")
-
-    if args.data_ratio is not None and args.num_scaling_params is not None:
+        quadmix_docs = []
         target_tokens = int(args.data_ratio * args.num_scaling_params)
         budget_cap = int(target_tokens * 1.1)
-        print(f"\n  Token budget: target={target_tokens:,}, "
-              f"quadmix_total={quadmix_total_tokens:,}, "
-              f"budget_cap={budget_cap:,}")
-    else:
-        budget_cap = int(quadmix_total_tokens * 1.1)
-        target_tokens = quadmix_total_tokens
-        print(f"\n  Token budget: no data-ratio specified, using quadmix_total={quadmix_total_tokens:,} "
-              f"x 1.1 = {budget_cap:,}")
-
-    random.shuffle(quadmix_docs)
-    if sum(d["token_count"] for d in quadmix_docs) > budget_cap:
-        quadmix_docs, quadmix_actual_tokens = trim_docs_to_target(quadmix_docs, budget_cap)
-        print(f"  QuadMix capped to budget: {len(quadmix_docs):,} docs, {quadmix_actual_tokens:,} tokens")
-    else:
-        quadmix_actual_tokens = sum(d["token_count"] for d in quadmix_docs)
-        print(f"  QuadMix within budget: {len(quadmix_docs):,} docs, {quadmix_actual_tokens:,} tokens")
+        print(f"  QuadMix skipped (no --quadmix-sampled-data provided)")
+        print(f"\n  Token budget: target={target_tokens:,}, budget_cap={budget_cap:,}")
 
     print(f"\n[2] Scanning source shards metadata...")
     prep_files, prep_metadata = scan_shards(
@@ -883,7 +897,8 @@ def main():
         quality_trains[m] = qt
         quality_vals[m] = qv
 
-    print(f"  QuadMix train: {len(quadmix_train):,}, val: {len(quadmix_val):,}")
+    if not skip_quadmix:
+        print(f"  QuadMix train: {len(quadmix_train):,}, val: {len(quadmix_val):,}")
     print(f"  Random  train: {len(random_train):,}, val: {len(random_val):,}")
     if manual_ratio_train:
         print(f"  Manual Ratio train: {len(manual_ratio_train):,}, val: {len(manual_ratio_val):,}")
@@ -910,7 +925,8 @@ def main():
         val_label = f"{len(val_docs)} val" if val_docs and len(val_docs) > 0 else "1 dummy val"
         print(f"  {name}: {n_shards} train shards + {val_label} -> {data_dir}")
 
-    write_dataset(quadmix_train, quadmix_dir, "QuadMix", quadmix_val)
+    if not skip_quadmix:
+        write_dataset(quadmix_train, quadmix_dir, "QuadMix", quadmix_val)
     if not skip_random:
         write_dataset(random_train, random_dir, "Random", random_val)
     if do_manual_ratio:
@@ -919,12 +935,6 @@ def main():
         write_dataset(qt, quality_dirs[m], f"Quality ({m})", quality_vals[m])
 
     stats = {
-        "quadmix": {
-            "train_docs": len(quadmix_train),
-            "val_docs": len(quadmix_val),
-            "tokens": sum(d["token_count"] for d in quadmix_train),
-            "shards": max(1, (len(quadmix_train) + args.shard_size - 1) // args.shard_size),
-        },
         "config": {
             "seed": args.seed,
             "shard_size": args.shard_size,
@@ -940,6 +950,13 @@ def main():
             "text_col": text_col,
         }
     }
+    if not skip_quadmix:
+        stats["quadmix"] = {
+            "train_docs": len(quadmix_train),
+            "val_docs": len(quadmix_val),
+            "tokens": sum(d["token_count"] for d in quadmix_train),
+            "shards": max(1, (len(quadmix_train) + args.shard_size - 1) // args.shard_size),
+        }
     if not skip_random:
         stats["random"] = {
             "train_docs": len(random_train),
@@ -983,7 +1000,8 @@ def main():
 
     print("\n" + "=" * 60)
     print(f"  Done! {len(baselines)} datasets ready for nanochat mid-training:")
-    print(f"    QuadMix: {quadmix_dir}")
+    if not skip_quadmix:
+        print(f"    QuadMix: {quadmix_dir}")
     if not skip_random:
         print(f"    Random:  {random_dir}")
     if do_manual_ratio:
