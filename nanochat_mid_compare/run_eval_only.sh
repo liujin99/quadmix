@@ -131,6 +131,7 @@ if [ ! -e "$LINK_DIR" ]; then
     echo "  Creating symlink: $LINK_DIR -> $BASE_CKPT_DIR"
     ln -s "$BASE_CKPT_DIR" "$LINK_DIR"
 fi
+trap 'if [ -L "$LINK_DIR" ]; then rm "$LINK_DIR"; fi' EXIT
 
 # ══════════════════════════════════════════════════════════════
 #  EVALUATION
@@ -151,12 +152,8 @@ python3 -m torch.distributed.run --standalone --nproc_per_node="$NUM_NPU" -m scr
     2>&1 | tee "$EVAL_LOG"
 popd > /dev/null
 
-if [ -L "$LINK_DIR" ]; then
-    rm "$LINK_DIR"
-fi
-
 echo ""
-echo "╚════════════════════════════════════╝"
+echo "╚═══════════════════════════════════════════════════════════╝"
 echo ""
 
 # ══════════════════════════════════════════════════════════════
@@ -178,7 +175,7 @@ def parse_eval(path):
     if not path or not os.path.exists(path):
         return info
     task_pat = re.compile(r'Evaluating:\s+(.+?)\s+\(.*?\)\.\.\.\s+accuracy:\s+([\d.]+)\s+\|\s+centered:\s+([\d.-]+)\s+\|\s+time:\s+([\d.]+)s')
-    core_pat = re.compile(r'CORE metric:\s+([\d.]+)')
+    core_pat = re.compile(r'(?:CORE|STEM) metric:\s+([\d.]+)')
     for line in open(path):
         m = task_pat.search(line)
         if m:

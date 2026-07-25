@@ -192,7 +192,7 @@ def generate_report(args):
 
     ref_b = baselines[1] if len(baselines) > 1 else baselines[0]
     ref_core = core_vals.get(ref_b)
-    if core_vals.get(baselines[0]) is not None and ref_core is not None:
+    if len(baselines) > 1 and core_vals.get(baselines[0]) is not None and ref_core is not None:
         lines.append("### Pairwise Deltas")
         lines.append("")
         lines.append("| Comparison | Delta | % |")

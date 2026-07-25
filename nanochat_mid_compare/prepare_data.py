@@ -507,6 +507,17 @@ def select_manual_ratio(prep_files, domain_candidates, manual_ratio_map, domain_
 
     print(f"  Total manual-ratio selected: {len(mr_selected):,} docs, ~{mr_est_tokens:,} est tokens")
 
+    shortfall_threshold = 0.9
+    if mr_est_tokens < total_tokens * shortfall_threshold:
+        detail = []
+        for domain_id, budget in domain_budgets.items():
+            count = domain_selected_counts.get(domain_id, 0)
+            detail.append(f"  domain_id={domain_id}: selected={count:,} docs, budget={int(budget):,} est tokens")
+        raise ValueError(
+            f"Manual Ratio total tokens ({mr_est_tokens:,}) < {shortfall_threshold*100:.0f}% of budget "
+            f"({total_tokens:,}). Insufficient documents in one or more domains:\n" + "\n".join(detail)
+        )
+
     mr_docs = read_docs_from_shards(
         prep_files, mr_selected, num_workers=num_workers,
         desc=f"  Reading manual-ratio docs ({num_workers or 'auto'} processes)", text_col=text_col,
@@ -612,6 +623,7 @@ def main():
             sys.exit(1)
     do_quality = len(quality_methods) > 0
     do_manual_ratio = manual_ratio_map is not None
+    skip_random = os.environ.get("SKIP_RANDOM") == "1"
 
     if not os.path.isdir(args.preprocessed_data_dir):
         print(f"ERROR: Source directory not found: {args.preprocessed_data_dir}")
@@ -623,7 +635,8 @@ def main():
     manual_ratio_dir = output_dir / "manual_ratio_data" if do_manual_ratio else None
     quality_dirs = {}
     quadmix_dir.mkdir(parents=True, exist_ok=True)
-    random_dir.mkdir(parents=True, exist_ok=True)
+    if not skip_random:
+        random_dir.mkdir(parents=True, exist_ok=True)
     if do_manual_ratio:
         manual_ratio_dir.mkdir(parents=True, exist_ok=True)
     if do_quality:
@@ -662,7 +675,7 @@ def main():
         for m in quality_methods:
             print(f"  Quality method: {m} ({QUALITY_SCORE_MAP[m]})")
 
-    print(f"\n[1/N] Reading QuadMix selected dataset...")
+    print(f"\n[1] Reading QuadMix selected dataset...")
     quadmix_table = pq.read_table(args.quadmix_sampled_data, columns=["text"])
     texts = quadmix_table["text"].to_pylist()
     del quadmix_table
@@ -729,7 +742,7 @@ def main():
         quadmix_actual_tokens = sum(d["token_count"] for d in quadmix_docs)
         print(f"  QuadMix within budget: {len(quadmix_docs):,} docs, {quadmix_actual_tokens:,} tokens")
 
-    print(f"\n[2/N] Scanning source shards metadata...")
+    print(f"\n[2] Scanning source shards metadata...")
     prep_files, prep_metadata = scan_shards(
         args.preprocessed_data_dir, file_pattern,
         domain_col=domain_col, domain_names=domain_names,
@@ -761,48 +774,55 @@ def main():
                 all_est_tokens[mask].copy(),
             )
 
-    print(f"\n[3/N] Random sampling (target: {budget_cap:,} tokens)...")
-    perm = np.random.permutation(len(all_doc_ids))
-    shuffled_est_tokens = all_est_tokens[perm]
-    cumsum = np.cumsum(shuffled_est_tokens)
-    if budget_cap <= 0 or len(cumsum) == 0:
-        cutoff = 0
-    else:
-        cutoff = min(int(np.searchsorted(cumsum, budget_cap, side='left')) + 1, len(all_doc_ids))
-    selected = list(zip(
-        all_shard_ids[perm[:cutoff]].tolist(),
-        all_doc_ids[perm[:cutoff]].tolist(),
-    ))
-    accumulated_tokens = int(cumsum[cutoff - 1]) if cutoff > 0 else 0
-    print(f"  Selected {len(selected):,} docs (estimated ~{accumulated_tokens:,} tokens)")
+    random_docs = []
+    random_actual_tokens = 0
+    if not skip_random:
+        print(f"\n[3] Random sampling (target: {budget_cap:,} tokens)...")
+        perm = np.random.permutation(len(all_doc_ids))
+        shuffled_est_tokens = all_est_tokens[perm]
+        cumsum = np.cumsum(shuffled_est_tokens)
+        if budget_cap <= 0 or len(cumsum) == 0:
+            cutoff = 0
+        else:
+            cutoff = min(int(np.searchsorted(cumsum, budget_cap, side='left')) + 1, len(all_doc_ids))
+        selected = list(zip(
+            all_shard_ids[perm[:cutoff]].tolist(),
+            all_doc_ids[perm[:cutoff]].tolist(),
+        ))
+        accumulated_tokens = int(cumsum[cutoff - 1]) if cutoff > 0 else 0
+        print(f"  Selected {len(selected):,} docs (estimated ~{accumulated_tokens:,} tokens)")
 
-    print(f"\n  Reading selected documents...")
-    random_docs = read_docs_from_shards(prep_files, selected, num_workers=args.num_workers,
-                                         desc=f"  Reading random docs ({args.num_workers or 'auto'} processes)",
-                                         text_col=text_col,
-                                         max_char_repeat_ratio=args.max_char_repeat_ratio)
+        print(f"\n  Reading selected documents...")
+        random_docs = read_docs_from_shards(prep_files, selected, num_workers=args.num_workers,
+                                             desc=f"  Reading random docs ({args.num_workers or 'auto'} processes)",
+                                             text_col=text_col,
+                                             max_char_repeat_ratio=args.max_char_repeat_ratio)
 
-    if enc and args.tokenizer_pkl:
-        print(f"  Re-counting tokens for {len(random_docs):,} docs (exact)...")
-        random_texts = [d["text"] for d in random_docs]
-        exact_counts = count_tokens_mp(random_texts, args.tokenizer_pkl, num_workers=args.num_workers)
-        for doc, tc in zip(random_docs, exact_counts):
-            doc["token_count"] = tc
-        del random_texts, exact_counts
+        if enc and args.tokenizer_pkl:
+            print(f"  Re-counting tokens for {len(random_docs):,} docs (exact)...")
+            random_texts = [d["text"] for d in random_docs]
+            exact_counts = count_tokens_mp(random_texts, args.tokenizer_pkl, num_workers=args.num_workers)
+            for doc, tc in zip(random_docs, exact_counts):
+                doc["token_count"] = tc
+            del random_texts, exact_counts
+            gc.collect()
+            accumulated_tokens = sum(d["token_count"] for d in random_docs)
+            print(f"  Exact tokens before trim: {accumulated_tokens:,} (target: {budget_cap:,})")
+            if accumulated_tokens > budget_cap:
+                n_before = len(random_docs)
+                random_docs, accumulated_tokens = trim_docs_to_target(random_docs, budget_cap)
+                print(f"  Trimmed {n_before - len(random_docs):,} docs to match target")
+
+        random_actual_tokens = sum(d["token_count"] for d in random_docs)
+        del all_doc_ids, all_char_counts, all_domain_vals, all_shard_ids, all_est_tokens, selected
         gc.collect()
-        accumulated_tokens = sum(d["token_count"] for d in random_docs)
-        print(f"  Exact tokens before trim: {accumulated_tokens:,} (target: {budget_cap:,})")
-        if accumulated_tokens > budget_cap:
-            n_before = len(random_docs)
-            random_docs, accumulated_tokens = trim_docs_to_target(random_docs, budget_cap)
-            print(f"  Trimmed {n_before - len(random_docs):,} docs to match target")
 
-    random_actual_tokens = sum(d["token_count"] for d in random_docs)
-    del all_doc_ids, all_char_counts, all_domain_vals, all_shard_ids, all_est_tokens, selected
-    gc.collect()
-
-    print(f"  Random docs: {len(random_docs):,}")
-    print(f"  Random tokens ({token_method}): {random_actual_tokens:,}")
+        print(f"  Random docs: {len(random_docs):,}")
+        print(f"  Random tokens ({token_method}): {random_actual_tokens:,}")
+    else:
+        print("\n[3] Random sampling skipped (SKIP_RANDOM=1)")
+        del all_doc_ids, all_char_counts, all_domain_vals, all_shard_ids, all_est_tokens
+        gc.collect()
 
     manual_ratio_docs = None
     manual_ratio_tokens = 0
@@ -810,7 +830,7 @@ def main():
     if do_manual_ratio:
         mr_label_parts = [f"{d}={r}" for d, r in sorted(manual_ratio_map.items())]
         manual_ratio_label = "Manual Ratio (" + ", ".join(mr_label_parts) + ")"
-        print(f"\n[4/N] Manual Ratio sampling ({manual_ratio_label})...")
+        print(f"\n[4] Manual Ratio sampling ({manual_ratio_label})...")
         manual_ratio_docs, manual_ratio_tokens = select_manual_ratio(
             prep_files, domain_candidates, manual_ratio_map, domain_names,
             budget_cap, tokenizer_pkl=args.tokenizer_pkl,
@@ -821,7 +841,7 @@ def main():
     step_num = 5 if do_manual_ratio else 4
     if do_quality:
         for mi, method in enumerate(quality_methods):
-            print(f"\n[{step_num}.{mi+1}/N] Quality-Only Top-K selection ({method})...")
+            print(f"\n[{step_num}.{mi+1}] Quality-Only Top-K selection ({method})...")
             q_docs, q_tokens = select_quality_topk(
                 prep_files, prep_metadata, method, budget_cap,
                 tokenizer_pkl=args.tokenizer_pkl, num_workers=args.num_workers, enc=enc,
@@ -830,7 +850,7 @@ def main():
             quality_datasets[method] = (q_docs, q_tokens)
     else:
         if not do_manual_ratio:
-            print(f"\n[{step_num}/N] Quality baseline skipped")
+            print(f"\n[{step_num}] Quality baseline skipped")
 
     qm_count = len(quadmix_docs)
     rd_count = len(random_docs)
@@ -838,7 +858,7 @@ def main():
     print(f"  Docs: {qm_count:,} quadmix + {rd_count:,} random + {mr_count:,} manual_ratio")
 
     step_num = (6 if do_manual_ratio else 5) if do_quality else (5 if do_manual_ratio else 4)
-    print(f"\n[{step_num}/N] Splitting train/val (val_ratio={args.val_ratio})...")
+    print(f"\n[{step_num}] Splitting train/val (val_ratio={args.val_ratio})...")
 
     random.shuffle(quadmix_docs)
     random.shuffle(random_docs)
@@ -871,7 +891,7 @@ def main():
         print(f"  Quality ({m}) train: {len(qt):,}, val: {len(quality_vals[m]):,}")
 
     final_step = step_num + 1
-    print(f"\n[{final_step}/N] Writing sharded parquet files...")
+    print(f"\n[{final_step}] Writing sharded parquet files...")
 
     def write_dataset(docs, data_dir, name, val_docs=None):
         n_shards = max(1, (len(docs) + args.shard_size - 1) // args.shard_size)
@@ -891,7 +911,8 @@ def main():
         print(f"  {name}: {n_shards} train shards + {val_label} -> {data_dir}")
 
     write_dataset(quadmix_train, quadmix_dir, "QuadMix", quadmix_val)
-    write_dataset(random_train, random_dir, "Random", random_val)
+    if not skip_random:
+        write_dataset(random_train, random_dir, "Random", random_val)
     if do_manual_ratio:
         write_dataset(manual_ratio_train, manual_ratio_dir, manual_ratio_label, manual_ratio_val)
     for m, qt in quality_trains.items():
@@ -903,12 +924,6 @@ def main():
             "val_docs": len(quadmix_val),
             "tokens": sum(d["token_count"] for d in quadmix_train),
             "shards": max(1, (len(quadmix_train) + args.shard_size - 1) // args.shard_size),
-        },
-        "random": {
-            "train_docs": len(random_train),
-            "val_docs": len(random_val),
-            "tokens": sum(d["token_count"] for d in random_train),
-            "shards": max(1, (len(random_train) + args.shard_size - 1) // args.shard_size),
         },
         "config": {
             "seed": args.seed,
@@ -925,6 +940,13 @@ def main():
             "text_col": text_col,
         }
     }
+    if not skip_random:
+        stats["random"] = {
+            "train_docs": len(random_train),
+            "val_docs": len(random_val),
+            "tokens": sum(d["token_count"] for d in random_train),
+            "shards": max(1, (len(random_train) + args.shard_size - 1) // args.shard_size),
+        }
     if args.data_ratio is not None:
         stats["config"]["data_ratio"] = args.data_ratio
         stats["config"]["num_scaling_params"] = args.num_scaling_params
@@ -962,7 +984,8 @@ def main():
     print("\n" + "=" * 60)
     print(f"  Done! {len(baselines)} datasets ready for nanochat mid-training:")
     print(f"    QuadMix: {quadmix_dir}")
-    print(f"    Random:  {random_dir}")
+    if not skip_random:
+        print(f"    Random:  {random_dir}")
     if do_manual_ratio:
         print(f"    Manual Ratio: {manual_ratio_dir}")
     for m in quality_datasets:

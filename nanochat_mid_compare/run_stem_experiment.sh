@@ -458,6 +458,11 @@ run_mid_training() {
     local DATASET_TOKENS="$5"
     local TRAIN_TOKENS="$6"
 
+    if [ ! -d "$DATA_PATH" ]; then
+        echo "    ERROR: Data directory does not exist: $DATA_PATH"
+        return 1
+    fi
+
     local NUM_ITERATIONS=$(( (TRAIN_TOKENS + CKPT_TOTAL_BATCH_SIZE - 1) / CKPT_TOTAL_BATCH_SIZE ))
 
     echo "  Starting mid-training: $RUN_NAME"

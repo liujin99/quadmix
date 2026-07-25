@@ -238,6 +238,11 @@ fi
 
 QUADMIX_DATA="$DATA_DIR/quadmix_data"
 
+if [ ! -d "$QUADMIX_DATA" ]; then
+    echo "  ERROR: QuadMix data directory not found: $QUADMIX_DATA"
+    exit 1
+fi
+
 DATA_DIR="$DATA_DIR" BASE_MODEL_TAG="$BASE_MODEL_TAG" \
 TARGET_PARAM_DATA_RATIO="$TARGET_PARAM_DATA_RATIO" \
 NUM_SCALING_PARAMS="$NUM_SCALING_PARAMS" \
@@ -421,6 +426,44 @@ echo "╚═══════════════════════�
 echo ""
 
 # ══════════════════════════════════════════════════════════════
+#  PRE-FLIGHT: DISK SPACE CHECK
+# ══════════════════════════════════════════════════════════════
+
+echo ""
+echo "╔══ Pre-flight: Disk space check ══╗"
+echo ""
+
+CKPT_DIR="${MID_CHECKPOINTS_OUTPUT_DIR}"
+mkdir -p "$CKPT_DIR"
+
+AVAILABLE_KB=$(df -P "$CKPT_DIR" | awk 'NR==2{print $4}')
+AVAILABLE_GB=$((AVAILABLE_KB / 1024 / 1024))
+MIN_REQUIRED_GB=20
+
+echo "  Checkpoint dir:  $CKPT_DIR"
+echo "  Available space: ${AVAILABLE_GB}GB"
+echo "  Minimum needed:  ${MIN_REQUIRED_GB}GB (1 training × ~20GB/ckpt)"
+
+if [ "$AVAILABLE_GB" -lt "$MIN_REQUIRED_GB" ]; then
+    echo ""
+    echo "  ERROR: Insufficient disk space!"
+    echo "  Available: ${AVAILABLE_GB}GB < Required: ${MIN_REQUIRED_GB}GB"
+    echo ""
+    echo "  Options:"
+    echo "    1. Set MID_CHECKPOINTS_OUTPUT_DIR to a partition with more space:"
+    echo "       MID_CHECKPOINTS_OUTPUT_DIR=/path/to/larger/disk bash nanochat_mid_compare/run_quadmix_only.sh"
+    echo "    2. Free up space on the current partition"
+    echo ""
+    echo "╚══════════════════════════════════════════════════════════╝"
+    exit 1
+fi
+
+echo "  ✓ Disk space sufficient"
+echo ""
+echo "╚══════════════════════════════════════════════════════════╝"
+echo ""
+
+# ══════════════════════════════════════════════════════════════
 #  MID-TRAINING
 # ══════════════════════════════════════════════════════════════
 
@@ -452,7 +495,7 @@ if [ ! -e "$LINK_DIR" ]; then
     ln -s "$BASE_CKPT_DIR" "$LINK_DIR"
 fi
 
-trap 'if [ -L "$LINK_DIR" ]; then echo "  Cleaning up symlink on exit: $LINK_DIR"; rm "$LINK_DIR"; fi' RETURN
+trap 'if [ -L "$LINK_DIR" ]; then echo "  Cleaning up symlink on exit: $LINK_DIR"; rm "$LINK_DIR"; fi' EXIT
 
 pushd "$NANOCHAT_REPO" > /dev/null
 python3 -m torch.distributed.run --standalone --nproc_per_node="$NUM_NPU" -m scripts.mid_train -- \

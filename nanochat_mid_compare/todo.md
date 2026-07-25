@@ -54,3 +54,29 @@
 | 29 | P2 | `prepare_data.py` L830-867 temp 文件写/读无意义 (1.5T RAM) | prepare_data.py | 删除 temp write/read 块 |
 | 30 | P2 | `run_mid_training()` 重复读 `total_batch_size` (已有 `CKPT_TOTAL_BATCH_SIZE`) | run_stem_experiment.sh, run_experiment.sh, run_quadmix_only.sh, continue_experiment.sh | 使用全局 `CKPT_TOTAL_BATCH_SIZE` |
 | 31 | P2 | `--eval-benchmarks` 未传给 `mid_train.py` | run_stem_experiment.sh, run_experiment.sh | 加 `--eval-benchmarks` 参数 |
+
+---
+
+## 第三轮审查 (issues 32-43)
+
+### 待修复
+
+| # | 优先级 | 问题 | 位置 | 修复方式 |
+|---|--------|------|------|----------|
+| 42 | P3 | eval `--device-batch-size` 不一致：`run_experiment.sh`=32, STEM 脚本=16（同机器同 NPU 数，可能是 benchmark 差异） | run_experiment.sh L593, run_stem_*.sh L573/557 | 文档化或统一（低优先级，可能有意） |
+| 43 | P3 | NPU 环境变量在 6+ 脚本中完全重复，维护负担大 | 所有 .sh 脚本 | 提取到 `npu_env.sh`，各脚本 `source` 引用 |
+
+### 已修复
+
+| # | 优先级 | 问题 | 修复文件 | 修复方式 |
+|---|--------|------|----------|----------|
+| 32 | P0 | `SKIP_RANDOM=1` 只从 baselines 列表移除 "random"，但 random 数据仍完整准备（采样/tokenize/写盘/stats），浪费时间和磁盘 | prepare_data.py | 加 `skip_random` 变量，guard random 目录创建、采样块、write_dataset、stats、print；else 分支 del+gc |
+| 33 | P0 | `run_quadmix_only.sh` `trap ... RETURN` 在脚本顶层（非函数内）永远不触发，symlink 永不清理 | run_quadmix_only.sh | `RETURN` → `EXIT` |
+| 34 | P0 | `run_eval_only.sh` 无任何 trap，eval 崩溃时 symlink 残留 | run_eval_only.sh | 加 `trap '...' EXIT`，删除手动 cleanup |
+| 35 | P0 | `run_eval_only.sh` 内联 report regex 只匹配 `CORE metric:`，STEM 评估显示 `N/A` | run_eval_only.sh | `r'CORE metric:'` → `r'(?:CORE|STEM) metric:'` |
+| 36 | P1 | 训练前不检查数据目录是否存在 | run_stem_experiment.sh, run_stem_quadmix_vs_manual.sh, run_experiment.sh, continue_experiment.sh | `run_mid_training()` 内加 `[ -d "$DATA_PATH" ]` 检查；run_quadmix_only.sh 加 `[ -d "$QUADMIX_DATA" ]` |
+| 37 | P1 | `continue_experiment.sh` 只检查 eval log 文件是否存在，不验证 log 是否包含完整 `core_metric` | continue_experiment.sh L374-395 | 加 `grep -qE '(CORE|STEM) metric:'` 完整性检查 |
+| 38 | P1 | Manual Ratio 某域候选文档不足时总 tokens 远低于 `budget_cap`，训练仍用 `BUDGET_CAP` 算 iterations 导致多 epoch 过拟合 | prepare_data.py select_manual_ratio | `mr_est_tokens < total_tokens * 0.9` 时 `raise ValueError`，含每域详情 |
+| 39 | P2 | `run_quadmix_only.sh` 缺少磁盘空间检查（其他脚本都有） | run_quadmix_only.sh | 加 pre-flight 磁盘检查（20GB 阈值，1 training） |
+| 40 | P3 | `generate_report.py` 单 baseline 时打印空的 "Pairwise Deltas" 表头 | generate_report.py L195 | 加 `len(baselines) > 1 and` 条件 |
+| 41 | P3 | `prepare_data.py` 步骤号 `[1/N]` 但 N 从未计算 | prepare_data.py 7 处 | `/N]` → `]`（去掉 /N） |

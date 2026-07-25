@@ -224,6 +224,10 @@ run_mid_training() {
     local DATASET_TOKENS="$5"
     local TRAIN_TOKENS="$6"
 
+    if [ ! -d "$DATA_PATH" ]; then
+        echo "    ERROR: Data directory does not exist: $DATA_PATH"
+        return 1
+    fi
     local TOTAL_BATCH_SIZE="${CKPT_TOTAL_BATCH_SIZE:-524288}"
     local NUM_ITERATIONS=$(( (TRAIN_TOKENS + TOTAL_BATCH_SIZE - 1) / TOTAL_BATCH_SIZE ))
 
@@ -371,15 +375,15 @@ echo "╔══ Step 2: Evaluation ══╗"
 echo ""
 
 QUADMIX_EVAL_LOG="$RESULT_DIR/eval_quadmix.log"
-if [ -f "$QUADMIX_EVAL_LOG" ]; then
-    echo "  Skipping QuadMix eval (log already exists: $QUADMIX_EVAL_LOG)"
+if [ -f "$QUADMIX_EVAL_LOG" ] && grep -qE '(CORE|STEM) metric:' "$QUADMIX_EVAL_LOG"; then
+    echo "  Skipping QuadMix eval (log already exists and is complete: $QUADMIX_EVAL_LOG)"
 else
     run_eval "$QUADMIX_MODEL_TAG" "mid" "$QUADMIX_EVAL_LOG"
 fi
 
 RANDOM_EVAL_LOG="$RESULT_DIR/eval_random.log"
-if [ -f "$RANDOM_EVAL_LOG" ]; then
-    echo "  Skipping Random eval (log already exists: $RANDOM_EVAL_LOG)"
+if [ -f "$RANDOM_EVAL_LOG" ] && grep -qE '(CORE|STEM) metric:' "$RANDOM_EVAL_LOG"; then
+    echo "  Skipping Random eval (log already exists and is complete: $RANDOM_EVAL_LOG)"
 else
     run_eval "$RANDOM_MODEL_TAG" "mid" "$RANDOM_EVAL_LOG"
 fi
@@ -387,8 +391,8 @@ fi
 for method in "${QUALITY_METHOD_ARRAY[@]}"; do
     QUALITY_MODEL_TAG="${BASE_MODEL_TAG}_quality_${method}_${TIMESTAMP}"
     QUALITY_EVAL_LOG="$RESULT_DIR/eval_quality_${method}.log"
-    if [ -f "$QUALITY_EVAL_LOG" ]; then
-        echo "  Skipping Quality ($method) eval (log already exists: $QUALITY_EVAL_LOG)"
+    if [ -f "$QUALITY_EVAL_LOG" ] && grep -qE '(CORE|STEM) metric:' "$QUALITY_EVAL_LOG"; then
+        echo "  Skipping Quality ($method) eval (log already exists and is complete: $QUALITY_EVAL_LOG)"
     else
         run_eval "$QUALITY_MODEL_TAG" "mid" "$QUALITY_EVAL_LOG"
     fi
