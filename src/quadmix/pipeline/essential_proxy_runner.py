@@ -678,7 +678,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             shm_name, shape, dtype_str = shm_info
             shm = SharedMemory(name=shm_name)
             shm_array = np.ndarray(shape, dtype=np.dtype(dtype_str), buffer=shm.buf)
-            result = torch.from_numpy(shm_array.copy()).long()
+            result = torch.from_numpy(shm_array.copy())
             shm.close()
             print(f"  [TokenLoad] exp {exp_id:04d}: {len(result):,} docs from SharedMemory")
             return result
@@ -688,7 +688,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             if os.path.exists(exp_token_path):
                 print(f"  [TokenLoad] WARNING: exp {exp_id:04d} fallback to temp file, "
                       f"this should not happen after tokenize_all_needed")
-                result = torch.from_numpy(np.load(exp_token_path, mmap_mode='r')).long()
+                result = torch.from_numpy(np.load(exp_token_path, mmap_mode='r').copy())
                 print(f"  [TokenLoad] exp {exp_id:04d}: {len(result):,} docs from temp file")
                 return result
 
