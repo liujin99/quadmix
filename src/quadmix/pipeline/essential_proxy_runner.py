@@ -476,6 +476,59 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             f"exp_{exp_id:04d}_tokens.npy"
         )
 
+    def _pack_exp_tokens_by_shard(
+            self,
+            selected_idx: np.ndarray,
+            exp_id: int,
+            mgr,
+    ) -> np.ndarray:
+        """Pack tokens for one experiment by querying _memory_cache per-shard.
+
+        Replaces the previous global searchsorted + fancy-index approach.
+        Uses stable argsort to restore the original selected_idx ordering after
+        grouping by shard.  parsed_rows in _memory_cache are already sorted
+        ascending + unique (guaranteed by _read_one_shard_texts_with_rows), so
+        searchsorted on cache["rows"] yields exact positions.
+        """
+        shard_ids = np.searchsorted(mgr._shard_starts, selected_idx, side="right") - 1
+        shard_ids = np.clip(shard_ids, 0, mgr._num_shards - 1)
+        orig_order = np.argsort(shard_ids, kind="stable")
+
+        result = np.empty((len(selected_idx), self.block_size), dtype=np.int32)
+
+        ordered_shard_ids = shard_ids[orig_order]
+        unique_sids, starts, counts = np.unique(
+            ordered_shard_ids, return_index=True, return_counts=True)
+
+        for sid, start, cnt in zip(unique_sids, starts, counts):
+            group_pos = orig_order[start:start + cnt]
+            group_global = selected_idx[group_pos]
+            local_rows = group_global - mgr._shard_starts[sid]
+            row_col_vals = mgr.local_to_row_col(sid, local_rows)
+
+            with self._memory_cache_lock:
+                cache = self._memory_cache.get(sid)
+                if cache is None:
+                    raise RuntimeError(
+                        f"[Pack] exp {exp_id} shard {sid}: not in memory cache. "
+                        f"This should not happen after tokenize_all_needed."
+                    )
+                cache_rows = cache["rows"]
+                cache_tokens = cache["tokens"]
+                positions = np.searchsorted(cache_rows, row_col_vals)
+                positions = np.clip(positions, 0, len(cache_rows) - 1)
+                matched = cache_rows[positions] == row_col_vals
+                if not matched.all():
+                    n_missing = int((~matched).sum())
+                    raise RuntimeError(
+                        f"[Pack] exp {exp_id} shard {sid}: {n_missing}/{len(row_col_vals)} "
+                        f"documents not found in tokenized cache. "
+                        f"Check for shard tokenization failures."
+                    )
+                result[group_pos] = cache_tokens[positions]
+
+        return result
+
     def _tokenize_batch_union(
             self,
             batch_selected: List[np.ndarray],
@@ -486,61 +539,6 @@ class EssentialWebProxyRunner(BaseProxyRunner):
     ) -> Dict[int, str]:
         """NPU Parallel Mode: Batch tokenize union miss rows across all experiments."""
         t0 = time.time()
-
-        if hasattr(self, '_global_index') and self._global_index is not None:
-            sorted_global_ids, all_tokens_flat, sort_idx = self._global_index
-
-            exp_token_paths: Dict[int, str] = {}
-            pack_t0 = time.time()
-            n_batch = len(batch_exp_ids)
-
-            print(f"[BatchTokenize] {n_batch} exps, using _global_index "
-                  f"({len(sorted_global_ids):,} docs, skip cache check)")
-
-            for i, (exp_id, selected_idx) in enumerate(zip(batch_exp_ids, batch_selected)):
-                positions = np.searchsorted(sorted_global_ids, selected_idx)
-                positions = np.clip(positions, 0, len(sorted_global_ids) - 1)
-                matched = sorted_global_ids[positions] == selected_idx
-                if not matched.all():
-                    n_missing = int((~matched).sum())
-                    raise RuntimeError(
-                        f"[Pack] Experiment {exp_id}: {n_missing}/{len(selected_idx)} "
-                        f"documents not found in tokenized cache. "
-                        f"Check for shard tokenization failures."
-                    )
-                flat_positions = sort_idx[positions]
-                result = all_tokens_flat[flat_positions]
-
-                if shm_store is not None:
-                    from multiprocessing.shared_memory import SharedMemory
-                    shm = SharedMemory(create=True, size=result.nbytes)
-                    shm_array = np.ndarray(result.shape, dtype=result.dtype, buffer=shm.buf)
-                    shm_array[:] = result[:]
-                    if shm_lock:
-                        with shm_lock:
-                            shm_store[exp_id] = (shm.name, result.shape, result.dtype.str)
-                    else:
-                        shm_store[exp_id] = (shm.name, result.shape, result.dtype.str)
-                    shm.close()
-                    exp_token_paths[exp_id] = f"shm://{shm.name}"
-                else:
-                    exp_token_path = self._get_exp_token_path(exp_id)
-                    np.save(exp_token_path, result)
-                    exp_token_paths[exp_id] = exp_token_path
-
-                elapsed = time.time() - pack_t0
-                speed = (i + 1) / elapsed if elapsed > 0 else 0
-                eta = (n_batch - i - 1) / speed if speed > 0 else 0
-                print(f"  [Pack] {i+1}/{n_batch} exps ({(i+1)*100//n_batch}%), "
-                      f"{elapsed:.1f}s elapsed, ETA {eta:.0f}s")
-
-            pack_time = time.time() - pack_t0
-            print(f"[BatchTokenize] Pack {n_batch} exps: {pack_time:.1f}s")
-
-            elapsed = time.time() - t0
-            print(f"[BatchTokenize] Total: {elapsed:.1f}s for {n_batch} experiments")
-
-            return exp_token_paths
 
         mgr = self.metadata_manager
 
@@ -636,42 +634,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         pack_t0 = time.time()
         n_batch = len(batch_exp_ids)
 
-        if hasattr(self, '_global_index') and self._global_index is not None:
-            all_global_ids, all_tokens_flat = self._global_index
-        else:
-            shard_starts = mgr._shard_starts
-            global_ids_list = []
-            tokens_list = []
-            with self._memory_cache_lock:
-                cache_snapshot = list(self._memory_cache.items())
-            for sid, cache_data in cache_snapshot:
-                rows = cache_data["rows"]
-                tokens = cache_data["tokens"]
-                seq_positions = mgr.row_col_to_local(sid, rows)
-                global_ids = shard_starts[sid] + seq_positions
-                global_ids_list.append(global_ids)
-                tokens_list.append(tokens)
-
-            all_global_ids = np.concatenate(global_ids_list).astype(np.int64)
-            all_tokens_flat = np.concatenate(tokens_list, axis=0)
-            sort_idx = np.argsort(all_global_ids)
-            all_global_ids = all_global_ids[sort_idx]
-            all_tokens_flat = all_tokens_flat[sort_idx]
-
-        print(f"  [GlobalIndex] {len(all_global_ids):,} docs indexed")
-
         for i, (exp_id, selected_idx) in enumerate(zip(batch_exp_ids, batch_selected)):
-            positions = np.searchsorted(all_global_ids, selected_idx)
-            positions = np.clip(positions, 0, len(all_global_ids) - 1)
-            matched = all_global_ids[positions] == selected_idx
-            if not matched.all():
-                n_missing = int((~matched).sum())
-                raise RuntimeError(
-                    f"[Pack] Experiment {exp_id}: {n_missing}/{len(selected_idx)} "
-                    f"documents not found in tokenized cache. "
-                    f"Check for shard tokenization failures."
-                )
-            result = all_tokens_flat[positions]
+            result = self._pack_exp_tokens_by_shard(selected_idx, exp_id, mgr)
 
             if shm_store is not None:
                 from multiprocessing.shared_memory import SharedMemory
@@ -1791,54 +1755,33 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
             with PerfTimer.section("cache_results", "tokenize_all"):
                 for sid, parsed_rows, miss_tokens, io_time, tokenize_time, total_time in parallel_results:
-                    self._memory_cache_add_rows(sid, parsed_rows, miss_tokens, skip_eviction=True)
+                    with self._memory_cache_lock:
+                        if sid in self._memory_cache:
+                            old = self._memory_cache[sid]
+                            combined_rows = np.concatenate([old["rows"], parsed_rows])
+                            combined_tokens = np.concatenate([old["tokens"], miss_tokens])
+                            sort_order = np.argsort(combined_rows)
+                            self._memory_cache[sid] = {
+                                "rows": combined_rows[sort_order],
+                                "tokens": combined_tokens[sort_order],
+                            }
+                            self._memory_cache_bytes += parsed_rows.nbytes + miss_tokens.nbytes
+                        else:
+                            self._memory_cache[sid] = {"rows": parsed_rows, "tokens": miss_tokens}
+                            self._memory_cache_bytes += parsed_rows.nbytes + miss_tokens.nbytes
+                        if sid in self._memory_cache_lru:
+                            self._memory_cache_lru.remove(sid)
+                        self._memory_cache_lru.append(sid)
                     total_tokenized += len(parsed_rows)
         else:
             print(f"[TokenizeAll] All {len(shard_groups)} shards fully cached, 0 miss rows")
 
         elapsed = time.time() - t0
+        cache_gb = self._memory_cache_bytes / (1024 ** 3)
         print(f"[TokenizeAll] Done: {total_tokenized:,} new docs tokenized, "
-              f"{total_cached:,} from cache ({elapsed:.1f}s)")
-
-        pack_t0 = time.time()
-        shard_starts = mgr._shard_starts
-        with self._memory_cache_lock:
-            cache_snapshot2 = list(self._memory_cache.items())
-        global_ids_list = []
-        tokens_list = []
-        for sid, cache_data in cache_snapshot2:
-            rows = cache_data["rows"]
-            tokens = cache_data["tokens"]
-            seq_positions = mgr.row_col_to_local(sid, rows)
-            global_ids = shard_starts[sid] + seq_positions
-            global_ids_list.append(global_ids)
-            tokens_list.append(tokens)
-
-        n_docs_est = sum(len(g) for g in global_ids_list)
-        print(f"[TokenizeAll] Concatenating {len(global_ids_list)} shards "
-              f"({n_docs_est:,} docs)...", flush=True)
-        all_global_ids = np.concatenate(global_ids_list).astype(np.int64)
-        all_tokens_flat = np.concatenate(tokens_list, axis=0)
-        del global_ids_list, tokens_list
-
-        freed_gb = self._memory_cache_bytes / (1024 ** 3)
-        with self._memory_cache_lock:
-            self._memory_cache.clear()
-            self._memory_cache_bytes = 0
-        print(f"[TokenizeAll] Concatenated, freed {freed_gb:.1f} GB from memory cache. "
-              f"Sorting global IDs...", flush=True)
-
-        sort_idx = np.argsort(all_global_ids)
-        sorted_global_ids = all_global_ids[sort_idx]
-        self._global_index = (sorted_global_ids, all_tokens_flat, sort_idx)
-        del all_global_ids
-
-        elapsed = time.time() - pack_t0
-        index_gb = all_tokens_flat.nbytes / (1024 ** 3)
-        print(f"[TokenizeAll] Global index built: {len(sorted_global_ids):,} docs "
-              f"({elapsed:.1f}s), index: {index_gb:.1f} GB "
-              f"(freed {freed_gb:.1f} GB cache, peak reduced from 3X to 2X)")
-        print(f"[TokenizeAll] All {len(all_selected)} experiments ready")
+              f"{total_cached:,} from cache ({elapsed:.1f}s), memory cache: {cache_gb:.1f} GB")
+        print(f"[TokenizeAll] All {len(all_selected)} experiments ready "
+              f"(shard-blocked cache, no global index)")
 
     def _serialize_config(self, shared_metadata: Optional[Dict[str, "SharedArrayInfo"]] = None) -> dict:
         """Pickle-safe config for worker processes."""
