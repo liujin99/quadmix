@@ -1630,6 +1630,11 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                     shm.unlink()
                 except Exception:
                     pass
+            try:
+                import ctypes
+                ctypes.CDLL('libc.so.6').malloc_trim(0)
+            except Exception:
+                pass
 
         elapsed = time.time() - t0
         total_docs = sum(len(s) for s in all_selected)
