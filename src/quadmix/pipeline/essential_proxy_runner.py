@@ -1944,6 +1944,12 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             pos = 0
             batch_count = 0
             while pos < n_exp:
+                with ready_cond:
+                    pending = pos - completed_count
+                    if pending > tokenize_lookahead:
+                        print(f"[TokenizeThread] backpressure: {pending} pending shm > lookahead {tokenize_lookahead}, waiting for workers to consume...")
+                        while pos - completed_count > tokenize_lookahead:
+                            ready_cond.wait(timeout=5.0)
                 batch_size = num_workers if batch_count == 0 else tokenize_lookahead
                 end_pos = min(pos + batch_size, n_exp)
                 batch_ids = list(range(pos, end_pos))
@@ -2104,6 +2110,8 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                     eid = result.metadata["experiment_id"]
                     all_results[eid] = result
                     completed_count += 1
+                    with ready_cond:
+                        ready_cond.notify_all()
 
                     elapsed = time.time() - t_start
                     eta = (n_exp - completed_count) * elapsed / max(1, completed_count)
