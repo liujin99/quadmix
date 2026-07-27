@@ -14,16 +14,16 @@
 #   bash scripts/demo_revalidate.sh
 #
 # Usage:
-#   bash scripts/demo_reoptimize.sh --result-dir result/quadmix_20260609_120000
+#   bash scripts/demo_reoptimize.sh --source-dir result/quadmix_20260609_120000
 #
 # 自定义输出目录：
-#   bash scripts/demo_reoptimize.sh --result-dir result/xxx --output result/my_reoptimize
+#   bash scripts/demo_reoptimize.sh --source-dir result/xxx --output result/my_reoptimize
 #
 # 调整搜索参数：
-#   bash scripts/demo_reoptimize.sh --result-dir result/xxx --num-search 50000 --top-k 5
+#   bash scripts/demo_reoptimize.sh --source-dir result/xxx --num-search 50000 --top-k 5
 #
 # 指定目标数据量（单位 B tokens）：
-#   bash scripts/demo_reoptimize.sh --result-dir result/xxx --target-tokens 10
+#   bash scripts/demo_reoptimize.sh --source-dir result/xxx --target-tokens 10
 #
 # 切换搜索模式（等权 vs R²加权）：
 #   bash scripts/demo_reoptimize.sh --search-mode equal_weight
@@ -42,7 +42,7 @@ export QUADMIX_TEMP_DIR="${QUADMIX_TEMP_DIR:-$HOME/.cache/QuaDMix/temp}"
 
 PREPROCESSED_DIR="$QUADMIX_TEMP_DIR/preprocessed"
 
-RESULT_DIR="${RESULT_DIR:-}"
+SOURCE_DIR="${SOURCE_DIR:-}"
 SCHEMA=""
 OUTPUT=""
 NUM_SEARCH="100000"
@@ -52,7 +52,7 @@ SEARCH_MODE="r2_weighted"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --result-dir)    RESULT_DIR="$2"; shift 2 ;;
+        --source-dir)    SOURCE_DIR="$2"; shift 2 ;;
         --schema)        SCHEMA="$2"; shift 2 ;;
         --output|-o)     OUTPUT="$2"; shift 2 ;;
         --num-search)    NUM_SEARCH="$2"; shift 2 ;;
@@ -61,10 +61,10 @@ while [[ $# -gt 0 ]]; do
         --preprocessed-dir) PREPROCESSED_DIR="$2"; shift 2 ;;
         --search-mode)     SEARCH_MODE="$2"; shift 2 ;;
         -h|--help)
-            echo "Usage: bash scripts/demo_reoptimize.sh --result-dir <path> [options]"
+            echo "Usage: bash scripts/demo_reoptimize.sh --source-dir <path> [options]"
             echo ""
             echo "Required:"
-            echo "  --result-dir PATH        Original pipeline result directory"
+            echo "  --source-dir PATH        Original pipeline result directory"
             echo "  --schema PATH            Dataset schema YAML config"
             echo ""
             echo "Options:"
@@ -83,9 +83,9 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ -z "$RESULT_DIR" ]]; then
-    echo "[Error] --result-dir is required"
-    echo "Usage: bash scripts/demo_reoptimize.sh --result-dir result/quadmix_20260609_120000"
+if [[ -z "$SOURCE_DIR" ]]; then
+    echo "[Error] --source-dir is required"
+    echo "Usage: bash scripts/demo_reoptimize.sh --source-dir result/quadmix_20260609_120000"
     exit 1
 fi
 
@@ -95,9 +95,9 @@ if [[ -z "$SCHEMA" ]]; then
     exit 1
 fi
 
-PROXY_DIR="$RESULT_DIR/proxy_experiments"
+PROXY_DIR="$SOURCE_DIR/proxy_experiments"
 if [[ ! -d "$PROXY_DIR" ]]; then
-    echo "[Error] proxy_experiments not found in: $RESULT_DIR"
+    echo "[Error] proxy_experiments not found in: $SOURCE_DIR"
     exit 1
 fi
 
@@ -116,7 +116,7 @@ fi
 
 echo "╔══ QuaDMix Re-optimize (from Stage 5) ══╗"
 echo ""
-echo "  Source:        $RESULT_DIR"
+echo "  Source:        $SOURCE_DIR"
 echo "  Experiments:   $EXP_COUNT"
 echo "  Schema:        $SCHEMA"
 echo "  Preprocessed:  $PREPROCESSED_DIR"

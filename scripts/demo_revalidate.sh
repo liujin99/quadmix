@@ -15,30 +15,30 @@
 #   bash scripts/demo_reoptimize.sh
 #
 # Usage:
-#   bash scripts/demo_revalidate.sh --result-dir result/quadmix_20260609_120000
+#   bash scripts/demo_revalidate.sh --source-dir result/quadmix_20260609_120000
 #
 # 切换验证集：
-#   bash scripts/demo_revalidate.sh --result-dir result/xxx --val-set stem_v2
-#   bash scripts/demo_revalidate.sh --result-dir result/xxx --val-set core
-#   bash scripts/demo_revalidate.sh --result-dir result/xxx --val-path /path/to/custom.pt
+#   bash scripts/demo_revalidate.sh --source-dir result/xxx --val-set stem_v2
+#   bash scripts/demo_revalidate.sh --source-dir result/xxx --val-set core
+#   bash scripts/demo_revalidate.sh --source-dir result/xxx --val-path /path/to/custom.pt
 #
 # 指定 schema（默认根据 val-set 自动推断）：
-#   bash scripts/demo_revalidate.sh --result-dir result/xxx --schema configs/schema_stem.yaml
+#   bash scripts/demo_revalidate.sh --source-dir result/xxx --schema configs/schema_stem.yaml
 #
 # 指定设备：
-#   bash scripts/demo_revalidate.sh --result-dir result/xxx --device-type npu
+#   bash scripts/demo_revalidate.sh --source-dir result/xxx --device-type npu
 #
 # 自定义输出目录：
-#   bash scripts/demo_revalidate.sh --result-dir result/xxx --output result/my_revalidate
+#   bash scripts/demo_revalidate.sh --source-dir result/xxx --output result/my_revalidate
 #
 # 调整搜索参数：
-#   bash scripts/demo_revalidate.sh --result-dir result/xxx --num-search 50000 --top-k 5
+#   bash scripts/demo_revalidate.sh --source-dir result/xxx --num-search 50000 --top-k 5
 #
 # 指定目标数据量（单位 B tokens）：
-#   bash scripts/demo_revalidate.sh --result-dir result/xxx --target-tokens 10
+#   bash scripts/demo_revalidate.sh --source-dir result/xxx --target-tokens 10
 #
 # HF 镜像加速（中国用户）：
-#   HF_ENDPOINT=https://hf-mirror.com bash scripts/demo_revalidate.sh --result-dir result/xxx
+#   HF_ENDPOINT=https://hf-mirror.com bash scripts/demo_revalidate.sh --source-dir result/xxx
 # ──────────────────────────────────────────────────────────────
 
 set -euo pipefail
@@ -54,7 +54,7 @@ export QUADMIX_TEMP_DIR="${QUADMIX_TEMP_DIR:-$HOME/.cache/QuaDMix/temp}"
 
 PREPROCESSED_DIR="$QUADMIX_TEMP_DIR/preprocessed"
 
-RESULT_DIR="${RESULT_DIR:-}"
+SOURCE_DIR="${SOURCE_DIR:-}"
 VAL_SET="stem_v2"
 VAL_PATH=""
 OUTPUT=""
@@ -69,7 +69,7 @@ SCHEMA=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --result-dir)    RESULT_DIR="$2"; shift 2 ;;
+        --source-dir)    SOURCE_DIR="$2"; shift 2 ;;
         --val-set)       VAL_SET="$2"; shift 2 ;;
         --val-path)      VAL_PATH="$2"; shift 2 ;;
         --output|-o)     OUTPUT="$2"; shift 2 ;;
@@ -83,10 +83,10 @@ while [[ $# -gt 0 ]]; do
         --search-mode)     SEARCH_MODE="$2"; shift 2 ;;
         --schema)          SCHEMA="$2"; shift 2 ;;
         -h|--help)
-            echo "Usage: bash scripts/demo_revalidate.sh --result-dir <path> [options]"
+            echo "Usage: bash scripts/demo_revalidate.sh --source-dir <path> [options]"
             echo ""
             echo "Required:"
-            echo "  --result-dir PATH        Original pipeline result directory"
+            echo "  --source-dir PATH        Original pipeline result directory"
             echo ""
             echo "Options:"
             echo "  --val-set {core,openhermes,core_bmk_v6,cap_v1,stem_v1,stem_v2}  New validation set (default: stem_v2)"
@@ -110,14 +110,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ -z "$RESULT_DIR" ]]; then
-    echo "[Error] --result-dir is required"
-    echo "Usage: bash scripts/demo_revalidate.sh --result-dir result/quadmix_20260609_120000"
+if [[ -z "$SOURCE_DIR" ]]; then
+    echo "[Error] --source-dir is required"
+    echo "Usage: bash scripts/demo_revalidate.sh --source-dir result/quadmix_20260609_120000"
     exit 1
 fi
 
-if [[ ! -d "$RESULT_DIR/proxy_experiments" ]]; then
-    echo "[Error] proxy_experiments not found in: $RESULT_DIR"
+if [[ ! -d "$SOURCE_DIR/proxy_experiments" ]]; then
+    echo "[Error] proxy_experiments not found in: $SOURCE_DIR"
     exit 1
 fi
 
@@ -150,16 +150,16 @@ if [[ ! -d "$PREPROCESSED_DIR" ]]; then
     exit 1
 fi
 
-MODEL_COUNT=$(find "$RESULT_DIR/proxy_experiments" -name "model.pt" 2>/dev/null | wc -l)
+MODEL_COUNT=$(find "$SOURCE_DIR/proxy_experiments" -name "model.pt" 2>/dev/null | wc -l)
 if [[ "$MODEL_COUNT" -eq 0 ]]; then
-    echo "[Error] No model.pt found in $RESULT_DIR/proxy_experiments/"
+    echo "[Error] No model.pt found in $SOURCE_DIR/proxy_experiments/"
     echo "  The original run must save model weights (model.pt in each exp dir)"
     exit 1
 fi
 
 echo "╔══ QuaDMix Re-evaluation ══╗"
 echo ""
-echo "  Source:        $RESULT_DIR"
+echo "  Source:        $SOURCE_DIR"
 echo "  Models found:  $MODEL_COUNT"
 echo "  Val set:       $VAL_SET"
 [[ -n "$VAL_PATH" ]] && echo "  Val path:      $VAL_PATH"
@@ -174,7 +174,7 @@ echo "╚═══════════════════════�
 echo ""
 
 ARGS=(
-    --result-dir "$RESULT_DIR"
+    --source-dir "$SOURCE_DIR"
     --preprocessed-dir "$PREPROCESSED_DIR"
     --val-set "$VAL_SET"
     --schema "$SCHEMA"

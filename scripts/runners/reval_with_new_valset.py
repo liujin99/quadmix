@@ -9,13 +9,13 @@ report generation.
 
 Usage:
   python scripts/runners/reval_with_new_valset.py \
-      --result-dir result/quadmix_20260609_120000 \
+      --source-dir result/quadmix_20260609_120000 \
       --val-set core \
       --preprocessed-dir /path/to/preprocessed \
       --output result/reval_core_20260610_150000
 
   python scripts/runners/reval_with_new_valset.py \
-      --result-dir result/quadmix_20260609_120000 \
+      --source-dir result/quadmix_20260609_120000 \
       --val-path /path/to/custom_val.pt \
       --preprocessed-dir /path/to/preprocessed
 """
@@ -178,13 +178,13 @@ def build_parser():
     p = argparse.ArgumentParser(
         description="Re-evaluate saved proxy experiments on a new validation set",
     )
-    p.add_argument("--result-dir", required=True,
+    p.add_argument("--source-dir", required=True,
                    help="Path to original pipeline result directory "
                         "(e.g. result/quadmix_20260609_120000)")
     p.add_argument("--preprocessed-dir", required=True,
                    help="Path to preprocessed shards directory")
     p.add_argument("--val-set", type=str, default="core",
-                   choices=["openhermes", "core", "core_bmk_v2", "core_bmk_v3", "core_bmk_v4", "core_bmk_v4.2", "core_bmk_v4.3", "core_bmk_v5", "core_bmk_v6", "cap_v1", "stem_v1"],
+                   choices=["openhermes", "core", "core_bmk_v2", "core_bmk_v3", "core_bmk_v4", "core_bmk_v4.2", "core_bmk_v4.3", "core_bmk_v5", "core_bmk_v6", "cap_v1", "stem_v1", "stem_v2"],
                    help="New validation set to evaluate on (default: core)")
     p.add_argument("--val-path", type=str, default=None,
                    help="Path to custom validation .pt file (overrides --val-set)")
@@ -214,7 +214,7 @@ def build_parser():
 def main():
     args = build_parser().parse_args()
 
-    result_dir = args.result_dir
+    result_dir = args.source_dir
     proxy_dir = os.path.join(result_dir, "proxy_experiments")
     if not os.path.isdir(proxy_dir):
         print(f"[Error] proxy_experiments not found: {proxy_dir}")
