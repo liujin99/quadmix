@@ -54,7 +54,7 @@ export QUADMIX_TEMP_DIR="${QUADMIX_TEMP_DIR:-$HOME/.cache/QuaDMix/temp}"
 
 PREPROCESSED_DIR="$QUADMIX_TEMP_DIR/preprocessed"
 
-RESULT_DIR="${RESULT_DIR:?请通过 RESULT_DIR 环境变量或命令行指定结果目录}"
+RESULT_DIR="${RESULT_DIR:-}"
 VAL_SET="stem_v2"
 VAL_PATH=""
 OUTPUT=""
