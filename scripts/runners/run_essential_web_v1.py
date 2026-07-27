@@ -293,7 +293,7 @@ def build_parser():
     p.add_argument("--full", action="store_true", help="Full: 3000 exp, 100K search")
     p.add_argument("--output", "-o", default=None)
     p.add_argument("--num-experiments", type=int, default=None)
-    p.add_argument("--num-search", type=int, default=None)
+    p.add_argument("--num-search", type=int, default=100000)
     # Note: --doc-limit removed. Proxy experiments should use full data pool.
     # Use --target-tokens to control final output size instead.
     p.add_argument("--top-k", type=int, default=10)

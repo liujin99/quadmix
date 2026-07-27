@@ -202,8 +202,8 @@ cat << PARAMS
   ├────────────────────────────┼──────────────┤
   │ Shards                     │        $NUM_SHARDS  │
   │ 实验数                     │ $NUM_EXPERIMENTS  │
-  │ 搜索点                     │       5,000  │
-  │ Top-K 平均                 │           5  │
+  │ 搜索点                     │     100,000  │
+  │ Top-K 平均                 │          10  │
   │ seq_len (block_size)       │       2,048  │
   │ 训练步数                   │       5,000  │
   │ 全局 batch size            │          64  │
@@ -240,8 +240,8 @@ python3 "$QUADMIX_DIR/scripts/runners/run_essential_web_v1.py" \
     --schema "$QUADMIX_DIR/configs/schema_essential_web.yaml" \
     --preprocessed-dir "$PREPROCESSED_DIR" \
     --num-experiments "$NUM_EXPERIMENTS" \
-    --num-search 5000 \
-    --top-k 5 \
+    --num-search 100000 \
+    --top-k 10 \
     --block-size 2048 \
     --tiny-steps 5000 \
     --micro-batch-size 64 \

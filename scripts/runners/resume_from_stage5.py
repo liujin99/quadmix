@@ -132,13 +132,13 @@ def build_parser():
                    help="Path to preprocessed shards directory")
     p.add_argument("--output", "-o", default=None,
                    help="Output directory (default: <project>/result/reoptimize_<timestamp>)")
-    p.add_argument("--num-search", type=int, default=5000)
-    p.add_argument("--top-k", type=int, default=5)
+    p.add_argument("--num-search", type=int, default=100000)
+    p.add_argument("--top-k", type=int, default=10)
     p.add_argument("--target-tokens", type=float, default=0.0,
                    help="Target tokens in billions (0 = no target)")
-    p.add_argument("--search-mode", default="equal_weight",
+    p.add_argument("--search-mode", default="r2_weighted",
                    choices=["r2_weighted", "equal_weight", "r2_sigma_weighted"],
-                   help="Search weighting mode (default: equal_weight)")
+                   help="Search weighting mode (default: r2_weighted)")
     p.add_argument("--schema", required=True,
                    help="Path to dataset schema YAML (required)")
     return p

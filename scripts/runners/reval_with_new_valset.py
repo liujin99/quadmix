@@ -211,9 +211,9 @@ def build_parser():
                    help="Block size for validation (must match training)")
     p.add_argument("--model-variant", type=str, default="tinyllama_1M",
                    help="Proxy model variant (must match original training)")
-    p.add_argument("--search-mode", default="equal_weight",
+    p.add_argument("--search-mode", default="r2_weighted",
                    choices=["r2_weighted", "equal_weight", "r2_sigma_weighted"],
-                   help="Search weighting mode (default: equal_weight)")
+                   help="Search weighting mode (default: r2_weighted)")
     p.add_argument("--schema", required=True,
                    help="Path to dataset schema YAML (required)")
     return p
