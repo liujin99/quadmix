@@ -60,8 +60,8 @@ echo "  [配置] 发现 $NUM_SHARDS shards in $STEM_DATA_DIR"
 
 NUM_EXPERIMENTS="${NUM_EXPERIMENTS:-8}"
 
-# ── 扫描 --val-set 参数（默认 cap_v1）──────────────────
-VAL_SET="stem_v1"
+# ── 扫描 --val-set 参数（默认 stem_v2）──────────────────
+VAL_SET="stem_v2"
 prev_arg=""
 for arg in "$@"; do
     if [[ "$prev_arg" == "--val-set" ]]; then

@@ -18,9 +18,12 @@
 #   bash scripts/demo_revalidate.sh --result-dir result/quadmix_20260609_120000
 #
 # 切换验证集：
-#   bash scripts/demo_revalidate.sh --result-dir result/xxx --val-set openhermes
+#   bash scripts/demo_revalidate.sh --result-dir result/xxx --val-set stem_v2
 #   bash scripts/demo_revalidate.sh --result-dir result/xxx --val-set core
 #   bash scripts/demo_revalidate.sh --result-dir result/xxx --val-path /path/to/custom.pt
+#
+# 指定 schema（默认根据 val-set 自动推断）：
+#   bash scripts/demo_revalidate.sh --result-dir result/xxx --schema configs/schema_stem.yaml
 #
 # 指定设备：
 #   bash scripts/demo_revalidate.sh --result-dir result/xxx --device-type npu
@@ -52,7 +55,7 @@ export QUADMIX_TEMP_DIR="${QUADMIX_TEMP_DIR:-$HOME/.cache/QuaDMix/temp}"
 PREPROCESSED_DIR="$QUADMIX_TEMP_DIR/preprocessed"
 
 RESULT_DIR="${RESULT_DIR:?请通过 RESULT_DIR 环境变量或命令行指定结果目录}"
-VAL_SET="cap_v1"
+VAL_SET="stem_v2"
 VAL_PATH=""
 OUTPUT=""
 DEVICE_TYPE="npu"
@@ -62,6 +65,7 @@ TARGET_TOKENS="0"
 BLOCK_SIZE="2048"
 MODEL_VARIANT="tinyllama_1M"
 SEARCH_MODE="r2_weighted"
+SCHEMA=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -77,6 +81,7 @@ while [[ $# -gt 0 ]]; do
         --model-variant) MODEL_VARIANT="$2"; shift 2 ;;
         --preprocessed-dir) PREPROCESSED_DIR="$2"; shift 2 ;;
         --search-mode)     SEARCH_MODE="$2"; shift 2 ;;
+        --schema)          SCHEMA="$2"; shift 2 ;;
         -h|--help)
             echo "Usage: bash scripts/demo_revalidate.sh --result-dir <path> [options]"
             echo ""
@@ -84,8 +89,9 @@ while [[ $# -gt 0 ]]; do
             echo "  --result-dir PATH        Original pipeline result directory"
             echo ""
             echo "Options:"
-            echo "  --val-set {core,openhermes,core_bmk_v6,cap_v1,stem_v1}  New validation set (default: cap_v1)"
+            echo "  --val-set {core,openhermes,core_bmk_v6,cap_v1,stem_v1,stem_v2}  New validation set (default: stem_v2)"
             echo "  --val-path PATH              Custom .pt file (overrides --val-set)"
+            echo "  --schema PATH                Dataset schema YAML (default: auto from val-set)"
             echo "  --output PATH                Output directory (default: auto)"
             echo "  --device-type {cpu,cuda,npu} Device (default: npu)"
             echo "  --num-search N               Search points (default: 100000)"
@@ -94,6 +100,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --block-size N               Block size (default: 2048)"
             echo "  --model-variant NAME         Model variant (default: tinyllama_1M)"
             echo "  --preprocessed-dir PATH      Preprocessed shards dir"
+            echo "  --search-mode {r2_weighted,equal_weight,r2_sigma_weighted}  Search mode (default: r2_weighted)"
             exit 0
             ;;
         *)
@@ -111,6 +118,24 @@ fi
 
 if [[ ! -d "$RESULT_DIR/proxy_experiments" ]]; then
     echo "[Error] proxy_experiments not found in: $RESULT_DIR"
+    exit 1
+fi
+
+# Auto-detect schema from val-set if not specified
+if [[ -z "$SCHEMA" ]]; then
+    case "$VAL_SET" in
+        stem_v1|stem_v2)
+            SCHEMA="$QUADMIX_DIR/configs/schema_stem.yaml"
+            ;;
+        *)
+            SCHEMA="$QUADMIX_DIR/configs/schema_essential_web.yaml"
+            ;;
+    esac
+fi
+
+if [[ ! -f "$SCHEMA" ]]; then
+    echo "[Error] Schema file not found: $SCHEMA"
+    echo "  Specify with --schema /path/to/schema.yaml"
     exit 1
 fi
 
@@ -138,6 +163,7 @@ echo "  Source:        $RESULT_DIR"
 echo "  Models found:  $MODEL_COUNT"
 echo "  Val set:       $VAL_SET"
 [[ -n "$VAL_PATH" ]] && echo "  Val path:      $VAL_PATH"
+echo "  Schema:        $SCHEMA"
 echo "  Device:        $DEVICE_TYPE"
 echo "  Preprocessed:  $PREPROCESSED_DIR"
 echo "  Search points: $NUM_SEARCH"
@@ -151,6 +177,7 @@ ARGS=(
     --result-dir "$RESULT_DIR"
     --preprocessed-dir "$PREPROCESSED_DIR"
     --val-set "$VAL_SET"
+    --schema "$SCHEMA"
     --device-type "$DEVICE_TYPE"
     --num-search "$NUM_SEARCH"
     --top-k "$TOP_K"

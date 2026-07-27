@@ -211,9 +211,21 @@ ensure_val_set() {
                 "stem_v1_tokenized.pt" \
                 "$data_dir/stem_v1_tokenized.pt"
             ;;
+        stem_v2)
+            local stem_v2_path="$data_dir/stem_v2_tokenized.pt"
+            if [ ! -f "$stem_v2_path" ]; then
+                echo "  [Info] stem_v2 not found locally, attempting download from HF..."
+                echo "         If download fails, generate locally with:"
+                echo "           python3 scripts/validation_set/prepare_stem_v2.py"
+                echo ""
+            fi
+            ensure_val_data "liujin99/quadmix-stem-v2" \
+                "stem_v2_tokenized.pt" \
+                "$stem_v2_path"
+            ;;
         *)
             echo "  [Error] Unknown val_set: $val_set"
-            echo "          Supported: openhermes, core, core_bmk_v3/v4/v4.2/v4.3/v5/v6, cap_v1, stem_v1"
+            echo "          Supported: openhermes, core, core_bmk_v3/v4/v4.2/v4.3/v5/v6, cap_v1, stem_v1, stem_v2"
             return 1
             ;;
     esac
