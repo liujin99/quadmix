@@ -7,6 +7,7 @@ Provides:
 
 from typing import Callable, List, Optional, Tuple
 import os
+import time
 
 import numpy as np
 import numpy.typing as npt
@@ -81,17 +82,20 @@ def save_sampled_dataset(
     domain_col: str = "domain",
     batch_size: int = 100000,
 ):
-    """Save the sampled dataset with metadata (OOM-safe).
+    """Save the sampled dataset with metadata.
 
-    Uses a callback (get_text_fn) to retrieve texts on-demand instead of
-    requiring the full corpus in memory. Writes in batches to keep peak
-    memory proportional to batch_size, not total dataset size.
+    Reads each unique document's text exactly once via get_text_fn, then
+    expands back to the selected output order (which may contain repeats
+    when sampling_value > 1). This avoids re-opening shard files once per
+    batch and keeps the read phase to a single callback invocation.
 
     Args:
         get_text_fn: Callable accepting a numpy array of indices and returning
             a list of text strings. For sharded datasets, use
             metadata_manager.read_texts directly. For in-memory datasets,
             wrap with lambda: lambda idx: [texts[i] for i in idx].
+            May optionally accept a `verbose` keyword (silenced here to keep
+            the save log concise).
         num_total_docs: Total number of documents in the original corpus.
         selected_indices: Indices of selected documents (may repeat).
         output_path: Where to save the sampled dataset.
@@ -103,38 +107,48 @@ def save_sampled_dataset(
         format: Output format ("parquet" or "jsonl").
         text_col: Column name for text.
         domain_col: Column name for domain.
-        batch_size: Number of rows per write batch (controls peak memory).
+        batch_size: Reserved for future incremental-write chunking (currently
+            unused; the full frame is written in one pass).
     """
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
     n_selected = len(selected_indices)
-    batches = []
 
-    for start in range(0, n_selected, batch_size):
-        end = min(start + batch_size, n_selected)
-        batch_indices = selected_indices[start:end]
+    # Dedup indices so each unique document is read exactly once, then map
+    # back to the (possibly repeated) output order via the inverse permutation.
+    unique_indices, inverse = np.unique(selected_indices, return_inverse=True)
+    n_unique = len(unique_indices)
 
-        batch_texts = get_text_fn(batch_indices)
-        records = {text_col: batch_texts}
+    print(f"[Save] Reading {n_unique:,} unique texts "
+          f"({n_selected:,} selected rows w/ repeats)...")
+    t0 = time.time()
 
-        if doc_id_fn is not None:
-            records["doc_id"] = [doc_id_fn(i) for i in batch_indices]
-        else:
-            records["doc_id"] = batch_indices.tolist()
+    try:
+        unique_texts = get_text_fn(unique_indices, verbose=False)
+    except TypeError:
+        # Callback does not accept the verbose kwarg (e.g. in-memory lambda).
+        unique_texts = get_text_fn(unique_indices)
 
-        if domain_labels is not None:
-            records[domain_col] = domain_labels[batch_indices].tolist()
+    texts_arr = np.asarray(unique_texts, dtype=object)
+    # Reconstruct the selected order; this is a pointer copy (no string dup).
+    records = {text_col: texts_arr[inverse]}
 
-        if quality_ranks is not None:
-            records["quality_rank"] = quality_ranks[batch_indices].tolist()
+    if doc_id_fn is not None:
+        records["doc_id"] = [doc_id_fn(i) for i in selected_indices]
+    else:
+        records["doc_id"] = selected_indices.tolist()
 
-        if sampling_values is not None:
-            records["sampling_weight"] = 1.0 / np.maximum(sampling_values[batch_indices], 1e-10)
-            records["sampling_value"] = sampling_values[batch_indices].tolist()
+    if domain_labels is not None:
+        records[domain_col] = domain_labels[selected_indices].tolist()
 
-        batches.append(pd.DataFrame(records))
+    if quality_ranks is not None:
+        records["quality_rank"] = quality_ranks[selected_indices].tolist()
 
-    df = pd.concat(batches, ignore_index=True)
+    if sampling_values is not None:
+        records["sampling_weight"] = 1.0 / np.maximum(sampling_values[selected_indices], 1e-10)
+        records["sampling_value"] = sampling_values[selected_indices].tolist()
+
+    df = pd.DataFrame(records)
 
     if format == "parquet":
         df.to_parquet(output_path, index=False)
@@ -143,7 +157,9 @@ def save_sampled_dataset(
     else:
         raise ValueError(f"Unsupported format: {format}")
 
+    read_elapsed = time.time() - t0
     print(f"[Save] Sampled dataset saved to: {output_path}")
     print(f"[Save]   Original docs: {num_total_docs}")
-    print(f"[Save]   Selected docs: {n_selected}")
+    print(f"[Save]   Selected docs: {n_selected} (unique: {n_unique})")
     print(f"[Save]   Sampling ratio: {n_selected / max(1, num_total_docs):.4f}x")
+    print(f"[Save]   Text read: {read_elapsed:.1f}s")

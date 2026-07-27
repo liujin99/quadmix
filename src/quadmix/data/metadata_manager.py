@@ -300,6 +300,80 @@ def _read_one_shard_texts_with_rows(
     return texts, parsed_rows
 
 
+def _assemble_texts_dict(
+    global_indices: npt.NDArray[np.int64],
+    shard_groups: Dict[int, Tuple[str, npt.NDArray[np.int64]]],
+    shard_results: Dict[int, List[str]],
+    shard_starts: npt.NDArray[np.int64],
+) -> List[str]:
+    """Reference dict-based text assembly.
+
+    Kept for differential testing against the vectorized path. Builds a
+    position map ``{global_idx: [positions]}`` then scatters each shard's
+    texts to all matching positions. O(n) Python-level dict work.
+    """
+    pos_map: Dict[int, List[int]] = {}
+    for p, idx in enumerate(global_indices):
+        pos_map.setdefault(int(idx), []).append(p)
+    result = [""] * len(global_indices)
+    for sid, (_shard_path, local_rows) in shard_groups.items():
+        texts = shard_results[sid]
+        base = int(shard_starts[sid])
+        for i, local_row in enumerate(local_rows):
+            global_idx = base + int(local_row)
+            for pos in pos_map.get(int(global_idx), []):
+                result[pos] = texts[i]
+    return result
+
+
+def _assemble_texts_array(
+    global_indices: npt.NDArray[np.int64],
+    shard_groups: Dict[int, Tuple[str, npt.NDArray[np.int64]]],
+    shard_results: Dict[int, List[str]],
+    shard_starts: npt.NDArray[np.int64],
+) -> List[str]:
+    """Vectorized text assembly via argsort + searchsorted (Plan A2).
+
+    Correct for both unique and duplicate ``global_indices``; auto-branches
+    to a per-text loop only when duplicates exist in a shard. No caller
+    contract: any unassigned position stays as ``""`` (visible failure
+    mode, never silent string corruption).
+
+    Math:
+      ``order = argsort(global_indices, stable)`` makes ``sorted_gids``
+      sorted ascending. For a gid ``g``, ``searchsorted(sorted_gids, g,
+      'left'..'right')`` brackets the slice where ``sorted_gids == g``;
+      ``order[left:right]`` enumerates every original position whose
+      value is ``g``. Assigning the text to those positions is therefore
+      identical to the dict scatter.
+    """
+    n = len(global_indices)
+    if n == 0:
+        return []
+    gids = np.asarray(global_indices, dtype=np.int64)
+    order = np.argsort(gids, kind="stable")
+    sorted_gids = gids[order]
+    result = np.full(n, "", dtype=object)
+    for sid, (_shard_path, local_rows) in shard_groups.items():
+        texts = shard_results[sid]
+        shard_gids = shard_starts[sid] + np.asarray(local_rows, dtype=np.int64)
+        left = np.searchsorted(sorted_gids, shard_gids, side="left")
+        right = np.searchsorted(sorted_gids, shard_gids, side="right")
+        if np.array_equal(left + 1, right):
+            # All gids in this shard are unique across the request →
+            # one position per gid, vectorized scatter.
+            result[order[left]] = texts
+        else:
+            # Duplicate gids present → assign text to every matching
+            # position via the bracketed slice.
+            for i in range(len(texts)):
+                lo = int(left[i])
+                hi = int(right[i])
+                for pos in order[lo:hi]:
+                    result[pos] = texts[i]
+    return result.tolist()
+
+
 _CACHE_FILENAME = "metadata_cache.npz"
 
 
@@ -850,15 +924,14 @@ class ShardMetadataManager:
     # ── Text loading ──
 
     def read_texts(
-        self, global_indices: npt.NDArray[np.int64]
+        self,
+        global_indices: npt.NDArray[np.int64],
+        verbose: bool = True,
     ) -> List[str]:
         if len(global_indices) == 0:
             return []
 
         shard_groups = self.global_to_shard_rows(global_indices)
-        pos_map: Dict[int, List[int]] = {}
-        for p, idx in enumerate(global_indices):
-            pos_map.setdefault(int(idx), []).append(p)
 
         text_col = self._schema.text_col
         row_col = self._schema.row_in_shard_col if self._has_row_in_shard else None
@@ -871,8 +944,9 @@ class ShardMetadataManager:
         if n_shards <= 1:
             n_workers = 1
 
-        print(f"[read_texts] {len(global_indices):,} texts from {n_shards} shards, "
-              f"{n_workers} I/O processes (spawn)")
+        if verbose:
+            print(f"[read_texts] {len(global_indices):,} texts from {n_shards} shards, "
+                  f"{n_workers} I/O processes (spawn)")
 
         t0 = time.time()
 
@@ -908,24 +982,21 @@ class ShardMetadataManager:
                     sid = future_map[future]
                     shard_results[sid] = future.result()
                     done += 1
-                    if done % log_interval == 0 or done == n_shards:
+                    if verbose and (done % log_interval == 0 or done == n_shards):
                         elapsed = time.time() - t0
                         pct = done / n_shards * 100
                         eta = elapsed / done * (n_shards - done)
                         print(f"[read_texts] {done}/{n_shards} shards "
                               f"({pct:.0f}%) — elapsed {elapsed:.0f}s, ETA {eta:.0f}s")
 
-        result = [""] * len(global_indices)
-        for sid, (shard_path, local_rows) in shard_groups.items():
-            texts = shard_results[sid]
-            for i, local_row in enumerate(local_rows):
-                global_idx = self._shard_starts[sid] + int(local_row)
-                for pos in pos_map.get(int(global_idx), []):
-                    result[pos] = texts[i]
+        result = _assemble_texts_array(
+            global_indices, shard_groups, shard_results, self._shard_starts
+        )
 
         elapsed = time.time() - t0
-        print(f"[read_texts] Done: {len(global_indices):,} texts in {elapsed:.1f}s "
-              f"({n_shards} shards, {n_workers} processes)")
+        if verbose:
+            print(f"[read_texts] Done: {len(global_indices):,} texts in {elapsed:.1f}s "
+                  f"({n_shards} shards, {n_workers} processes)")
 
         return result
 
