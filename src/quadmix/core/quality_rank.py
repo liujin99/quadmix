@@ -56,13 +56,16 @@ def _rank_one_domain(
     cumulative = np.cumsum(sorted_tokens)
 
     diff = np.diff(sorted_scores)
-    tie_start = np.concatenate([[True], diff != 0])
-    groups = np.cumsum(tie_start) - 1
+    if (diff == 0).any():
+        tie_start = np.concatenate([[True], diff != 0])
+        group_starts = np.where(tie_start)[0]
+        group_ends = np.append(group_starts[1:], len(cumulative)) - 1
+        group_end_cumsum = cumulative[group_ends]
+        groups = np.cumsum(tie_start) - 1
+        tied_ranks = group_end_cumsum[groups] / total_tokens
+    else:
+        tied_ranks = cumulative / total_tokens
 
-    group_end_cumsum = np.zeros(np.max(groups) + 1, dtype=np.float64)
-    np.maximum.at(group_end_cumsum, groups, cumulative)
-
-    tied_ranks = group_end_cumsum[groups] / total_tokens
     inv_sort = np.argsort(sort_order)
 
     return indices, tied_ranks[inv_sort]
@@ -151,13 +154,15 @@ def compute_quality_ranks(
             cumulative = np.cumsum(sorted_tokens)
 
             diff = np.diff(sorted_scores)
-            tie_start = np.concatenate([[True], diff != 0])
-            groups = np.cumsum(tie_start) - 1
-
-            group_end_cumsum = np.zeros(np.max(groups) + 1, dtype=np.float64)
-            np.maximum.at(group_end_cumsum, groups, cumulative)
-
-            tied_ranks = group_end_cumsum[groups] / total_tokens
+            if (diff == 0).any():
+                tie_start = np.concatenate([[True], diff != 0])
+                group_starts = np.where(tie_start)[0]
+                group_ends = np.append(group_starts[1:], len(cumulative)) - 1
+                group_end_cumsum = cumulative[group_ends]
+                groups = np.cumsum(tie_start) - 1
+                tied_ranks = group_end_cumsum[groups] / total_tokens
+            else:
+                tied_ranks = cumulative / total_tokens
 
             inv_sort = np.argsort(sort_order)
             ranks[indices] = tied_ranks[inv_sort]
