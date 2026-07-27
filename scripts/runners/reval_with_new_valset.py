@@ -170,8 +170,12 @@ def resolve_val_path(val_set: str, val_path: str) -> str:
     if val_set == "stem_v2":
         local = os.path.join(DEFAULT_VAL_DIR, HF_STEM_V2_FILENAME)
         return _check_and_download(local, HF_STEM_V2_DATASET, HF_STEM_V2_FILENAME)
-    local = os.path.join(DEFAULT_VAL_DIR, HF_OPENHERMES_FILENAME)
-    return _check_and_download(local, HF_OPENHERMES_DATASET, HF_OPENHERMES_FILENAME)
+    if val_set == "openhermes":
+        local = os.path.join(DEFAULT_VAL_DIR, HF_OPENHERMES_FILENAME)
+        return _check_and_download(local, HF_OPENHERMES_DATASET, HF_OPENHERMES_FILENAME)
+    raise ValueError(f"Unknown val_set '{val_set}'. Valid: openhermes, core, "
+                     f"core_bmk_v2, core_bmk_v3, core_bmk_v4, core_bmk_v4.2, "
+                     f"core_bmk_v4.3, core_bmk_v5, core_bmk_v6, cap_v1, stem_v1, stem_v2")
 
 
 def reconstruct_params_from_meta(meta: dict) -> ParameterSet:

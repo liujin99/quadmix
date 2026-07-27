@@ -398,9 +398,11 @@ def create_proxy_runner(config, args, output_dir, metadata_manager):
     elif args.val_set == "stem_v2":
         val_path = os.path.join(DEFAULT_VAL_DIR, HF_STEM_V2_FILENAME)
         val_path = ensure_stem_v2_data(val_path)
-    else:
+    elif args.val_set == "openhermes":
         val_path = os.path.join(DEFAULT_VAL_DIR, HF_OPENHERMES_FILENAME)
         val_path = ensure_val_data(val_path)
+    else:
+        raise ValueError(f"Unknown val_set '{args.val_set}'")
 
     # Parse checkpoint interval
     checkpoint_interval = args.checkpoint_interval if args.checkpoint_interval is not None else 1000
