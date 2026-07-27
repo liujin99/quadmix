@@ -67,6 +67,18 @@ def _get_domain_display(num_domains, domain_names=None):
 _DEFAULT_QUALITY_NAMES = ["DCLM", "FineWeb-Edu", "English", "Math (Gen)", "Math (OpenWeb)"]
 _DEFAULT_QUALITY_SHORT = ["DCLM", "Edu", "Eng", "MathG", "MathO"]
 
+
+def _get_quality_short(quality_names, num_criteria):
+    if quality_names is None or list(quality_names) == _DEFAULT_QUALITY_NAMES:
+        short = list(_DEFAULT_QUALITY_SHORT)
+    else:
+        short = [str(n) for n in quality_names]
+    short = short[:num_criteria]
+    while len(short) < num_criteria:
+        short.append(f"Q{len(short)}")
+    return short
+
+
 COLOR_ORIG = "#5B9BD5"
 COLOR_OPT = "#ED7D31"
 QUALITY_COLORS = ["#4472C4", "#ED7D31", "#A5A5A5", "#FFC000", "#5B9BD5",
@@ -173,6 +185,7 @@ def _make_fig2(domain_weights, num_domains, num_criteria, output_dir,
     _setup_style()
     domain_short = _get_domain_short(num_domains, domain_names)
     q_names = quality_names if quality_names is not None else _DEFAULT_QUALITY_NAMES
+    q_short = _get_quality_short(quality_names, num_criteria)
     data = np.zeros((num_domains, num_criteria))
     for m in range(num_domains):
         start = m * num_criteria
@@ -196,15 +209,18 @@ def _make_fig2(domain_weights, num_domains, num_criteria, output_dir,
     ax.set_ylim(0, 1.08)
     ax.grid(axis="y", alpha=0.3, linestyle="--")
     ax.set_axisbelow(True)
+    _fit_max_chars = max(5, 100 // num_domains)
     for i in range(len(labels)):
         row = data[i]
         max_idx = np.argmax(row)
         max_val = row[max_idx]
         if max_val > 0.20:
             prefix = sum(row[:max_idx])
-            ax.text(i, prefix + max_val / 2, _DEFAULT_QUALITY_SHORT[max_idx % len(_DEFAULT_QUALITY_SHORT)],
-                    ha="center", va="center", fontsize=7,
-                    fontweight="bold", color="white")
+            label = q_short[max_idx]
+            if len(label) <= _fit_max_chars:
+                ax.text(i, prefix + max_val / 2, label,
+                        ha="center", va="center", fontsize=7,
+                        fontweight="bold", color="white")
     plt.tight_layout()
     return _save_fig(fig, output_dir, "fig2_quality_weights.png")
 

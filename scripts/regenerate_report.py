@@ -16,7 +16,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from quadmix.pipeline.report import (
     _make_fig1, _make_fig2, _experiment_table, save_report,
 )
-from quadmix.constants import DOMAIN_NAMES
 
 
 def main():
@@ -39,7 +38,7 @@ def main():
     num_criteria = config["num_quality_criteria"]
 
     dist_change = summary.get("sampling", {}).get("domain_distribution_change", {})
-    domain_names = DOMAIN_NAMES[:num_domains]
+    domain_names = list(params["quality_weights"].keys())
 
     orig_dist = np.zeros(num_domains)
     opt_dist = np.zeros(num_domains)
@@ -52,16 +51,17 @@ def main():
     orig_dist_norm = orig_dist / max(1, orig_total)
     opt_dist_norm = opt_dist / max(1, opt_total)
 
+    quality_names = list(params["quality_weights"][domain_names[0]].keys())
     dw_flat = np.zeros(num_domains * num_criteria)
-    quality_names = ["DCLM", "FineWeb-Edu", "English", "Math (Gen)", "Math (OpenWeb)"]
     for m, name in enumerate(domain_names):
         if name in params["quality_weights"]:
             for n, qn in enumerate(quality_names[:num_criteria]):
                 dw_flat[m * num_criteria + n] = params["quality_weights"][name].get(qn, 0)
 
     print(f"[Regenerate] Generating figures...")
-    fig1_file = _make_fig1(orig_dist_norm, opt_dist_norm, output_dir, num_domains)
-    fig2_file = _make_fig2(dw_flat, num_domains, num_criteria, output_dir)
+    fig1_file = _make_fig1(orig_dist_norm, opt_dist_norm, output_dir, num_domains, domain_names)
+    fig2_file = _make_fig2(dw_flat, num_domains, num_criteria, output_dir,
+                           domain_names, quality_names)
 
     reliability = summary.get("reliability")
     proxy_loss_stats = summary.get("proxy_loss_stats")

@@ -36,7 +36,14 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 L2_SHORT = {name: name.replace("_and_", " & ")[:12] for name in DOMAIN_NAMES}
 
-QUALITY_SHORT = ["DCLM", "Edu", "Eng", "MathG", "MathO"]
+_QUALITY_LABELS = {
+    "dclm": "DCLM",
+    "fineweb_edu_approx": "Edu",
+    "english": "Eng",
+    "eai_general_math": "MathG",
+    "eai_open_web_math": "MathO",
+}
+QUALITY_SHORT = [_QUALITY_LABELS.get(f, f) for f in FASTTEXT_FIELDS]
 QUALITY_COLORS = ["#4472C4", "#ED7D31", "#A5A5A5", "#FFC000", "#5B9BD5"]
 COLOR_L1 = "#5B9BD5"
 COLOR_L2 = "#ED7D31"
