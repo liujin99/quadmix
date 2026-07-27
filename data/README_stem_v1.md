@@ -34,7 +34,7 @@ Every task in STEM v1 maps directly to a downstream benchmark:
 
 | Validation Task | Downstream Benchmark(s) | Signal Path |
 |----------------|------------------------|-------------|
-| GSM8K | gsm8k_cot, math_cot | Math reasoning → Math reasoning |
+| GSM8K | gsm8k_cot, math_cot_500 | Math reasoning → Math reasoning |
 | MMLU (22 STEM) | mmlu_stem, gpqa_diamond | Science knowledge → Science knowledge |
 | ARC-Easy | arc_easy | Basic science → Basic science |
 | ARC-Challenge | arc_challenge | Advanced science → Advanced science |
@@ -137,7 +137,7 @@ Truncated (>2048):       0/11,132 (0.0%)
     "downstream_benchmarks": [
         "arc_easy", "arc_challenge",
         "mmlu_stem (0-shot, 22 subjects)",
-        "gpqa_diamond", "gsm8k_cot", "math_cot",
+        "gpqa_diamond", "gsm8k_cot", "math_cot_500",
     ],
     "tasks": {
         "gsm8k": {"loaded": 7473, "sampled": 5000, ...},
@@ -202,9 +202,9 @@ HF_ENDPOINT=https://hf-mirror.com python scripts/validation_set/prepare_stem_v1.
 ### Indirect Coverage (2/6 downstream benchmarks)
 
 - **gpqa_diamond** ← MMLU (science knowledge signal, but difficulty gap: MMLU is college/HS level, gpqa_diamond is graduate level)
-- **math_cot** ← GSM8K (math reasoning signal, but difficulty gap: GSM8K is grade school, math_cot is competition level)
+- **math_cot_500** ← GSM8K (math reasoning signal, but difficulty gap: GSM8K is grade school, math_cot_500 is competition level)
 
-The difficulty gap for gpqa_diamond and math_cot is inherent — a 1M-token proxy cannot learn graduate-level or competition-level content. MMLU and GSM8K provide the closest available signals. Experimental validation is needed to confirm transfer effectiveness.
+The difficulty gap for gpqa_diamond and math_cot_500 is inherent — a 1M-token proxy cannot learn graduate-level or competition-level content. MMLU and GSM8K provide the closest available signals. Experimental validation is needed to confirm transfer effectiveness.
 
 ## Excluded Tasks
 

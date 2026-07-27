@@ -3,7 +3,7 @@
 Prepare STEM v1 validation set for QuaDMix proxy model.
 
 STEM-focused validation set with 4 benchmarks (aligned with downstream evaluation):
-  1. GSM8K: grade school math word problems → gsm8k_cot, math_cot
+  1. GSM8K: grade school math word problems → gsm8k_cot, math_cot_500
   2. MMLU: 22 STEM subjects → mmlu_stem, gpqa_diamond
   3. arc_easy: ARC-Easy science questions → arc_easy
   4. arc_challenge: ARC-Challenge science questions → arc_challenge
@@ -288,7 +288,7 @@ def main():
             "downstream_benchmarks": [
                 "arc_easy", "arc_challenge",
                 "mmlu_stem (0-shot, 22 subjects)",
-                "gpqa_diamond", "gsm8k_cot", "math_cot",
+                "gpqa_diamond", "gsm8k_cot", "math_cot_500",
             ],
             "description": (
                 f"STEM v1: {len(STEM_TASKS)} STEM-focused benchmarks, "

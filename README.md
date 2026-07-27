@@ -226,7 +226,7 @@ See `docs/DATASET_SCHEMA_DESIGN.md` for full details.
 | 验证集 | 来源 | 特点 | 默认 |
 |--------|------|------|------|
 | **cap_v1** | 外部训练数据(70%) + benchmark train(30%) | 能力对齐，绕过 C2 假设，5 clusters × 8K = 40K samples | ✓ |
-| **stem_v1** | 4 STEM benchmarks (GSM8K/MMLU-22STEM/ARC-Easy/ARC-Challenge) | 与下游直接对应 (arc_easy/arc_challenge/mmlu_stem/gpqa_diamond/gsm8k_cot/math_cot)，full-sequence loss，~10.5K samples | |
+| **stem_v1** | 4 STEM benchmarks (GSM8K/MMLU-22STEM/ARC-Easy/ARC-Challenge) | 与下游直接对应 (arc_easy/arc_challenge/mmlu_stem/gpqa_diamond/gsm8k_cot/math_cot_500)，full-sequence loss，~10.5K samples | |
 | core_bmk_v6 | 21 个 CORE benchmark | Benchmark 对齐，per-task loss，~31K samples | |
 | openhermes | OpenHermes-2.5-1M | SFT 对话格式，通用质量信号，10K samples | |
 

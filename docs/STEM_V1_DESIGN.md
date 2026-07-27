@@ -45,7 +45,7 @@ CAP v1 的 5 个 capability cluster 中，**world_knowledge** 和 **symbol_logic
 | **mmlu_stem (0-shot, 22学科)** | 多学科 STEM 知识 |
 | **gpqa_diamond** | 研究生级科学知识 |
 | **gsm8k_cot** | 数学推理 |
-| **math_cot** | 竞赛级数学推理 |
+| **math_cot_500** | 竞赛级数学推理 |
 
 ---
 
@@ -55,7 +55,7 @@ CAP v1 的 5 个 capability cluster 中，**world_knowledge** 和 **symbol_logic
 
 | # | 验证集 task | 下游对应 | Train 样本 | 说明 |
 |---|------------|---------|----------|------|
-| 1 | **GSM8K** | gsm8k_cot, math_cot | 7,473 | 数学推理，含 step-by-step 解题 |
+| 1 | **GSM8K** | gsm8k_cot, math_cot_500 | 7,473 | 数学推理，含 step-by-step 解题 |
 | 2 | **MMLU (22 STEM)** | mmlu_stem, gpqa_diamond | ~2,200 | 22 个 STEM 学科选择题 |
 | 3 | **ARC-Easy** | arc_easy | 2,251 | 基础科学问答 |
 | 4 | **ARC-Challenge** | arc_challenge | 1,119 | 进阶科学问答 |
@@ -167,7 +167,7 @@ GSM8K 原始 answer 包含 `#### 72` 格式标记，保留原始格式。`####` 
 
 ---
 
-## 9. gpqa_diamond 和 math_cot 的覆盖 gap
+## 9. gpqa_diamond 和 math_cot_500 的覆盖 gap
 
 ### 9.1 gpqa_diamond
 
@@ -175,13 +175,13 @@ GSM8K 原始 answer 包含 `#### 72` 格式标记，保留原始格式。`####` 
 
 1M proxy 无法学会研究生级内容，所以无法直接用 gpqa_diamond 作为验证集 task。MMLU 的科学知识信号是当前最接近的替代。
 
-### 9.2 math_cot
+### 9.2 math_cot_500
 
-验证集中无 MATH dataset 数据。GSM8K 部分覆盖其数学推理维度，但难度有 gap（GSM8K 是小学级，math_cot 是竞赛级）。
+验证集中无 MATH dataset 数据。GSM8K 部分覆盖其数学推理维度，但难度有 gap（GSM8K 是小学级，math_cot_500 是竞赛级）。
 
 同样，1M proxy 学不动竞赛级内容。GSM8K 的数学推理信号是当前最接近的替代。
 
-**应对**：先跑实验验证 GSM8K 和 MMLU 的信号能否迁移到 math_cot 和 gpqa_diamond。如果迁移效果差，再考虑补充中间难度的 task。
+**应对**：先跑实验验证 GSM8K 和 MMLU 的信号能否迁移到 math_cot_500 和 gpqa_diamond。如果迁移效果差，再考虑补充中间难度的 task。
 
 ---
 
@@ -234,9 +234,9 @@ weighted_z_score = Σ R²_i * (loss_i - mean_loss_i) / std_loss_i
 
 **应对**：R²-weighted 搜索会自动过滤信号弱的 task。如果 ARC-Challenge (1,119) 的 R² 太低，会被降权。
 
-### 12.2 gpqa_diamond/math_cot 难度 gap
+### 12.2 gpqa_diamond/math_cot_500 难度 gap
 
-验证集无研究生级和竞赛级内容，信号可能无法迁移到 gpqa_diamond 和 math_cot。
+验证集无研究生级和竞赛级内容，信号可能无法迁移到 gpqa_diamond 和 math_cot_500。
 
 **应对**：先实验验证，效果差再补充中间难度 task。
 
