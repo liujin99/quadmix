@@ -462,8 +462,9 @@ def main():
 
     merged = compute_merged_quality_scores(
         quality_scores, domain_labels, optimal_params.merge_config,
+        n_jobs=-1,
     )
-    final_ranks = compute_quality_ranks(merged, domain_labels, token_counts)
+    final_ranks = compute_quality_ranks(merged, domain_labels, token_counts, n_jobs=-1)
     selected_indices, sampling_values, _ = sample_with_optimal_params(
         final_ranks, domain_labels, optimal_params,
     )

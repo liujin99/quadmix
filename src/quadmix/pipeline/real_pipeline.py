@@ -304,6 +304,7 @@ class QuaDMixPipeline:
         print(f"[Stage {stage_idx}] Merging quality scores (Eq.1)...")
         merged = compute_merged_quality_scores(
             quality_scores, domain_labels, merge_config_plain,
+            n_jobs=-1,
         )
         print(f"  Merged scores: [{merged.min():.4f}, "
               f"{merged.max():.4f}]")
@@ -312,6 +313,7 @@ class QuaDMixPipeline:
         ranks = compute_quality_ranks(
             merged, domain_labels, token_counts,
             seed=self.config.seed,
+            n_jobs=-1,
         )
         print(f"  Quality ranks: [{ranks.min():.4f}, "
               f"{ranks.max():.4f}]")

@@ -50,7 +50,7 @@ def _rank_one_domain(
         return indices, np.full(len(indices), 0.5, dtype=np.float64)
 
     jittered_scores = domain_scores + rng.uniform(0, 1e-12, len(domain_scores))
-    sort_order = np.argsort(-jittered_scores, kind='mergesort')
+    sort_order = np.argsort(-jittered_scores, kind='quicksort')
     sorted_scores = jittered_scores[sort_order]
     sorted_tokens = domain_tokens[sort_order]
     cumulative = np.cumsum(sorted_tokens)
@@ -66,7 +66,7 @@ def _rank_one_domain(
     else:
         tied_ranks = cumulative / total_tokens
 
-    inv_sort = np.argsort(sort_order)
+    inv_sort = np.argsort(sort_order, kind='quicksort')
 
     return indices, tied_ranks[inv_sort]
 
@@ -148,7 +148,7 @@ def compute_quality_ranks(
             # the minimum rank-normalized score gap of 1/num_docs) so that
             # max-rank tie handling does not collapse tied docs to rank ≈ 1.0.
             jittered_scores = domain_scores + rng.uniform(0, 1e-12, len(domain_scores))
-            sort_order = np.argsort(-jittered_scores, kind='mergesort')
+            sort_order = np.argsort(-jittered_scores, kind='quicksort')
             sorted_scores = jittered_scores[sort_order]
             sorted_tokens = domain_tokens[sort_order]
             cumulative = np.cumsum(sorted_tokens)
@@ -164,7 +164,7 @@ def compute_quality_ranks(
             else:
                 tied_ranks = cumulative / total_tokens
 
-            inv_sort = np.argsort(sort_order)
+            inv_sort = np.argsort(sort_order, kind='quicksort')
             ranks[indices] = tied_ranks[inv_sort]
 
     return ranks
