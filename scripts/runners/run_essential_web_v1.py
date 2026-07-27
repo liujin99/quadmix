@@ -53,6 +53,7 @@ from quadmix.constants import (
     HF_CORE_BMK_V6_DATASET, HF_CORE_BMK_V6_FILENAME,
     HF_CAP_V1_DATASET, HF_CAP_V1_FILENAME,
     HF_STEM_V1_DATASET, HF_STEM_V1_FILENAME,
+    HF_STEM_V2_DATASET, HF_STEM_V2_FILENAME,
     DEFAULT_EVAL_BUNDLE,
     VAL_SHA256,
 )
@@ -277,6 +278,10 @@ def ensure_stem_v1_data(val_path: str) -> str:
     return _ensure_hf_data(val_path, HF_STEM_V1_DATASET, HF_STEM_V1_FILENAME,
                            label="STEM v1")
 
+def ensure_stem_v2_data(val_path: str) -> str:
+    return _ensure_hf_data(val_path, HF_STEM_V2_DATASET, HF_STEM_V2_FILENAME,
+                           label="STEM v2")
+
 from quadmix.data.dataset_schema import DatasetSchema
 
 
@@ -321,7 +326,7 @@ def build_parser():
                         "(default: 1000, 0 = disable). "
                         "Results saved to each exp dir as checkpoint_trajectory.json.")
     p.add_argument("--val-set", type=str, default="openhermes",
-                   choices=["openhermes", "core", "core_bmk_v2", "core_bmk_v3", "core_bmk_v4", "core_bmk_v4.2", "core_bmk_v4.3", "core_bmk_v5", "core_bmk_v6", "cap_v1", "stem_v1"],
+                   choices=["openhermes", "core", "core_bmk_v2", "core_bmk_v3", "core_bmk_v4", "core_bmk_v4.2", "core_bmk_v4.3", "core_bmk_v5", "core_bmk_v6", "cap_v1", "stem_v1", "stem_v2"],
                    help="Validation set: 'openhermes' (default, auto-download), "
                         "'core' (CORE benchmark 22-task, continuation-only loss), "
                         "'core_bmk_v2' (10 BMK-like tasks, full-sequence loss), "
@@ -390,6 +395,9 @@ def create_proxy_runner(config, args, output_dir, metadata_manager):
     elif args.val_set == "stem_v1":
         val_path = os.path.join(DEFAULT_VAL_DIR, HF_STEM_V1_FILENAME)
         val_path = ensure_stem_v1_data(val_path)
+    elif args.val_set == "stem_v2":
+        val_path = os.path.join(DEFAULT_VAL_DIR, HF_STEM_V2_FILENAME)
+        val_path = ensure_stem_v2_data(val_path)
     else:
         val_path = os.path.join(DEFAULT_VAL_DIR, HF_OPENHERMES_FILENAME)
         val_path = ensure_val_data(val_path)

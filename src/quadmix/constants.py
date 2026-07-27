@@ -121,6 +121,9 @@ HF_CAP_V1_FILENAME = "cap_v1_tokenized.pt"
 HF_STEM_V1_DATASET = "liujin99/quadmix-stem-v1"
 HF_STEM_V1_FILENAME = "stem_v1_tokenized.pt"
 
+HF_STEM_V2_DATASET = "liujin99/quadmix-stem-v2"
+HF_STEM_V2_FILENAME = "stem_v2_tokenized.pt"
+
 VAL_SHA256 = {
     HF_OPENHERMES_FILENAME: "9c30d7e37998fa7405a30c8a786d1dcf3f31c3f0c14d7acb1be546fe3273a0b6",
     HF_CORE_FILENAME: "e70b7dd118cecc335ecfc6082f4f12627e11e1c18d49214dddb70290825cc9f3",
@@ -131,6 +134,7 @@ VAL_SHA256 = {
     HF_CORE_BMK_V6_FILENAME: "da04e5b4cece71a9efa57406399584ea1d49d0bd605eeadcaf62a94b8cc2ef3b",
     HF_CAP_V1_FILENAME: "a1051993d122b477377cee529f224901ec817d482c560081f637e19efd62fbba",
     HF_STEM_V1_FILENAME: "c3a7759ab7144c6aef699879126375096b7e136f188650b994d2fbb7f7c36114",
+    HF_STEM_V2_FILENAME: "aa9f86d137446e44942ddcd5d833246d5b435f35096b35a3e35a7fe085aafca6",
 }
 
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

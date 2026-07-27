@@ -57,6 +57,7 @@ from quadmix.constants import (
     HF_CORE_BMK_V6_DATASET, HF_CORE_BMK_V6_FILENAME,
     HF_CAP_V1_DATASET, HF_CAP_V1_FILENAME,
     HF_STEM_V1_DATASET, HF_STEM_V1_FILENAME,
+    HF_STEM_V2_DATASET, HF_STEM_V2_FILENAME,
     DEFAULT_EVAL_BUNDLE,
     VAL_SHA256,
 )
@@ -166,6 +167,9 @@ def resolve_val_path(val_set: str, val_path: str) -> str:
     if val_set == "stem_v1":
         local = os.path.join(DEFAULT_VAL_DIR, HF_STEM_V1_FILENAME)
         return _check_and_download(local, HF_STEM_V1_DATASET, HF_STEM_V1_FILENAME)
+    if val_set == "stem_v2":
+        local = os.path.join(DEFAULT_VAL_DIR, HF_STEM_V2_FILENAME)
+        return _check_and_download(local, HF_STEM_V2_DATASET, HF_STEM_V2_FILENAME)
     local = os.path.join(DEFAULT_VAL_DIR, HF_OPENHERMES_FILENAME)
     return _check_and_download(local, HF_OPENHERMES_DATASET, HF_OPENHERMES_FILENAME)
 
