@@ -336,16 +336,24 @@ class RegressionModel:
             X_val = np.array([p.flatten() for p in eval_params_list])
             y_val = np.array(eval_losses)
             import lightgbm as lgb
+            import inspect
+            use_eval_xy = 'eval_X' in inspect.signature(
+                lgb.LGBMRegressor.fit).parameters
             with warnings.catch_warnings():
-                warnings.simplefilter("ignore", UserWarning)
-                self._model.fit(
-                    X, y,
-                    eval_set=[(X_val, y_val)],
-                    callbacks=[lgb.early_stopping(stopping_rounds=early_stopping_rounds, verbose=False)],
+                warnings.simplefilter("ignore")
+                fit_kwargs = dict(
+                    callbacks=[lgb.early_stopping(
+                        stopping_rounds=early_stopping_rounds, verbose=False)],
                 )
+                if use_eval_xy:
+                    fit_kwargs['eval_X'] = X_val
+                    fit_kwargs['eval_y'] = y_val
+                else:
+                    fit_kwargs['eval_set'] = [(X_val, y_val)]
+                self._model.fit(X, y, **fit_kwargs)
         else:
             with warnings.catch_warnings():
-                warnings.simplefilter("ignore", UserWarning)
+                warnings.simplefilter("ignore")
                 self._model.fit(X, y)
 
         self._is_fitted = True
