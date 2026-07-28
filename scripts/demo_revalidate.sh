@@ -66,6 +66,8 @@ BLOCK_SIZE="2048"
 MODEL_VARIANT="tinyllama_1M"
 SEARCH_MODE="r2_weighted"
 SCHEMA=""
+SCHEMA_SET=0
+PREPROCESSED_DIR_SET=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -79,9 +81,9 @@ while [[ $# -gt 0 ]]; do
         --target-tokens) TARGET_TOKENS="$2"; shift 2 ;;
         --block-size)    BLOCK_SIZE="$2"; shift 2 ;;
         --model-variant) MODEL_VARIANT="$2"; shift 2 ;;
-        --preprocessed-dir) PREPROCESSED_DIR="$2"; shift 2 ;;
+        --preprocessed-dir) PREPROCESSED_DIR="$2"; PREPROCESSED_DIR_SET=1; shift 2 ;;
         --search-mode)     SEARCH_MODE="$2"; shift 2 ;;
-        --schema)          SCHEMA="$2"; shift 2 ;;
+        --schema)          SCHEMA="$2"; SCHEMA_SET=1; shift 2 ;;
         -h|--help)
             echo "Usage: bash scripts/demo_revalidate.sh --source-dir <path> [options]"
             echo ""
@@ -121,7 +123,48 @@ if [[ ! -d "$SOURCE_DIR/proxy_experiments" ]]; then
     exit 1
 fi
 
-# Auto-detect schema from val-set if not specified
+# ── Auto-detect schema and preprocessed-dir from pipeline_summary.json ──
+if [[ -f "$SOURCE_DIR/pipeline_summary.json" ]]; then
+    _detected=$(python3 -c "
+import json, os
+try:
+    with open('$SOURCE_DIR/pipeline_summary.json') as f:
+        s = json.load(f)
+    p = s.get('input_file', '')
+    if p and os.path.isdir(p):
+        print(f'PPD:{p}')
+    vs = s.get('reval', {}).get('new_val_set') or s.get('config', {}).get('val_set', '')
+    if vs and vs != 'unknown':
+        print(f'VSET:{vs}')
+except: pass
+" 2>/dev/null)
+    while IFS= read -r _line; do
+        case "$_line" in
+            PPD:*)
+                if [[ "$PREPROCESSED_DIR_SET" -eq 0 ]]; then
+                    PREPROCESSED_DIR="${_line#PPD:}"
+                    echo "  [auto] preprocessed-dir: $PREPROCESSED_DIR (from pipeline_summary.json)"
+                fi
+                ;;
+            VSET:*)
+                if [[ "$SCHEMA_SET" -eq 0 ]]; then
+                    _vs="${_line#VSET:}"
+                    case "$_vs" in
+                        stem_v1|stem_v2)
+                            SCHEMA="$QUADMIX_DIR/configs/schema_stem.yaml"
+                            ;;
+                        *)
+                            SCHEMA="$QUADMIX_DIR/configs/schema_essential_web.yaml"
+                            ;;
+                    esac
+                    echo "  [auto] schema: $SCHEMA (from val_set=$_vs in pipeline_summary.json)"
+                fi
+                ;;
+        esac
+    done <<< "$_detected"
+fi
+
+# Auto-detect schema from val-set if still not set
 if [[ -z "$SCHEMA" ]]; then
     case "$VAL_SET" in
         stem_v1|stem_v2)

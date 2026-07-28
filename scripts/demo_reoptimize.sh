@@ -44,30 +44,32 @@ PREPROCESSED_DIR="$QUADMIX_TEMP_DIR/preprocessed"
 
 SOURCE_DIR="${SOURCE_DIR:-}"
 SCHEMA=""
+SCHEMA_SET=0
 OUTPUT=""
 NUM_SEARCH="100000"
 TOP_K="10"
 TARGET_TOKENS="0"
 SEARCH_MODE="r2_weighted"
+PREPROCESSED_DIR_SET=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --source-dir)    SOURCE_DIR="$2"; shift 2 ;;
-        --schema)        SCHEMA="$2"; shift 2 ;;
+        --schema)        SCHEMA="$2"; SCHEMA_SET=1; shift 2 ;;
         --output|-o)     OUTPUT="$2"; shift 2 ;;
         --num-search)    NUM_SEARCH="$2"; shift 2 ;;
         --top-k)         TOP_K="$2"; shift 2 ;;
         --target-tokens) TARGET_TOKENS="$2"; shift 2 ;;
-        --preprocessed-dir) PREPROCESSED_DIR="$2"; shift 2 ;;
+        --preprocessed-dir) PREPROCESSED_DIR="$2"; PREPROCESSED_DIR_SET=1; shift 2 ;;
         --search-mode)     SEARCH_MODE="$2"; shift 2 ;;
         -h|--help)
             echo "Usage: bash scripts/demo_reoptimize.sh --source-dir <path> [options]"
             echo ""
             echo "Required:"
             echo "  --source-dir PATH        Original pipeline result directory"
-            echo "  --schema PATH            Dataset schema YAML config"
             echo ""
             echo "Options:"
+            echo "  --schema PATH            Dataset schema YAML (default: auto from pipeline_summary.json)"
             echo "  --output PATH            Output directory (default: auto)"
             echo "  --num-search N           Search points (default: 100000)"
             echo "  --top-k N                Top-K average (default: 10)"
@@ -89,8 +91,50 @@ if [[ -z "$SOURCE_DIR" ]]; then
     exit 1
 fi
 
+# ── Auto-detect schema and preprocessed-dir from pipeline_summary.json ──
+if [[ -f "$SOURCE_DIR/pipeline_summary.json" ]]; then
+    _detected=$(python3 -c "
+import json, os
+try:
+    with open('$SOURCE_DIR/pipeline_summary.json') as f:
+        s = json.load(f)
+    p = s.get('input_file', '')
+    if p and os.path.isdir(p):
+        print(f'PPD:{p}')
+    vs = s.get('reval', {}).get('new_val_set') or s.get('config', {}).get('val_set', '')
+    if vs and vs != 'unknown':
+        print(f'VSET:{vs}')
+except: pass
+" 2>/dev/null)
+    while IFS= read -r _line; do
+        case "$_line" in
+            PPD:*)
+                if [[ "$PREPROCESSED_DIR_SET" -eq 0 ]]; then
+                    PREPROCESSED_DIR="${_line#PPD:}"
+                    echo "  [auto] preprocessed-dir: $PREPROCESSED_DIR (from pipeline_summary.json)"
+                fi
+                ;;
+            VSET:*)
+                if [[ "$SCHEMA_SET" -eq 0 ]]; then
+                    _vs="${_line#VSET:}"
+                    case "$_vs" in
+                        stem_v1|stem_v2)
+                            SCHEMA="$QUADMIX_DIR/configs/schema_stem.yaml"
+                            ;;
+                        *)
+                            SCHEMA="$QUADMIX_DIR/configs/schema_essential_web.yaml"
+                            ;;
+                    esac
+                    echo "  [auto] schema: $SCHEMA (from val_set=$_vs in pipeline_summary.json)"
+                fi
+                ;;
+        esac
+    done <<< "$_detected"
+fi
+
 if [[ -z "$SCHEMA" ]]; then
-    echo "[Error] --schema is required"
+    echo "[Error] Schema could not be auto-detected"
+    echo "  Specify with --schema /path/to/schema.yaml"
     echo "  e.g. --schema configs/schema_stem.yaml"
     exit 1
 fi
