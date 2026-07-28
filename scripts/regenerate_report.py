@@ -166,6 +166,9 @@ def main():
                 mode_label = "R²-weighted"
             search_desc = "Σ z_predᵢ / K" if mode_label == "equal-weight" else "Σ wᵢ·z_predᵢ"
             parts.append(f"**Search mode:** {mode_label} (optimizes {search_desc}, matches downstream goal)\n")
+            _sm = config.get("sampler_method", "uniform") if config else "uniform"
+            _kappa = config.get("search_lcb_kappa", 0.0) if config else 0.0
+            parts.append(f"**Sampler:** {_sm} | **LCB κ:** {_kappa:.1f} (0=off)\n")
             parts.append("")
             parts.append("Four complementary metrics assess prediction and search quality:\n")
             parts.append("")
@@ -267,7 +270,10 @@ def main():
         n_filtered = per_task_analysis.get("n_filtered", 0)
         r2_method = per_task_analysis.get("r2_method", "unknown")
         search_mode = per_task_analysis.get("search_weight_mode", config.get("search_weight_mode", ""))
+        _sm = per_task_analysis.get("sampler_method", config.get("sampler_method", "uniform"))
+        _kappa = per_task_analysis.get("search_lcb_kappa", config.get("search_lcb_kappa", 0.0))
         parts.append(f"**Active tasks:** {n_active} | **Filtered (R²≤0):** {n_filtered} | **R² method:** {r2_method} | **Search mode:** {search_mode}\n")
+        parts.append(f"**Sampler:** {_sm} | **LCB κ:** {_kappa:.1f} (0=off)\n")
         tasks = per_task_analysis.get("tasks", [])
         has_train_r2 = any(t.get("train_r2") is not None for t in tasks)
         if has_train_r2:
