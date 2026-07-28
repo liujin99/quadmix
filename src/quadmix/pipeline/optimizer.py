@@ -28,16 +28,21 @@ def _train_single_task_cv_fold(
     regression_params: dict,
     num_domains: int,
     num_quality_criteria: int,
-) -> float:
-    """Train a single CV fold and return R²."""
+) -> Tuple[float, "RegressionModel"]:
+    """Train a single CV fold and return (R², fold model).
+
+    The fold model is returned so the caller can retain it for LCB uncertainty
+    estimation (std of fold-aggregate z-sums). Previously only R² was returned
+    and the model was discarded.
+    """
     cv_val_idx = folds[fold_idx]
     cv_train_idx = np.concatenate([folds[j] for j in range(n_folds) if j != fold_idx])
-    
+
     cv_train_params = [params_list[i] for i in cv_train_idx]
     cv_val_params = [params_list[i] for i in cv_val_idx]
     cv_train_losses = task_losses[cv_train_idx]
     cv_val_losses = task_losses[cv_val_idx]
-    
+
     cv_model = RegressionModel(model_type="lightgbm", **regression_params)
     cv_model.fit(
         cv_train_params,
@@ -48,8 +53,8 @@ def _train_single_task_cv_fold(
         eval_losses=cv_val_losses,
         verbose=False,
     )
-    
-    return float(cv_model.score(cv_val_params, cv_val_losses))
+
+    return float(cv_model.score(cv_val_params, cv_val_losses)), cv_model
 
 
 def _train_single_task(
@@ -77,7 +82,7 @@ def _train_single_task(
     
     # K-fold CV for R² estimation (parallel across folds)
     if folds is not None and n_folds > 1:
-        fold_r2s = Parallel(n_jobs=n_folds, prefer="threads")(
+        fold_results = Parallel(n_jobs=n_folds, prefer="threads")(
             delayed(_train_single_task_cv_fold)(
                 fold_idx=fold_idx,
                 folds=folds,
@@ -90,9 +95,12 @@ def _train_single_task(
             )
             for fold_idx in range(n_folds)
         )
+        fold_r2s = [r for r, _ in fold_results]
+        result["fold_models"] = [m for _, m in fold_results]
         result["r2"] = float(np.mean(fold_r2s))
     else:
         # Single split: use val_idx for R²
+        result["fold_models"] = []
         train_params = [params_list[i] for i in train_idx]
         val_params = [params_list[i] for i in val_idx] if len(val_idx) > 0 else None
         task_train_losses = task_losses[train_idx]
@@ -455,6 +463,7 @@ class QuaDMixOptimizer:
         self._regressor: Optional[RegressionModel] = None
         self._proxy_results: List[ProxyResult] = []
         self._per_task_models: Optional[Dict[str, RegressionModel]] = None
+        self._per_task_fold_models: Optional[Dict[str, List[RegressionModel]]] = None
         self._per_task_weights: Optional[Dict[str, float]] = None
         self._per_task_r2: Optional[Dict[str, float]] = None
         self._per_task_train_stats: Optional[Dict[str, Tuple[float, float]]] = None
@@ -597,6 +606,7 @@ class QuaDMixOptimizer:
             return
         
         self._per_task_models = {}
+        self._per_task_fold_models = {}
         self._per_task_r2 = {}
         self._per_task_train_r2 = {}
         self._per_task_train_stats = {}
@@ -641,6 +651,7 @@ class QuaDMixOptimizer:
         for result in results:
             task = result["task"]
             self._per_task_models[task] = result["model"]
+            self._per_task_fold_models[task] = result["fold_models"]
             self._per_task_r2[task] = result["r2"]
             self._per_task_train_r2[task] = result["train_r2"]
             self._per_task_train_stats[task] = result["train_stats"]
@@ -890,6 +901,43 @@ class QuaDMixOptimizer:
         elif self._overfit_gap and self._overfit_gap > 0.3:
             print(f"[QuaDMixOptimizer] ⚠️  Train-Val gap = {self._overfit_gap:.3f}: possible overfitting")
 
+    def _compute_fold_sigma_z(
+        self,
+        candidates: List[ParameterSet],
+        active_tasks: List[tuple],
+        weight_mode: str,
+    ) -> tuple[npt.NDArray[np.float64], int]:
+        """σ_z via method A (direct): std of K fold-aggregate z-sums (ddof=1).
+
+        For each CV fold f, build the aggregate z-sum using each task's fold-f
+        model (trained on 4/5 of train data — the models already built for R²
+        estimation, no extra training cost), then take std across the K folds.
+        Because folds are shared across tasks (one shuffle in
+        _train_per_task_models), cross-task correlation is captured: if all
+        tasks move together across folds, σ is large.
+
+        Returns (sigma_z, K). sigma_z is zeros when K<2 (std undefined with
+        ddof=1) — caller should skip the LCB penalty in that case.
+        """
+        fold_store = self._per_task_fold_models or {}
+        active_names = {t for t, _ in active_tasks}
+        Ks = [len(fold_store[t]) for t in fold_store if t in active_names and t in fold_store]
+        K = min(Ks) if Ks else 0
+        n = len(candidates)
+        if K < 2:
+            return np.zeros(n, dtype=np.float64), K
+        fold_z_sums = []
+        for f in range(K):
+            fz = np.zeros(n, dtype=np.float64)
+            for task, _ in active_tasks:
+                w = 1.0 if weight_mode == "equal_weight" else self._per_task_weights[task]
+                task_mean, task_std = self._per_task_train_stats[task]
+                raw_pred = fold_store[task][f].predict(candidates)
+                z_pred = (raw_pred - task_mean) / max(task_std, 1e-8)
+                fz += w * z_pred
+            fold_z_sums.append(fz)
+        return np.std(np.stack(fold_z_sums), axis=0, ddof=1), K
+
     def search_optimal(
         self,
         n_search_points: Optional[int] = None,
@@ -938,7 +986,6 @@ class QuaDMixOptimizer:
                     raw_pred = model.predict(candidates)
                     z_pred = (raw_pred - task_mean) / max(task_std, 1e-8)
                     z_score_sum += z_pred
-                predicted_losses = z_score_sum * agg_std + agg_mean
                 print(f"[QuaDMixOptimizer] Search: per-task equal-weight z-score prediction ({active_count} active tasks)")
             else:
                 z_score_sum = np.zeros(n_search)
@@ -948,15 +995,33 @@ class QuaDMixOptimizer:
                     raw_pred = model.predict(candidates)
                     z_pred = (raw_pred - task_mean) / max(task_std, 1e-8)
                     z_score_sum += w * z_pred
-                predicted_losses = z_score_sum * agg_std + agg_mean
                 mode_desc = "R²×σ" if weight_mode == "r2_sigma_weighted" else "R²"
                 print(f"[QuaDMixOptimizer] Search: per-task {mode_desc}-weighted z-score prediction ({active_count} active tasks)")
+
+            # LCB penalty — method A: std of K fold-aggregate z-sums.
+            # κ=0 → lcb_z == z_score_sum (byte-equivalent to legacy, σ block not computed).
+            kappa = self.config.search_lcb_kappa
+            lcb_z = z_score_sum
+            if kappa > 0:
+                sigma_z, K_folds = self._compute_fold_sigma_z(candidates, active_tasks, weight_mode)
+                if K_folds < 2:
+                    print(f"[QuaDMixOptimizer] WARNING: search_lcb_kappa={kappa}>0 but only {K_folds} fold models; σ=0, penalty skipped.")
+                else:
+                    lcb_z = z_score_sum + kappa * sigma_z
+            predicted_losses = lcb_z * agg_std + agg_mean
         elif hasattr(self, '_bootstrap_models') and len(self._bootstrap_models) > 0:
             all_preds = np.array([m.predict(candidates) for m in self._bootstrap_models])
             predicted_losses = np.mean(all_preds, axis=0)
+            # LCB in raw-loss space (bootstrap models predict aggregate loss directly).
+            # κ=0 → no-op (byte-equivalent).
+            kappa = self.config.search_lcb_kappa
+            if kappa > 0 and len(self._bootstrap_models) > 1:
+                predicted_losses = predicted_losses + kappa * np.std(all_preds, axis=0, ddof=1)
             print(f"[QuaDMixOptimizer] Search: ensemble prediction ({len(self._bootstrap_models)} models)")
         else:
             predicted_losses = self._regressor.predict(candidates)
+            if self.config.search_lcb_kappa > 0:
+                print(f"[QuaDMixOptimizer] WARNING: search_lcb_kappa={self.config.search_lcb_kappa}>0 on single-model path; no σ available, penalty skipped.")
             print(f"[QuaDMixOptimizer] Search: single model prediction")
 
         # Find top-K

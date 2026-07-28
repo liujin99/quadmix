@@ -33,6 +33,7 @@ class ParameterSampler:
 
     def __init__(self, config: QuaDMixConfig, seed: Optional[int] = None):
         self.config = config
+        self._seed = seed
         self._rng = np.random.default_rng(seed)
 
     def sample_one(self) -> ParameterSet:
@@ -102,6 +103,38 @@ class ParameterSampler:
             sampling_configs=sampling_configs,
         )
 
+    def _draw_raw_uniform(self, n: int, N: int, M: int):
+        """Draw raw samples via i.i.d. uniform (legacy path)."""
+        a_all = self._rng.uniform(0, 1, size=(n, N))
+        b_all = self._rng.uniform(0, 1, size=(n, M, N))
+        lambda_all = self._rng.uniform(self.config.lambda_min, self.config.lambda_max, size=(n, M)) * self.config.lambda_scale
+        omega_all = self._rng.uniform(self.config.omega_min, self.config.omega_max, size=(n, M)) * self.config.omega_scale
+        eta_all = self._rng.uniform(self.config.eta_min, self.config.eta_max, size=(n, M)) * self.config.eta_scale
+        epsilon_all = self._rng.uniform(self.config.epsilon_min, self.config.epsilon_max, size=(n, M)) * self.config.epsilon_scale
+        return a_all, b_all, lambda_all, omega_all, eta_all, epsilon_all
+
+    def _draw_raw_sobol(self, n: int, N: int, M: int):
+        """Draw raw samples via scrambled Sobol sequence (low-discrepancy).
+
+        Layout of the d = N + M*(N+4) Sobol columns:
+            [ a(N) | b(M*N) | lambda(M) | omega(M) | eta(M) | epsilon(M) ]
+        Each slice is mapped from [0,1) to its configured [min,max] range and
+        rescaled, exactly mirroring _draw_raw_uniform's per-group transform.
+        """
+        from scipy.stats import qmc
+        d = N + M * (N + 4)
+        eng = qmc.Sobol(d=d, scramble=True, seed=self._seed)
+        u = eng.random(n)
+        a_all = u[:, :N]
+        b_all = u[:, N:N + M * N].reshape(n, M, N)
+        c = N + M * N
+        cfg = self.config
+        lambda_all = (cfg.lambda_min + u[:, c:c + M] * (cfg.lambda_max - cfg.lambda_min)) * cfg.lambda_scale
+        omega_all = (cfg.omega_min + u[:, c + M:c + 2 * M] * (cfg.omega_max - cfg.omega_min)) * cfg.omega_scale
+        eta_all = (cfg.eta_min + u[:, c + 2 * M:c + 3 * M] * (cfg.eta_max - cfg.eta_min)) * cfg.eta_scale
+        epsilon_all = (cfg.epsilon_min + u[:, c + 3 * M:c + 4 * M] * (cfg.epsilon_max - cfg.epsilon_min)) * cfg.epsilon_scale
+        return a_all, b_all, lambda_all, omega_all, eta_all, epsilon_all
+
     def sample_batch(self, n: int) -> List[ParameterSet]:
         """
         Generate n parameter configurations (vectorized).
@@ -115,17 +148,18 @@ class ParameterSampler:
         N = self.config.num_criteria
         M = self.config.num_domains
 
-        a_all = self._rng.uniform(0, 1, size=(n, N))
+        method = getattr(self.config, "sampler_method", "sobol")
+        if method == "sobol":
+            a_all, b_all, lambda_all, omega_all, eta_all, epsilon_all = self._draw_raw_sobol(n, N, M)
+        elif method == "uniform":
+            a_all, b_all, lambda_all, omega_all, eta_all, epsilon_all = self._draw_raw_uniform(n, N, M)
+        else:
+            raise ValueError(f"unknown sampler_method: {method!r}")
+
         a_norm_all = a_all / np.clip(a_all.sum(axis=1, keepdims=True), 1e-10, None)
 
-        b_all = self._rng.uniform(0, 1, size=(n, M, N))
         b_raw_all = a_norm_all[:, np.newaxis, :] * b_all
         b_norm_all = b_raw_all / np.clip(b_raw_all.sum(axis=2, keepdims=True), 1e-10, None)
-
-        lambda_all = self._rng.uniform(self.config.lambda_min, self.config.lambda_max, size=(n, M)) * self.config.lambda_scale
-        omega_all = self._rng.uniform(self.config.omega_min, self.config.omega_max, size=(n, M)) * self.config.omega_scale
-        eta_all = self._rng.uniform(self.config.eta_min, self.config.eta_max, size=(n, M)) * self.config.eta_scale
-        epsilon_all = self._rng.uniform(self.config.epsilon_min, self.config.epsilon_max, size=(n, M)) * self.config.epsilon_scale
 
         results = []
         for i in range(n):

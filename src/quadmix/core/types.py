@@ -231,6 +231,34 @@ class QuaDMixConfig:
     top_k_average: int = 10
     search_weight_mode: str = "r2_weighted"
 
+    # Search-stage candidate sampler.
+    #   "sobol"   (default): low-discrepancy Sobol sequence (scipy.stats.qmc),
+    #             better space-filling coverage than i.i.d. uniform at low d.
+    #             Sobol coverage edge vanishes past d≈75; for d>200 increasing
+    #             n_search has negligible effect (<0.5%/10x) — prefer dimension
+    #             reduction, not larger n_search.
+    #   "uniform": legacy i.i.d. uniform sampling (for A/B comparison).
+    # d = N + M*(N+4) raw dims (e.g. N=5, M=4 -> d=41).
+    sampler_method: str = "sobol"
+
+    # LCB variance-penalty strength for search selection. Conservative
+    # direction: selection ranks candidates by  lcb = mu + kappa*sigma  then
+    # takes argmin (surrogate target is val_loss, lower=better), so high-sigma
+    # (uncertain) candidates are pushed down — prefer reliably-good over
+    # lucky-looking. Correct for one-shot top-K selection (no iteration to
+    # correct mistakes); sigma reused from CV fold models, no extra training.
+    #   1.0 (default): "one σ pessimism" — moderate, principled. sigma and
+    #       z-signal are both O(1), so the penalty is comparable to the signal:
+    #       neither negligible nor dominant.
+    #   0.0 : off — byte-equivalent to legacy behaviour (ranks purely by mean z).
+    #       Per-task branch:   sigma = std of K fold-aggregate z-sums (ddof=1),
+    #                          mu = final-model z-sum (fold models reused from
+    #                          CV R² estimation, no extra training cost).
+    #       Bootstrap branch:  sigma = std of ~50 bootstrap preds (ddof=1,
+    #                          raw-loss space; bootstrap predicts aggregate loss).
+    #       Single-model path: no sigma available; kappa>0 warns and skips.
+    search_lcb_kappa: float = 1.0
+
     # Sampling bounds (paper defaults)
     lambda_min: float = 0.0
     lambda_max: float = 1.0
