@@ -43,6 +43,8 @@
 
 set -euo pipefail
 
+export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-4}"
+
 if command -v conda &>/dev/null; then
     eval "$(conda shell.bash hook 2>/dev/null)" && conda activate nano
 fi

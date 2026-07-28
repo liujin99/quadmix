@@ -31,6 +31,8 @@
 
 set -euo pipefail
 
+export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-4}"
+
 if command -v conda &>/dev/null; then
     eval "$(conda shell.bash hook 2>/dev/null)" && conda activate nano
 fi
@@ -75,7 +77,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --top-k N                Top-K average (default: 10)"
             echo "  --target-tokens N        Target in billions (default: 0)"
             echo "  --preprocessed-dir PATH  Preprocessed shards dir"
-            echo "  --search-mode MODE       r2_weighted (default) or equal_weight"
+            echo "  --search-mode MODE       r2_weighted (default), equal_weight, or r2_sigma_weighted"
             exit 0
             ;;
         *)
