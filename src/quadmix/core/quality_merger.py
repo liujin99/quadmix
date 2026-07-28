@@ -26,10 +26,27 @@ from quadmix.utils.normalization import get_normalizer
 def _fast_rankdata_average(x: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
     """Fast equivalent of scipy.stats.rankdata(x, method='average').
 
-    Uses np.argsort (quicksort) + vectorized tie handling.
-    ~2-3x faster than scipy for large arrays (avoids Python-level tie loop).
+    Uses counting sort for discrete non-negative integers (O(n+k)),
+    falls back to argsort + vectorized tie handling for continuous data.
     """
     n = len(x)
+    if n == 0:
+        return np.array([], dtype=np.float64)
+
+    int_x = x.astype(np.int64)
+    if np.array_equal(x, int_x):
+        min_val = int_x.min()
+        max_val = int_x.max()
+        if min_val >= 0 and max_val < 10000:
+            counts = np.bincount(int_x, minlength=max_val + 1)
+            cum = np.cumsum(counts)
+            start = np.empty_like(cum)
+            start[0] = 1
+            start[1:] = cum[:-1] + 1
+            avg_ranks = (start + cum) / 2.0
+            return avg_ranks[int_x]
+    del int_x
+
     sorter = np.argsort(x, kind='quicksort')
     sorted_x = x[sorter]
     ranks_sorted = np.arange(1, n + 1, dtype=np.float64)
@@ -130,7 +147,13 @@ def compute_merged_quality_scores(
 
     valid_mask = (domain_labels >= 0) & (domain_labels <= max_idx)
     merged_scores = np.zeros(num_docs, dtype=np.float64)
-    doc_weights = weight_matrix[domain_labels[valid_mask]]
-    merged_scores[valid_mask] = (normalized_quality[valid_mask] * doc_weights).sum(axis=1)
+    if valid_mask.all():
+        doc_weights = weight_matrix[domain_labels]
+        np.einsum('ij,ij->i', normalized_quality, doc_weights, out=merged_scores)
+    else:
+        doc_weights = weight_matrix[domain_labels[valid_mask]]
+        merged_scores[valid_mask] = np.einsum(
+            'ij,ij->i', normalized_quality[valid_mask], doc_weights
+        )
 
     return merged_scores

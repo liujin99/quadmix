@@ -27,6 +27,7 @@ to use the BMK v2 set (10 BMK-like tasks, full-sequence loss), or
 
 import argparse, hashlib, os, sys, time, urllib.request, ssl
 _cpu_count = os.cpu_count() or 4
+os.environ.setdefault('MALLOC_ARENA_MAX', '4')
 os.environ.setdefault('OPENBLAS_NUM_THREADS', str(max(1, _cpu_count // 4)))
 os.environ.setdefault('OMP_NUM_THREADS', str(max(1, _cpu_count // 4)))
 os.environ.setdefault('MKL_NUM_THREADS', str(max(1, _cpu_count // 4)))

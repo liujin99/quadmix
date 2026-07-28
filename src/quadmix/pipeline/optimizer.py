@@ -1145,6 +1145,8 @@ class QuaDMixOptimizer:
             "n_filtered": sum(1 for t in tasks if t["weight"] == 0),
             "r2_method": r2_method,
             "search_weight_mode": self.config.search_weight_mode,
+            "sampler_method": self.config.sampler_method,
+            "search_lcb_kappa": self.config.search_lcb_kappa,
             "ensemble_val_r2": self._ensemble_val_r2,
             "ensemble_val_mae": self._ensemble_val_mae,
             "equal_weight_r2": self._equal_weight_r2,

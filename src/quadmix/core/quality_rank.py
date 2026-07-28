@@ -66,7 +66,8 @@ def _rank_one_domain(
     else:
         tied_ranks = cumulative / total_tokens
 
-    inv_sort = np.argsort(sort_order, kind='quicksort')
+    inv_sort = np.empty_like(sort_order)
+    inv_sort[sort_order] = np.arange(len(sort_order))
 
     return indices, tied_ranks[inv_sort]
 
@@ -164,7 +165,8 @@ def compute_quality_ranks(
             else:
                 tied_ranks = cumulative / total_tokens
 
-            inv_sort = np.argsort(sort_order, kind='quicksort')
+            inv_sort = np.empty_like(sort_order)
+            inv_sort[sort_order] = np.arange(len(sort_order))
             ranks[indices] = tied_ranks[inv_sort]
 
     return ranks

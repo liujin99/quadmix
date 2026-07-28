@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import time
+os.environ.setdefault('MALLOC_ARENA_MAX', '4')
 try:
     import quadmix
 except ImportError:

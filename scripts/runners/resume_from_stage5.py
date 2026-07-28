@@ -20,6 +20,7 @@ import json
 import os
 import sys
 import time
+os.environ.setdefault('MALLOC_ARENA_MAX', '4')
 try:
     import quadmix
 except ImportError:
@@ -294,6 +295,8 @@ def main():
             "num_proxy_experiments": n_exp,
             "num_search_points": n_search,
             "search_weight_mode": config.search_weight_mode,
+            "sampler_method": config.sampler_method,
+            "search_lcb_kappa": config.search_lcb_kappa,
         },
         "metrics": {
             "aggregate_train_r2": pipeline._optimizer.train_r2,

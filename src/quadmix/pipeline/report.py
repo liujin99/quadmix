@@ -429,6 +429,9 @@ def generate_report(
                 mode_label = "R²-weighted"
             search_desc = "Σ z_predᵢ / K" if mode_label == "equal-weight" else "Σ wᵢ·z_predᵢ"
             parts.append(f"**Search mode:** {mode_label} (optimizes {search_desc}, matches downstream goal)\n")
+            _sm = config.get("sampler_method", "uniform") if config else "uniform"
+            _kappa = config.get("search_lcb_kappa", 0.0) if config else 0.0
+            parts.append(f"**Sampler:** {_sm} | **LCB κ:** {_kappa:.1f} (0=off)\n")
             parts.append("")
             parts.append("Four complementary metrics assess prediction and search quality:\n")
             parts.append("")

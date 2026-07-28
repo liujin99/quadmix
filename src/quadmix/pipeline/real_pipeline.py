@@ -675,6 +675,8 @@ class QuaDMixPipeline:
                 "num_search_points": n_search,
                 "normalizer": normalizer,
                 "val_set": val_set,
+                "sampler_method": self.config.sampler_method,
+                "search_lcb_kappa": self.config.search_lcb_kappa,
             },
             "metrics": {
                 "aggregate_train_r2": self._optimizer.train_r2,

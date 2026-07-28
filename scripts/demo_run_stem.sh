@@ -23,6 +23,8 @@
 
 set -euo pipefail
 
+export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-4}"
+
 export PYTHONWARNINGS="${PYTHONWARNINGS:-ignore::UserWarning:torch_npu.utils._path_manager}"
 
 # ── 使用 conda nano 环境（包含 pyarrow 等依赖）─────────────

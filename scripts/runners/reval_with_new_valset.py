@@ -29,6 +29,7 @@ import ssl
 import sys
 import time
 import urllib.request
+os.environ.setdefault('MALLOC_ARENA_MAX', '4')
 try:
     import quadmix
 except ImportError:
@@ -504,6 +505,8 @@ def main():
             "num_search_points": n_search,
             "val_set": val_set_name,
             "search_weight_mode": config.search_weight_mode,
+            "sampler_method": config.sampler_method,
+            "search_lcb_kappa": config.search_lcb_kappa,
         },
         "metrics": {
             "aggregate_train_r2": pipeline._optimizer.train_r2,
