@@ -136,17 +136,17 @@ def save_sampled_dataset(
     if doc_id_fn is not None:
         records["doc_id"] = [doc_id_fn(i) for i in selected_indices]
     else:
-        records["doc_id"] = selected_indices.tolist()
+        records["doc_id"] = selected_indices
 
     if domain_labels is not None:
-        records[domain_col] = domain_labels[selected_indices].tolist()
+        records[domain_col] = domain_labels[selected_indices]
 
     if quality_ranks is not None:
-        records["quality_rank"] = quality_ranks[selected_indices].tolist()
+        records["quality_rank"] = quality_ranks[selected_indices]
 
     if sampling_values is not None:
         records["sampling_weight"] = 1.0 / np.maximum(sampling_values[selected_indices], 1e-10)
-        records["sampling_value"] = sampling_values[selected_indices].tolist()
+        records["sampling_value"] = sampling_values[selected_indices]
 
     df = pd.DataFrame(records)
 
