@@ -459,7 +459,7 @@ class QuaDMixPipeline:
             top_k_recall=self._optimizer.top_k_recall,
             top_k_value=self._optimizer.top_k_value,
             search_lift=self._optimizer.search_lift,
-            best_predicted_loss=float(predicted_losses.min()),
+            best_predicted_loss=(self._optimizer.search_meta or {}).get("best_predicted_mu", float(predicted_losses.min())),
             selected_indices=selected_indices,
             sampling_values=sampling_values,
             domain_distribution_before=orig_dist.tolist(),
@@ -608,7 +608,7 @@ class QuaDMixPipeline:
         )
         stage_times["stage6_search"] = time.time() - _t
         print(f"[Stage 6] Search: {stage_times['stage6_search']:.1f}s")
-        print(f"  Best predicted loss: {predicted_losses.min():.4f}")
+        print(f"  Best predicted loss (μ): {(self._optimizer.search_meta or {}).get('best_predicted_mu', predicted_losses.min()):.4f}")
 
         k = self.config.top_k_average
         top_indices = np.argsort(predicted_losses)[:k]
@@ -690,9 +690,11 @@ class QuaDMixPipeline:
                 "top_k_recall": self._optimizer.top_k_recall,
                 "top_k_value": self._optimizer.top_k_value,
                 "search_lift": self._optimizer.search_lift,
-                "best_predicted_loss": float(predicted_losses.min()),
-                "top_k_avg_loss": top_k_avg_loss,
+                "best_predicted_loss": (self._optimizer.search_meta or {}).get("best_predicted_mu", float(predicted_losses.min())),
+                "top_k_avg_loss": (self._optimizer.search_meta or {}).get("top_k_avg_mu", top_k_avg_loss),
+                "best_sigma_at_selected": (self._optimizer.search_meta or {}).get("best_sigma_at_selected"),
             },
+            "search_meta": dict(self._optimizer.search_meta or {}),
             "proxy_loss_stats": proxy_loss_stats,
             "reliability": {
                 "bootstrap": self._optimizer.bootstrap_details,

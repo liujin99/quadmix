@@ -476,6 +476,7 @@ class QuaDMixOptimizer:
         self._top_k_recall: Optional[float] = None
         self._top_k_value: Optional[int] = None
         self._search_lift: Optional[float] = None
+        self._search_meta: Optional[Dict[str, Any]] = None
 
     def add_proxy_results(self, results: List[ProxyResult]):
         """Add proxy experiment results."""
@@ -972,7 +973,14 @@ class QuaDMixOptimizer:
         sampler = ParameterSampler(self.config, seed=9999)
         candidates = sampler.sample_batch(n_search)
 
-        # Predict losses using per-task weighted prediction if available
+        # Predict μ (raw-loss scale) and σ (for LCB) per candidate.
+        # Each branch sets mu_arr (length n_search), sigma_arr (0 where N/A), and a
+        # `selectable` mask (False where σ is unknown → excluded from selection).
+        # κ=0 → predicted_losses == mu_arr (byte-equivalent to legacy; no σ computed).
+        kappa = self.config.search_lcb_kappa
+        selectable = np.ones(n_search, dtype=bool)
+        n_sigma = 0
+
         if self._per_task_models and self._per_task_weights and self._per_task_train_stats and self._aggregate_train_stats:
             agg_mean, agg_std = self._aggregate_train_stats
             weight_mode = self.config.search_weight_mode
@@ -998,31 +1006,51 @@ class QuaDMixOptimizer:
                 mode_desc = "R²×σ" if weight_mode == "r2_sigma_weighted" else "R²"
                 print(f"[QuaDMixOptimizer] Search: per-task {mode_desc}-weighted z-score prediction ({active_count} active tasks)")
 
-            # LCB penalty — method A: std of K fold-aggregate z-sums.
-            # κ=0 → lcb_z == z_score_sum (byte-equivalent to legacy, σ block not computed).
-            kappa = self.config.search_lcb_kappa
-            lcb_z = z_score_sum
+            mu_arr = z_score_sum * agg_std + agg_mean
+            sigma_arr = np.zeros(n_search)
+            K_folds = 0
             if kappa > 0:
-                sigma_z, K_folds = self._compute_fold_sigma_z(candidates, active_tasks, weight_mode)
+                # Lazy-σ: compute σ only on a shortlist of the lowest-μ candidates.
+                # The LCB-optimal lies within κ·σ of the μ-min, safely inside μ-top-1%,
+                # so σ on the full 100k is unnecessary — a 1000-point shortlist suffices.
+                shortlist = min(n_search, max(k * 100, 1000))
+                if shortlist < n_search:
+                    short_idx = np.argpartition(z_score_sum, shortlist - 1)[:shortlist]
+                    short_candidates = [candidates[i] for i in short_idx]
+                else:
+                    short_idx = np.arange(n_search)
+                    short_candidates = candidates
+                sigma_z_short, K_folds = self._compute_fold_sigma_z(short_candidates, active_tasks, weight_mode)
                 if K_folds < 2:
                     print(f"[QuaDMixOptimizer] WARNING: search_lcb_kappa={kappa}>0 but only {K_folds} fold models; σ=0, penalty skipped.")
                 else:
-                    lcb_z = z_score_sum + kappa * sigma_z
-            predicted_losses = lcb_z * agg_std + agg_mean
+                    sigma_arr[short_idx] = sigma_z_short * agg_std
+                    n_sigma = len(short_idx)
+                    # Exclude non-shortlist (σ unknown, not zero) from selection.
+                    if shortlist < n_search:
+                        selectable = np.zeros(n_search, dtype=bool)
+                        selectable[short_idx] = True
+                    print(f"[QuaDMixOptimizer] LCB κ={kappa}: σ on {n_sigma}/{n_search} shortlist (lazy, {K_folds}-fold)")
         elif hasattr(self, '_bootstrap_models') and len(self._bootstrap_models) > 0:
             all_preds = np.array([m.predict(candidates) for m in self._bootstrap_models])
-            predicted_losses = np.mean(all_preds, axis=0)
-            # LCB in raw-loss space (bootstrap models predict aggregate loss directly).
-            # κ=0 → no-op (byte-equivalent).
-            kappa = self.config.search_lcb_kappa
+            mu_arr = np.mean(all_preds, axis=0)
+            sigma_arr = np.zeros(n_search)
             if kappa > 0 and len(self._bootstrap_models) > 1:
-                predicted_losses = predicted_losses + kappa * np.std(all_preds, axis=0, ddof=1)
+                sigma_arr = np.std(all_preds, axis=0, ddof=1)
+                n_sigma = n_search
             print(f"[QuaDMixOptimizer] Search: ensemble prediction ({len(self._bootstrap_models)} models)")
+            K_folds = len(self._bootstrap_models)
         else:
-            predicted_losses = self._regressor.predict(candidates)
-            if self.config.search_lcb_kappa > 0:
-                print(f"[QuaDMixOptimizer] WARNING: search_lcb_kappa={self.config.search_lcb_kappa}>0 on single-model path; no σ available, penalty skipped.")
+            mu_arr = self._regressor.predict(candidates)
+            sigma_arr = np.zeros(n_search)
+            if kappa > 0:
+                print(f"[QuaDMixOptimizer] WARNING: search_lcb_kappa={kappa}>0 on single-model path; no σ available, penalty skipped.")
             print(f"[QuaDMixOptimizer] Search: single model prediction")
+            K_folds = 0
+
+        # Selection objective: μ + κ·σ (κ=0 → pure μ). Non-selectable → +inf.
+        predicted_losses = mu_arr + kappa * sigma_arr
+        predicted_losses[~selectable] = np.inf
 
         # Find top-K
         top_indices = np.argsort(predicted_losses)[:k]
@@ -1031,6 +1059,22 @@ class QuaDMixOptimizer:
         N, M = self.config.num_criteria, self.config.num_domains
         avg_arr = np.mean([candidates[i].flatten() for i in top_indices], axis=0)
         optimal_params = ParameterSet.from_flattened(avg_arr, M, N)
+
+        # Search meta: κ-independent μ/σ at the selected point for A/B comparability.
+        # best_predicted_mu → report's best_predicted_loss (μ, κ-independent);
+        # best_lcb (μ+κσ) is κ-dependent, kept here for debugging only.
+        best_idx = int(top_indices[0])
+        self._search_meta = {
+            "best_predicted_mu": float(mu_arr[best_idx]),
+            "best_sigma_at_selected": float(sigma_arr[best_idx]),
+            "best_lcb": float(predicted_losses[best_idx]),
+            "top_k_avg_mu": float(mu_arr[top_indices].mean()),
+            "top_k_avg_sigma": float(sigma_arr[top_indices].mean()),
+            "kappa": float(kappa),
+            "K_folds": int(K_folds),
+            "n_sigma_computed": int(n_sigma),
+            "sampler_method": self.config.sampler_method,
+        }
 
         return optimal_params, candidates, predicted_losses
 
@@ -1093,6 +1137,10 @@ class QuaDMixOptimizer:
     @property
     def search_lift(self) -> Optional[float]:
         return self._search_lift
+
+    @property
+    def search_meta(self) -> Optional[Dict[str, Any]]:
+        return self._search_meta
 
     @property
     def sample_sufficient(self) -> Optional[bool]:

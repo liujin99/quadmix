@@ -432,6 +432,11 @@ def generate_report(
             _sm = config.get("sampler_method", "uniform") if config else "uniform"
             _kappa = config.get("search_lcb_kappa", 0.0) if config else 0.0
             parts.append(f"**Sampler:** {_sm} | **LCB κ:** {_kappa:.1f} (0=off)\n")
+            _mu = metrics.get("best_predicted_loss")
+            _sig = metrics.get("best_sigma_at_selected")
+            if _mu is not None:
+                _sig_s = f"{_sig:.4f}" if _sig is not None else "—"
+                parts.append(f"**Best predicted loss (μ, κ-independent):** {_mu:.4f} | **σ at selected:** {_sig_s}\n")
             parts.append("")
             parts.append("Four complementary metrics assess prediction and search quality:\n")
             parts.append("")

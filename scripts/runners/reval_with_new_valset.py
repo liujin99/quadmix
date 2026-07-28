@@ -449,7 +449,7 @@ def main():
     )
     stage_times["stage6_search"] = time.time() - _t
     print(f"[Stage 6] Search: {stage_times['stage6_search']:.1f}s")
-    print(f"  Best predicted loss: {predicted_losses.min():.4f}")
+    print(f"  Best predicted loss (μ): {(pipeline._optimizer.search_meta or {}).get('best_predicted_mu', predicted_losses.min()):.4f}")
     k = config.top_k_average
     top_indices = np.argsort(predicted_losses)[:k]
     top_k_avg_loss = float(predicted_losses[top_indices].mean())
@@ -520,9 +520,11 @@ def main():
             "top_k_recall": pipeline._optimizer.top_k_recall,
             "top_k_value": pipeline._optimizer.top_k_value,
             "search_lift": pipeline._optimizer.search_lift,
-            "best_predicted_loss": float(predicted_losses.min()),
-            "top_k_avg_loss": top_k_avg_loss,
+            "best_predicted_loss": (pipeline._optimizer.search_meta or {}).get("best_predicted_mu", float(predicted_losses.min())),
+            "top_k_avg_loss": (pipeline._optimizer.search_meta or {}).get("top_k_avg_mu", top_k_avg_loss),
+            "best_sigma_at_selected": (pipeline._optimizer.search_meta or {}).get("best_sigma_at_selected"),
         },
+        "search_meta": dict(pipeline._optimizer.search_meta or {}),
         "proxy_loss_stats": {
             "new_val_loss": {
                 "mean": float(losses.mean()), "std": float(losses.std()),
