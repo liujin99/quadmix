@@ -375,6 +375,7 @@ echo "════════════════════════�
 echo ""
 
 mkdir -p "$RESULT_DIR"
+exec > >(tee "$RESULT_DIR/experiment.log") 2>&1
 
 # ══════════════════════════════════════════════════════════════
 #  SETUP MID_CHECKPOINTS DIRECTORY
@@ -572,6 +573,7 @@ echo "════════════════════════�
 echo ""
 echo "  Output:          $RESULT_DIR"
 echo "  Report:          $RESULT_DIR/midtrain_validation_report.md"
+echo "  Experiment log:  $RESULT_DIR/experiment.log"
 echo "  Training log:    $QUADMIX_LOG"
 echo "  Eval log:        $QUADMIX_EVAL_LOG"
 echo "  Checkpoint:      $MID_CHECKPOINTS_OUTPUT_DIR/$QUADMIX_MODEL_TAG/"

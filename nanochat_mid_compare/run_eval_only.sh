@@ -121,6 +121,7 @@ echo "════════════════════════�
 echo ""
 
 mkdir -p "$RESULT_DIR"
+exec > >(tee "$RESULT_DIR/experiment.log") 2>&1
 
 # ══════════════════════════════════════════════════════════════
 #  SYMLINK: base_checkpoints -> mid_checkpoints
@@ -234,4 +235,5 @@ echo "════════════════════════�
 echo ""
 echo "  Output:          $RESULT_DIR"
 echo "  Report:          $RESULT_DIR/eval_report.md"
+echo "  Experiment log:  $RESULT_DIR/experiment.log"
 echo "  Eval log:        $EVAL_LOG"

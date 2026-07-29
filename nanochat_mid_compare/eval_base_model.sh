@@ -142,6 +142,7 @@ echo "════════════════════════�
 echo ""
 
 mkdir -p "$OUTPUT_DIR"
+exec > >(tee "$OUTPUT_DIR/experiment.log") 2>&1
 
 # ══════════════════════════════════════════════════════════════
 #  EVALUATION
@@ -167,6 +168,7 @@ echo "  Evaluation Complete!"
 echo "════════════════════════════════════════════════════════════"
 echo ""
 echo "  Log file: $EVAL_LOG"
+echo "  Experiment log: $OUTPUT_DIR/experiment.log"
 echo ""
 echo "  To compare with mid-trained models, check:"
 echo "    - QuadMix: results/<timestamp>/eval_quadmix.log"

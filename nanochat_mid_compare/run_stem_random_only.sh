@@ -220,6 +220,7 @@ echo "════════════════════════�
 echo ""
 
 mkdir -p "$RESULT_DIR"
+exec > >(tee "$RESULT_DIR/experiment.log") 2>&1
 
 DATA_DIR="$RESULT_DIR/data"
 
@@ -553,6 +554,7 @@ echo "  Files:"
 echo "    ├── data/                        # Training datasets"
 echo "    │   ├── random_data/             # Random baseline shards"
 echo "    │   └── dataset_stats.json       # Statistics"
+echo "    ├── experiment.log              # Full experiment log (all output)"
 echo "    ├── mid_train_random.log"
 echo "    ├── eval_random.log"
 echo "    └── experiment_report.md"

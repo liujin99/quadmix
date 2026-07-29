@@ -185,6 +185,9 @@ echo ""
 echo "════════════════════════════════════════════════════════════"
 echo ""
 
+mkdir -p "$RESULT_DIR"
+exec > >(tee "$RESULT_DIR/continue_experiment.log") 2>&1
+
 # ══════ SETUP MID_CHECKPOINTS DIRECTORY ══════
 
 if [ -n "$MID_CHECKPOINTS_OUTPUT_DIR" ]; then
@@ -449,6 +452,7 @@ echo ""
 echo "  Output directory: $RESULT_DIR"
 echo ""
 echo "  Files:"
+echo "    ├── continue_experiment.log          # Full experiment log (all output)"
 echo "    ├── mid_train_quality_fineweb_edu.log  # fineweb_edu training log"
 echo "    ├── eval_quadmix.log                   # QuadMix eval"
 echo "    ├── eval_random.log                    # Random eval"
