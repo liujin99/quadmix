@@ -261,6 +261,30 @@ def _fig_int_hist(per_arm, key, xlabel, fname, out_dir, xmax=None):
     _save_fig(fig, out_dir, fname)
 
 
+def _normalize_domain(dom, domain_names):
+    """Map integer domain codes (from quadmix sampled parquet) to names.
+
+    The quadmix pipeline's metadata_manager stores domain as int codes via
+    pd.CategoricalDtype(categories=domain_names), so code i = domain_names[i].
+    Manual/random arms already carry string names from source parquets.
+    """
+    if not domain_names or not dom:
+        return dom
+    out = Counter()
+    for k, v in dom.items():
+        if isinstance(k, bool):
+            out[k] += v
+        elif isinstance(k, (int, np.integer)):
+            idx = int(k)
+            if 0 <= idx < len(domain_names):
+                out[domain_names[idx]] += v
+            else:
+                out[f"D{idx}"] += v
+        else:
+            out[k] += v
+    return out
+
+
 def _fig_domain(per_arm, out_dir):
     arms_with = {l: a for l, a in per_arm.items() if a["has_domain"] and a["domain"]}
     if not arms_with:
@@ -383,6 +407,7 @@ def main():
     if not stats_path.is_file():
         stats_path = result_dir / "dataset_stats.json"
     stats = json.load(open(stats_path)) if stats_path.is_file() else {}
+    domain_names = (stats.get("config") or {}).get("domain_names")
 
     arms = {}
     for p in sorted(data_root.glob("*_data")):
@@ -420,6 +445,8 @@ def main():
                     TOK.append(tl)
                 if d:
                     dom.update(d)
+        if domain_names:
+            dom = _normalize_domain(dom, domain_names)
         pa = {
             "len": np.concatenate(L) if L else np.array([], dtype=np.int64),
             "ent": np.concatenate(E) if E else np.array([], dtype=np.float32),

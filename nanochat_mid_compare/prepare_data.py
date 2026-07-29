@@ -211,6 +211,29 @@ def _filter_docs_chunk(args):
     return valid, n_empty, n_too_long, n_repeat
 
 
+_filter_texts = None
+_filter_domains = None
+
+
+def _filter_docs_by_range(task):
+    start, end, max_chars, max_char_repeat_ratio = task
+    valid_indices = []
+    n_empty = 0
+    n_too_long = 0
+    n_repeat = 0
+    for i in range(start, end):
+        t = _filter_texts[i]
+        if not t:
+            n_empty += 1
+        elif len(t) > max_chars:
+            n_too_long += 1
+        elif _has_char_repetition(t, max_char_repeat_ratio):
+            n_repeat += 1
+        else:
+            valid_indices.append(i)
+    return valid_indices, n_empty, n_too_long, n_repeat
+
+
 def _read_docs_from_shard_tagged(args):
     shard_id, shard_path, doc_indices, text_col, domain_col = args
     shard_names = set(pq.read_schema(shard_path).names)
@@ -707,36 +730,53 @@ def main():
             qm_domains = quadmix_table[domain_col].to_pylist()
         else:
             qm_domains = [None] * len(texts)
+        if domain_names is not None and qm_domains:
+            non_none = [d for d in qm_domains if d is not None]
+            if non_none and all(isinstance(d, (int, np.integer)) and not isinstance(d, bool) for d in non_none):
+                qm_domains = [
+                    (domain_names[d] if 0 <= d < len(domain_names) else None) if d is not None else None
+                    for d in qm_domains
+                ]
         del quadmix_table
         max_chars = args.max_chars
         max_char_repeat_ratio = args.max_char_repeat_ratio
         num_workers = args.num_workers or min(mp.cpu_count(), 256) or 1
         chunk_size = max(1, len(texts) // (num_workers * 4))
-        chunks = [list(zip(texts[i:i + chunk_size], qm_domains[i:i + chunk_size]))
+        ranges = [(i, min(i + chunk_size, len(texts)), max_chars, max_char_repeat_ratio)
                   for i in range(0, len(texts), chunk_size)]
-        filter_tasks = [(c, max_chars, max_char_repeat_ratio) for c in chunks]
-        valid_pairs = []
-        n_empty = 0
-        n_too_long = 0
-        n_repeat = 0
-        pool = _get_io_pool(num_workers)
-        for valid, ne, tl, tr in tqdm(
-            pool.imap_unordered(_filter_docs_chunk, filter_tasks, chunksize=1),
-            total=len(filter_tasks),
+
+        global _filter_texts, _filter_domains
+        _filter_texts = texts
+        _filter_domains = qm_domains
+
+        fork_ctx = mp.get_context("fork")
+        filter_pool = fork_ctx.Pool(num_workers)
+        valid_indices_all = []
+        n_empty = n_too_long = n_repeat = 0
+        for indices, ne, tl, tr in tqdm(
+            filter_pool.imap_unordered(_filter_docs_by_range, ranges, chunksize=1),
+            total=len(ranges),
             desc=f"  Filtering QuadMix docs ({num_workers} processes)",
             file=sys.stdout, mininterval=1.0,
         ):
-            valid_pairs.extend(valid)
+            valid_indices_all.extend(indices)
             n_empty += ne
             n_too_long += tl
             n_repeat += tr
+        filter_pool.close()
+        filter_pool.join()
+
+        _filter_texts = None
+        _filter_domains = None
+
         n_filtered = n_empty + n_too_long + n_repeat
         if n_filtered > 0:
             print(f"  Filtered {n_empty:,} docs (empty), "
                   f"{n_too_long:,} docs (>{max_chars:,} chars), "
                   f"{n_repeat:,} docs (single char >{max_char_repeat_ratio*100:.0f}% repetition)")
-        valid_texts = [p[0] for p in valid_pairs]
-        valid_doms = [p[1] for p in valid_pairs]
+        valid_texts = [texts[i] for i in valid_indices_all]
+        valid_doms = [qm_domains[i] for i in valid_indices_all]
+        del valid_indices_all
         print(f"  Counting tokens for {len(valid_texts):,} docs...")
         if enc and args.tokenizer_pkl:
             token_counts = count_tokens_mp(valid_texts, args.tokenizer_pkl, num_workers=args.num_workers)
