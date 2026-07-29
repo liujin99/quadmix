@@ -19,6 +19,14 @@ Outputs (into --output-dir, default = --result-dir):
   fig_arm_domain.png        — domain distribution grouped bars (needs domain col)
   arm_data_comparison.txt   — per-arm doc/token counts + metric percentiles +
                               domain mix + token-length & boundary stats
+  quality_length_corr.txt   — Spearman(quality_signal, char_count) per arm.
+                              Signals: raw quality_cols for every arm that
+                              preserves them + the merged quality_rank (0=best)
+                              for the quadmix_sampled arm only (prepare_data
+                              drops quality_rank from the regular quadmix arm;
+                              pass --sampled-parquet to recover it).
+  fig_quality_length_corr.png — heatmap of the above Spearman matrix
+  fig_arm_<quality>.png       — per-arm quality-signal histograms
 
 Text-based slices run on existing text-only parquets now; the token slices need
 --tokenizer (nanochat tokenizer.pkl) and the domain slice needs the "domain"
@@ -27,7 +35,8 @@ label column (prepare_data preserves it when the source schema has domain_col).
 Usage:
   python scripts/analysis/analyze_arm_data.py \
       --result-dir nanochat_mid_compare/results_stem/<timestamp> \
-      --tokenizer /home/ma-user/work/nanochat_model_dir/tokenizer
+      --tokenizer /home/ma-user/work/nanochat_model_dir/tokenizer \
+      --sampled-parquet <search_output_dir>/sampled_dataset.parquet
 """
 
 import argparse
@@ -172,6 +181,68 @@ def _scan_shard(task):
             else:
                 result[c] = np.array(arr, dtype=np.float64)
     return result
+
+
+def _scan_sampled_arm(parquet_path, quality_cols, domain_names):
+    """Scan a QuadMix sampled_dataset.parquet as an extra 'quadmix_sampled' arm.
+
+    sampled_dataset.parquet (batch_sampler.save_sampled_dataset) carries
+    char_count / quality_rank (merged, 0=best) / raw quality_cols / <domain_col>
+    (int labels). prepare_data drops quality_rank when building arm parquets, so
+    this is the only arm that can show rank<->length. Domain column name is the
+    schema's domain_col (category_name for STEM); falls back to 'domain'.
+
+    Text-free: reads only the needed columns (no text, no tokenizer, no packing
+    sim) -> fast & low-memory. Length is taken from char_count (== len(text) as
+    written by save_sampled_dataset). ent/rep/div are left empty so the
+    text-only histograms simply skip this arm (they are redundant with the
+    quadmix arm, which is the same data pre-packing).
+    """
+    schema_names = set(pq.read_schema(parquet_path).names)
+    domain_col = None
+    for c in ("category_name", "domain"):
+        if c in schema_names:
+            domain_col = c
+            break
+
+    want = []
+    for c in ["char_count", "quality_rank"] + list(quality_cols or []):
+        if c in schema_names and c not in want:
+            want.append(c)
+    if domain_col and domain_col not in want:
+        want.append(domain_col)
+    table = pq.read_table(parquet_path, columns=want)
+
+    char_count = np.asarray(table["char_count"].to_numpy(), dtype=np.int64) \
+        if "char_count" in table.column_names else np.array([], dtype=np.int64)
+
+    dom_labels = None
+    dom = Counter()
+    if domain_col and domain_col in table.column_names:
+        dom_labels = np.asarray(table[domain_col].to_numpy())
+        dom = Counter(dom_labels.tolist())
+        if domain_names:
+            dom = _normalize_domain(dom, domain_names)
+
+    pa = {
+        "len": char_count,
+        "ent": np.array([], dtype=np.float32),
+        "rep": np.array([], dtype=np.float32),
+        "div": np.array([], dtype=np.float32),
+        "domain": dom,
+        "has_domain": domain_col is not None,
+        "dom_labels": dom_labels,
+        "text_hashes": [],
+        "tok_len": None,
+        "boundaries": None,
+        "char_count": char_count,
+    }
+    if "quality_rank" in table.column_names:
+        pa["quality_rank"] = np.asarray(table["quality_rank"].to_numpy(), dtype=np.float64)
+    for c in (quality_cols or []):
+        if c in table.column_names:
+            pa[c] = np.asarray(table[c].to_numpy(), dtype=np.float64)
+    return pa
 
 
 # ── packing simulation (best-fit, mirrors nanochat dataloader) ────
@@ -639,6 +710,13 @@ def parse_args():
         "--result-dir", required=True,
         help="results_stem/<ts> dir containing data/<arm>_data/ + dataset_stats.json",
     )
+    p.add_argument(
+        "--sampled-parquet", default=None,
+        help="path to a QuadMix sampled_dataset.parquet (search output); scanned as an "
+             "extra 'quadmix_sampled' arm. It is the only arm carrying the merged "
+             "quality_rank (0=best) that prepare_data drops, so it enables the "
+             "quality_rank<->length Spearman in the quality-length table.",
+    )
     p.add_argument("--output-dir", default=None, help="Where to write outputs (default: --result-dir)")
     p.add_argument("--num-workers", type=int, default=None, help="multiprocessing workers")
     p.add_argument(
@@ -757,6 +835,16 @@ def main():
             if arrs:
                 pa[key] = np.concatenate(arrs)
         per_arm[label] = pa
+
+    if args.sampled_parquet:
+        sp = args.sampled_parquet
+        if os.path.isfile(sp):
+            print(f"\n  arm 'quadmix_sampled': scanning {sp}")
+            per_arm["quadmix_sampled"] = _scan_sampled_arm(sp, quality_cols, domain_names)
+            print(f"    n_docs={len(per_arm['quadmix_sampled']['len']):,}  "
+                  f"has quality_rank={'quality_rank' in per_arm['quadmix_sampled']}")
+        else:
+            print(f"  [warn] --sampled-parquet not found: {sp}")
 
     print("\n=== Generating figures ===")
     _setup_style()
