@@ -57,6 +57,8 @@ MID_CHECKPOINTS_OUTPUT_DIR="${MID_CHECKPOINTS_OUTPUT_DIR:-$SCRIPT_DIR/checkpoint
 
 # Experiment output directory
 RESULT_DIR="${RESULT_DIR:-$SCRIPT_DIR/results_stem/$TIMESTAMP}"
+mkdir -p "$RESULT_DIR"
+exec > >(tee "$RESULT_DIR/experiment.log") 2>&1
 
 # ── Mid-training hyperparameters ──
 TARGET_PARAM_DATA_RATIO="${TARGET_PARAM_DATA_RATIO:-0.5}"
@@ -246,7 +248,6 @@ echo "════════════════════════�
 echo ""
 
 mkdir -p "$RESULT_DIR"
-exec > >(tee "$RESULT_DIR/experiment.log") 2>&1
 
 DATA_DIR="$RESULT_DIR/data"
 

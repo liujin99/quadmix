@@ -56,6 +56,8 @@ if [ ! -d "$RESULT_DIR" ]; then
     exit 1
 fi
 
+exec > >(tee "$RESULT_DIR/continue_experiment.log") 2>&1
+
 if [ ! -f "$STATS_FILE" ]; then
     echo "ERROR: dataset_stats.json not found: $STATS_FILE"
     exit 1
@@ -184,9 +186,6 @@ done
 echo ""
 echo "════════════════════════════════════════════════════════════"
 echo ""
-
-mkdir -p "$RESULT_DIR"
-exec > >(tee "$RESULT_DIR/continue_experiment.log") 2>&1
 
 # ══════ SETUP MID_CHECKPOINTS DIRECTORY ══════
 

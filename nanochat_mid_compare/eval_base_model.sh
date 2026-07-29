@@ -33,6 +33,8 @@ NANOCHAT_REPO="${NANOCHAT_REPO:-/home/ma-user/work/nanochat_midtrain_326}"
 
 # Output directory for evaluation log
 OUTPUT_DIR="${OUTPUT_DIR:-$(cd "$(dirname "$0")" && pwd)/results/base_eval}"
+mkdir -p "$OUTPUT_DIR"
+exec > >(tee "$OUTPUT_DIR/experiment.log") 2>&1
 
 # Number of NPU cards
 NUM_NPU="${NUM_NPU:-8}"
@@ -142,7 +144,6 @@ echo "════════════════════════�
 echo ""
 
 mkdir -p "$OUTPUT_DIR"
-exec > >(tee "$OUTPUT_DIR/experiment.log") 2>&1
 
 # ══════════════════════════════════════════════════════════════
 #  EVALUATION

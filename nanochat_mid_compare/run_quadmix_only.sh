@@ -42,6 +42,8 @@ BASE_MODEL_TAG="${BASE_MODEL_TAG:-d24_0320}"
 NANOCHAT_REPO="${NANOCHAT_REPO:-/home/ma-user/work/nanochat_midtrain_326}"
 MID_CHECKPOINTS_OUTPUT_DIR="${MID_CHECKPOINTS_OUTPUT_DIR:-$HOME/.cache/nanochat_mid_compare/mid_checkpoints}"
 RESULT_DIR="${RESULT_DIR:-$SCRIPT_DIR/results/quadmix_only_$TIMESTAMP}"
+mkdir -p "$RESULT_DIR"
+exec > >(tee "$RESULT_DIR/experiment.log") 2>&1
 
 TARGET_PARAM_DATA_RATIO="${TARGET_PARAM_DATA_RATIO:-0.5}"
 NUM_SCALING_PARAMS="${NUM_SCALING_PARAMS:-}"
@@ -375,7 +377,6 @@ echo "════════════════════════�
 echo ""
 
 mkdir -p "$RESULT_DIR"
-exec > >(tee "$RESULT_DIR/experiment.log") 2>&1
 
 # ══════════════════════════════════════════════════════════════
 #  SETUP MID_CHECKPOINTS DIRECTORY

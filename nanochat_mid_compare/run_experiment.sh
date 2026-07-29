@@ -60,6 +60,8 @@ MID_CHECKPOINTS_OUTPUT_DIR="${MID_CHECKPOINTS_OUTPUT_DIR:-$HOME/.cache/nanochat_
 
 # Experiment output directory (logs, data, reports)
 RESULT_DIR="${RESULT_DIR:-$SCRIPT_DIR/results/$TIMESTAMP}"
+mkdir -p "$RESULT_DIR"
+exec > >(tee "$RESULT_DIR/experiment.log") 2>&1
 
 # ── Mid-training hyperparameters ──
 # Training token budget: min(target_ratio * num_scaling_params, dataset_tokens)
@@ -277,7 +279,6 @@ echo "════════════════════════�
 echo ""
 
 mkdir -p "$RESULT_DIR"
-exec > >(tee "$RESULT_DIR/experiment.log") 2>&1
 
 DATA_DIR="$RESULT_DIR/data"
 

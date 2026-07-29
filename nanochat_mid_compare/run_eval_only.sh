@@ -43,6 +43,8 @@ if [ -z "$RESULT_DIR" ]; then
 fi
 
 RESULT_DIR="$(cd "$(dirname "$RESULT_DIR")" && pwd)/$(basename "$RESULT_DIR")"
+mkdir -p "$RESULT_DIR"
+exec > >(tee "$RESULT_DIR/experiment.log") 2>&1
 
 # ══════════════════════════════════════════════════════════════
 #  CONFIGURATION
@@ -121,7 +123,6 @@ echo "════════════════════════�
 echo ""
 
 mkdir -p "$RESULT_DIR"
-exec > >(tee "$RESULT_DIR/experiment.log") 2>&1
 
 # ══════════════════════════════════════════════════════════════
 #  SYMLINK: base_checkpoints -> mid_checkpoints
