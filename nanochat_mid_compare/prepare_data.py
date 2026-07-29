@@ -5,8 +5,9 @@ Prepare nanochat-compatible training datasets for comparison:
   3. Manual Ratio subset from source shards (domain-proportional, token-count aligned)
   4. Quality-Only Top-K subsets (token-count aligned, optional, multiple methods)
 
-All datasets are written as sharded parquet files with a single "text" column,
-compatible with nanochat's dataloader (last shard = validation).
+All datasets are written as sharded parquet files with a "text" column (plus an
+optional "domain" label column when the source schema provides one), compatible
+with nanochat's dataloader (last shard = validation).
 
 Token budget logic:
   target_tokens = data_ratio x num_scaling_params
@@ -198,7 +199,7 @@ def _filter_docs_chunk(args):
     n_empty = 0
     n_too_long = 0
     n_repeat = 0
-    for t in chunk:
+    for t, dom in chunk:
         if not t:
             n_empty += 1
         elif len(t) > max_chars:
@@ -206,23 +207,33 @@ def _filter_docs_chunk(args):
         elif _has_char_repetition(t, max_char_repeat_ratio):
             n_repeat += 1
         else:
-            valid.append(t)
+            valid.append((t, dom))
     return valid, n_empty, n_too_long, n_repeat
 
 
 def _read_docs_from_shard_tagged(args):
-    shard_id, shard_path, doc_indices, text_col = args
-    table = pq.read_table(shard_path, columns=[text_col])
+    shard_id, shard_path, doc_indices, text_col, domain_col = args
+    shard_names = set(pq.read_schema(shard_path).names)
+    cols = [c for c in [text_col, domain_col] if c and c in shard_names]
+    cols = list(dict.fromkeys(cols))
+    table = pq.read_table(shard_path, columns=cols)
     taken = table.take(pa.array(doc_indices))
-    texts = taken[text_col].to_pylist()
+    if text_col in taken.column_names:
+        texts = taken[text_col].to_pylist()
+    else:
+        texts = ["" for _ in doc_indices]
+    if domain_col and domain_col in taken.column_names:
+        domains = taken[domain_col].to_pylist()
+    else:
+        domains = [None] * len(texts)
     return shard_id, [
-        {"text": t, "char_count": len(t), "token_count": len(t) // 4}
-        for t in texts
+        {"text": t, "char_count": len(t), "token_count": len(t) // 4, "domain": dom}
+        for t, dom in zip(texts, domains)
     ]
 
 
 def read_docs_from_shards(shard_paths, selections, num_workers=None, desc=None, text_col="text",
-                         max_char_repeat_ratio=0):
+                         max_char_repeat_ratio=0, domain_col=None):
     if num_workers is None:
         num_workers = min(mp.cpu_count(), 256) or 1
     shard_to_docs = {}
@@ -230,7 +241,7 @@ def read_docs_from_shards(shard_paths, selections, num_workers=None, desc=None, 
         if shard_id not in shard_to_docs:
             shard_to_docs[shard_id] = []
         shard_to_docs[shard_id].append(doc_id)
-    tasks = [(sid, str(shard_paths[sid]), indices, text_col) for sid, indices in shard_to_docs.items()]
+    tasks = [(sid, str(shard_paths[sid]), indices, text_col, domain_col) for sid, indices in shard_to_docs.items()]
     pool = _get_io_pool(num_workers)
     unordered = list(tqdm(
         pool.imap_unordered(_read_docs_from_shard_tagged, tasks, chunksize=1),
@@ -351,7 +362,10 @@ def scan_shards(data_dir, file_pattern, domain_col=None, domain_names=None,
 
 def write_shard(docs, output_path, num_npu=8):
     texts = [d["text"] for d in docs]
-    table = pa.table({"text": texts})
+    data = {"text": texts}
+    if docs and docs[0].get("domain") is not None:
+        data["domain"] = [d.get("domain") for d in docs]
+    table = pa.table(data)
     rg_size = max(1, len(docs) // (num_npu * 2))
     pq.write_table(table, output_path, row_group_size=rg_size)
 
@@ -459,7 +473,7 @@ def parse_manual_ratio(manual_ratio_str, domain_names):
 
 def select_manual_ratio(prep_files, domain_candidates, manual_ratio_map, domain_names,
                         total_tokens, tokenizer_pkl=None, num_workers=None, enc=None, text_col="text",
-                        max_char_repeat_ratio=0):
+                        max_char_repeat_ratio=0, domain_col=None):
     if domain_names is None:
         raise ValueError("Manual Ratio requires domain_names in schema")
     name_to_id = {name: i for i, name in enumerate(domain_names)}
@@ -521,7 +535,7 @@ def select_manual_ratio(prep_files, domain_candidates, manual_ratio_map, domain_
     mr_docs = read_docs_from_shards(
         prep_files, mr_selected, num_workers=num_workers,
         desc=f"  Reading manual-ratio docs ({num_workers or 'auto'} processes)", text_col=text_col,
-        max_char_repeat_ratio=max_char_repeat_ratio)
+        max_char_repeat_ratio=max_char_repeat_ratio, domain_col=domain_col)
 
     if enc and tokenizer_pkl:
         print(f"  Re-counting tokens for {len(mr_docs):,} docs (exact)...")
@@ -684,16 +698,24 @@ def main():
 
     print(f"\n[1] Reading QuadMix selected dataset...")
     if not skip_quadmix:
-        quadmix_table = pq.read_table(args.quadmix_sampled_data, columns=["text"])
+        qm_schema = set(pq.read_schema(args.quadmix_sampled_data).names)
+        qm_cols = [c for c in ["text", domain_col] if c and c in qm_schema]
+        qm_cols = list(dict.fromkeys(qm_cols))
+        quadmix_table = pq.read_table(args.quadmix_sampled_data, columns=qm_cols)
         texts = quadmix_table["text"].to_pylist()
+        if domain_col and domain_col in quadmix_table.column_names:
+            qm_domains = quadmix_table[domain_col].to_pylist()
+        else:
+            qm_domains = [None] * len(texts)
         del quadmix_table
         max_chars = args.max_chars
         max_char_repeat_ratio = args.max_char_repeat_ratio
         num_workers = args.num_workers or min(mp.cpu_count(), 256) or 1
         chunk_size = max(1, len(texts) // (num_workers * 4))
-        chunks = [texts[i:i + chunk_size] for i in range(0, len(texts), chunk_size)]
+        chunks = [list(zip(texts[i:i + chunk_size], qm_domains[i:i + chunk_size]))
+                  for i in range(0, len(texts), chunk_size)]
         filter_tasks = [(c, max_chars, max_char_repeat_ratio) for c in chunks]
-        valid_texts = []
+        valid_pairs = []
         n_empty = 0
         n_too_long = 0
         n_repeat = 0
@@ -704,7 +726,7 @@ def main():
             desc=f"  Filtering QuadMix docs ({num_workers} processes)",
             file=sys.stdout, mininterval=1.0,
         ):
-            valid_texts.extend(valid)
+            valid_pairs.extend(valid)
             n_empty += ne
             n_too_long += tl
             n_repeat += tr
@@ -713,18 +735,20 @@ def main():
             print(f"  Filtered {n_empty:,} docs (empty), "
                   f"{n_too_long:,} docs (>{max_chars:,} chars), "
                   f"{n_repeat:,} docs (single char >{max_char_repeat_ratio*100:.0f}% repetition)")
+        valid_texts = [p[0] for p in valid_pairs]
+        valid_doms = [p[1] for p in valid_pairs]
         print(f"  Counting tokens for {len(valid_texts):,} docs...")
         if enc and args.tokenizer_pkl:
             token_counts = count_tokens_mp(valid_texts, args.tokenizer_pkl, num_workers=args.num_workers)
         else:
             token_counts = [estimate_tokens(t) for t in valid_texts]
         quadmix_docs = [
-            {"text": t, "token_count": tc}
-            for t, tc in zip(valid_texts, token_counts)
+            {"text": t, "token_count": tc, "domain": d}
+            for t, tc, d in zip(valid_texts, token_counts, valid_doms)
         ]
         quadmix_total_tokens = sum(token_counts)
 
-        del texts, valid_texts, token_counts
+        del texts, valid_texts, valid_doms, token_counts
         gc.collect()
 
         print(f"  QuadMix docs: {len(quadmix_docs):,}")
@@ -810,7 +834,8 @@ def main():
         random_docs = read_docs_from_shards(prep_files, selected, num_workers=args.num_workers,
                                              desc=f"  Reading random docs ({args.num_workers or 'auto'} processes)",
                                              text_col=text_col,
-                                             max_char_repeat_ratio=args.max_char_repeat_ratio)
+                                             max_char_repeat_ratio=args.max_char_repeat_ratio,
+                                             domain_col=domain_col)
 
         if enc and args.tokenizer_pkl:
             print(f"  Re-counting tokens for {len(random_docs):,} docs (exact)...")
@@ -849,7 +874,7 @@ def main():
             prep_files, domain_candidates, manual_ratio_map, domain_names,
             budget_cap, tokenizer_pkl=args.tokenizer_pkl,
             num_workers=args.num_workers, enc=enc, text_col=text_col,
-            max_char_repeat_ratio=args.max_char_repeat_ratio)
+            max_char_repeat_ratio=args.max_char_repeat_ratio, domain_col=domain_col)
 
     quality_datasets = {}
     step_num = 5 if do_manual_ratio else 4
