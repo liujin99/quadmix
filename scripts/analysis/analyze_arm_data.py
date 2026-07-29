@@ -382,7 +382,8 @@ def parse_args():
     p.add_argument("--num-workers", type=int, default=None, help="multiprocessing workers")
     p.add_argument(
         "--tokenizer", default=None,
-        help="nanochat tokenizer.pkl or its dir (enables token-length & boundary slices)",
+        help="nanochat tokenizer.pkl or its dir (enables token-length & boundary slices; "
+             "default: $NANOCHAT_MODEL_DIR/tokenizer)",
     )
     p.add_argument("--seq-len", type=int, default=2048, help="training context length (tokens)")
     p.add_argument("--tokenizer-threads", type=int, default=1, help="threads per tokenizing worker")
@@ -397,7 +398,16 @@ def main():
     out_dir = args.output_dir or str(result_dir)
     os.makedirs(out_dir, exist_ok=True)
     num_workers = args.num_workers or min(32, os.cpu_count() or 1)
-    do_tok = bool(args.tokenizer)
+    tokenizer_path = args.tokenizer
+    if tokenizer_path is None:
+        model_dir = os.environ.get(
+            "NANOCHAT_MODEL_DIR", "/home/ma-user/work/nanochat_model_dir")
+        default_tok = os.path.join(model_dir, "tokenizer")
+        default_pkl = os.path.join(default_tok, "tokenizer.pkl")
+        if os.path.isfile(default_pkl):
+            tokenizer_path = default_tok
+            print(f"  [info] tokenizer auto-detected: {default_pkl}")
+    do_tok = bool(tokenizer_path)
 
     data_root = result_dir / "data"
     if not data_root.is_dir():
@@ -435,7 +445,7 @@ def main():
         L, E, R, D, TOK = [], [], [], [], []
         dom = Counter()
         with Pool(num_workers, initializer=_init_tok_worker,
-                  initargs=(args.tokenizer, args.tokenizer_threads)) as pool:
+                  initargs=(tokenizer_path, args.tokenizer_threads)) as pool:
             for lens, ents, reps, divs, d, tl in tqdm(
                 pool.imap_unordered(_scan_shard, tasks, chunksize=1),
                 total=len(tasks), desc=f"  {label}", leave=False,
