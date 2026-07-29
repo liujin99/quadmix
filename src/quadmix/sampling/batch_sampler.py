@@ -5,7 +5,7 @@ Provides:
   - save_sampled_dataset: save selected documents to parquet/jsonl
 """
 
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 import os
 import time
 
@@ -81,6 +81,7 @@ def save_sampled_dataset(
     text_col: str = "text",
     domain_col: str = "domain",
     batch_size: int = 100000,
+    quality_scores: Optional[Dict[str, npt.NDArray[np.float64]]] = None,
 ):
     """Save the sampled dataset with metadata.
 
@@ -133,6 +134,9 @@ def save_sampled_dataset(
     # Reconstruct the selected order; this is a pointer copy (no string dup).
     records = {text_col: texts_arr[inverse]}
 
+    unique_char_counts = np.array([len(t) for t in unique_texts], dtype=np.int64)
+    records["char_count"] = unique_char_counts[inverse]
+
     if doc_id_fn is not None:
         records["doc_id"] = [doc_id_fn(i) for i in selected_indices]
     else:
@@ -147,6 +151,10 @@ def save_sampled_dataset(
     if sampling_values is not None:
         records["sampling_weight"] = 1.0 / np.maximum(sampling_values[selected_indices], 1e-10)
         records["sampling_value"] = sampling_values[selected_indices]
+
+    if quality_scores is not None:
+        for name, arr in quality_scores.items():
+            records[name] = arr[selected_indices]
 
     df = pd.DataFrame(records)
 

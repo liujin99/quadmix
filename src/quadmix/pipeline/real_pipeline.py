@@ -403,7 +403,8 @@ class QuaDMixPipeline:
             quality_names, selected_indices, sampling_values, final_ranks,
             domain_labels, token_counts, texts, text_source, n_exp, n_search,
             predicted_losses, top_k_avg_loss, proxy_loss_stats, proxy_runner,
-            val_set, stage_times, t_start, domain_dist_change)
+            val_set, stage_times, t_start, domain_dist_change,
+            quality_scores=quality_scores)
 
         self._stage9_report(
             output_dir, data_path, optimal_params, selected_indices,
@@ -656,7 +657,7 @@ class QuaDMixPipeline:
                      final_ranks, domain_labels, token_counts, texts, text_source,
                      n_exp, n_search, predicted_losses, top_k_avg_loss,
                      proxy_loss_stats, proxy_runner, val_set, stage_times, t_start,
-                     domain_dist_change=None):
+                     domain_dist_change=None, quality_scores=None):
         _t = time.time()
         params_path = os.path.join(output_dir, "optimal_parameters.json")
         serialized = self._serialize_params(optimal_params, domain_names, quality_names)
@@ -719,6 +720,18 @@ class QuaDMixPipeline:
         with open(summary_path, "w") as f:
             json.dump(sanitize_for_json(summary), f, indent=2)
 
+        quality_dict = None
+        if quality_scores is not None and quality_names:
+            qs_for_output = quality_scores
+            if self._negated_cols:
+                qs_for_output = quality_scores.copy()
+                for col_idx in self._negated_cols:
+                    qs_for_output[:, col_idx] = -qs_for_output[:, col_idx]
+            quality_dict = {
+                name: qs_for_output[:, i]
+                for i, name in enumerate(quality_names)
+            }
+
         if text_source == "sharded":
             print(f"[Stage 8] Saving {len(selected_indices):,} sampled documents...")
             sampled_path = os.path.join(output_dir, "sampled_dataset.parquet")
@@ -734,6 +747,7 @@ class QuaDMixPipeline:
                 format=output_format,
                 text_col=schema.text_col,
                 domain_col=schema.domain_col,
+                quality_scores=quality_dict,
             )
         else:
             sampled_path = os.path.join(output_dir, "sampled_dataset.parquet")
@@ -750,6 +764,7 @@ class QuaDMixPipeline:
                 format=output_format,
                 text_col=schema.text_col,
                 domain_col=schema.domain_col,
+                quality_scores=quality_dict,
             )
         stage_times["stage8_save"] = time.time() - _t
         print(f"[Stage 8] Save outputs: {stage_times['stage8_save']:.1f}s")

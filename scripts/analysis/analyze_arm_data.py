@@ -31,6 +31,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import os
 import pickle
@@ -128,8 +129,17 @@ def _tokenize_lens(texts):
 
 
 def _scan_shard(task):
-    idx, path, has_domain, do_tok = task
-    cols = ["text", "domain"] if has_domain else ["text"]
+    idx, path, has_domain, do_tok, quality_cols = task
+    schema_names = set(pq.read_schema(path).names)
+    cols = ["text"]
+    if has_domain and "domain" in schema_names:
+        cols.append("domain")
+    extra_cols = []
+    for c in ["char_count", "token_count", "quality_rank"] + (quality_cols or []):
+        if c and c in schema_names and c not in cols:
+            cols.append(c)
+            extra_cols.append(c)
+    cols = list(dict.fromkeys(cols))
     table = pq.read_table(path, columns=cols)
     texts = table["text"].to_pylist()
     n = len(texts)
@@ -139,9 +149,29 @@ def _scan_shard(task):
     divs = np.empty(n, dtype=np.float32)
     for i, t in enumerate(texts):
         lens[i], ents[i], reps[i], divs[i] = _doc_metrics(t or "")
-    dom = Counter(table["domain"].to_pylist()) if has_domain else None
+    dom = None
+    dom_labels = None
+    if has_domain and "domain" in table.column_names:
+        dom_labels = table["domain"].to_pylist()
+        dom = Counter(dom_labels)
     tok_lens = _tokenize_lens(texts) if do_tok else None
-    return lens, ents, reps, divs, dom, tok_lens
+
+    text_hashes = [hashlib.sha1((t or "").encode("utf-8")).hexdigest() for t in texts]
+
+    result = {
+        "lens": lens, "ents": ents, "reps": reps, "divs": divs,
+        "dom": dom, "tok_lens": tok_lens,
+        "dom_labels": dom_labels,
+        "text_hashes": text_hashes,
+    }
+    for c in extra_cols:
+        if c in table.column_names:
+            arr = table[c].to_pylist()
+            if c in ("char_count", "token_count"):
+                result[c] = np.array(arr, dtype=np.int64)
+            else:
+                result[c] = np.array(arr, dtype=np.float64)
+    return result
 
 
 # ── packing simulation (best-fit, mirrors nanochat dataloader) ────
@@ -315,6 +345,215 @@ def _fig_domain(per_arm, out_dir):
     _save_fig(fig, out_dir, "fig_arm_domain.png")
 
 
+# ── length by domain ──────────────────────────────────────────────
+
+
+def _fig_length_by_domain(per_arm, domain_names, out_dir):
+    arms_with = {l: a for l, a in per_arm.items()
+                 if a.get("dom_labels") is not None and len(a["dom_labels"])}
+    if not arms_with:
+        print("  [skip] fig_length_by_domain: no per-doc domain labels")
+        return
+    all_doms = set()
+    for a in arms_with.values():
+        all_doms.update(a["dom_labels"])
+    domains = sorted(all_doms, key=str)
+    n_arms = len(arms_with)
+    fig, axes = plt.subplots(1, n_arms, figsize=(5 * n_arms, 5), squeeze=False)
+    for i, (label, arm) in enumerate(arms_with.items()):
+        ax = axes[0][i]
+        data = []
+        labels = []
+        for d in domains:
+            mask = arm["dom_labels"] == d
+            vals = arm["len"][mask]
+            if len(vals):
+                data.append(np.log10(np.maximum(vals, 1)))
+                labels.append(str(d))
+        if data:
+            ax.boxplot(data, labels=labels, showfliers=False)
+        ax.set_title(f"{label}")
+        ax.set_ylabel("log10(char length)")
+        ax.tick_params(axis='x', rotation=30)
+    fig.suptitle("Document length by domain", fontsize=13)
+    _save_fig(fig, out_dir, "fig_length_by_domain.png")
+
+
+# ── quality-length correlation ───────────────────────────────────
+
+
+def _spearman(x, y):
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    n = len(x)
+    if n < 2:
+        return 0.0
+    rx = np.argsort(np.argsort(x)).astype(np.float64)
+    ry = np.argsort(np.argsort(y)).astype(np.float64)
+    rx_m = rx - rx.mean()
+    ry_m = ry - ry.mean()
+    den = np.sqrt(np.sum(rx_m ** 2) * np.sum(ry_m ** 2))
+    return float(np.sum(rx_m * ry_m) / den) if den > 0 else 0.0
+
+
+def _quality_length_correlation(per_arm, quality_cols, out_dir):
+    length_key = "char_count"
+    if not any(length_key in per_arm[a] for a in per_arm):
+        length_key = "len"
+    signal_keys = list(quality_cols or [])
+    if "quality_rank" not in signal_keys:
+        for a in per_arm:
+            if "quality_rank" in per_arm[a]:
+                signal_keys.append("quality_rank")
+                break
+    if not signal_keys:
+        print("  [skip] quality_length_correlation: no quality signal columns")
+        return
+    arms = [a for a in per_arm if length_key in per_arm[a] and len(per_arm[a][length_key])]
+    if not arms:
+        print("  [skip] quality_length_correlation: no length data")
+        return
+
+    lines = ["=== Quality–Length Spearman Correlation ===", ""]
+    header = f"  {'arm':>16s}"
+    for sk in signal_keys:
+        header += f"  {sk:>18s}"
+    lines.append(header)
+    lines.append("  " + "-" * (16 + 20 * len(signal_keys)))
+
+    matrix = []
+    for arm_label in arms:
+        a = per_arm[arm_label]
+        length = a[length_key]
+        row = []
+        row_str = f"  {arm_label:>16s}"
+        for sk in signal_keys:
+            if sk in a and len(a[sk]) == len(length):
+                rho = _spearman(a[sk], length)
+                row.append(rho)
+                row_str += f"  {rho:>18.4f}"
+            else:
+                row.append(None)
+                row_str += f"  {'N/A':>18s}"
+        matrix.append(row)
+        lines.append(row_str)
+    lines.append("")
+
+    path = os.path.join(out_dir, "quality_length_corr.txt")
+    with open(path, "w") as f:
+        f.write("\n".join(lines))
+    print(f"  [Text] Saved: {path}")
+
+    has_data = any(any(v is not None for v in row) for row in matrix)
+    if has_data:
+        n_arms = len(arms)
+        n_sigs = len(signal_keys)
+        fig, ax = plt.subplots(figsize=(max(6, 2 * n_sigs), max(3, 0.6 * n_arms)))
+        data = np.full((n_arms, n_sigs), np.nan)
+        for i, row in enumerate(matrix):
+            for j, v in enumerate(row):
+                if v is not None:
+                    data[i, j] = v
+        im = ax.imshow(data, aspect='auto', cmap='RdBu_r', vmin=-1, vmax=1)
+        ax.set_xticks(range(n_sigs))
+        ax.set_xticklabels(signal_keys, rotation=30, ha='right')
+        ax.set_yticks(range(n_arms))
+        ax.set_yticklabels(arms)
+        ax.set_title("Spearman(signal, length)")
+        fig.colorbar(im, ax=ax, label="Spearman ρ")
+        for i in range(n_arms):
+            for j in range(n_sigs):
+                if not np.isnan(data[i, j]):
+                    ax.text(j, i, f"{data[i, j]:.2f}", ha='center', va='center', fontsize=8)
+        _save_fig(fig, out_dir, "fig_quality_length_corr.png")
+
+
+# ── quality signal histograms ────────────────────────────────────
+
+
+def _fig_quality_hist(per_arm, quality_cols, out_dir):
+    signal_keys = list(quality_cols or [])
+    for a in per_arm:
+        if "quality_rank" in per_arm[a] and "quality_rank" not in signal_keys:
+            signal_keys.append("quality_rank")
+            break
+    for sk in signal_keys:
+        arms_with = {l: a for l, a in per_arm.items() if sk in a and len(a[sk])}
+        if not arms_with:
+            continue
+        pooled = np.concatenate([a[sk] for a in arms_with.values()])
+        if pooled.size == 0:
+            continue
+        lo, hi = np.percentile(pooled, [1, 99])
+        bins = np.linspace(lo, hi, 50)
+        fig, ax = plt.subplots(figsize=(8, 4.5))
+        for i, (label, arm) in enumerate(arms_with.items()):
+            v = arm[sk]
+            v = v[(v >= lo) & (v <= hi)]
+            if v.size == 0:
+                continue
+            ax.hist(v, bins=bins, density=True, histtype="step", lw=1.6,
+                    label=f"{label} (n={len(arm[sk]):,})",
+                    color=_COLORS[i % len(_COLORS)])
+        ax.set_xlabel(sk)
+        ax.set_ylabel("density")
+        ax.set_title(sk)
+        ax.legend(fontsize=9)
+        _save_fig(fig, out_dir, f"fig_arm_{sk}.png")
+
+
+# ── duplicate detection (report only, no dedup) ───────────────────
+
+
+def _detect_duplicates(per_arm, domain_names, out_dir):
+    lines = ["=== Duplicate Detection (report only) ===", ""]
+    for label, a in per_arm.items():
+        hashes = a.get("text_hashes")
+        if not hashes:
+            lines.append(f"[{label}] no text hashes available")
+            lines.append("")
+            continue
+        n_total = len(hashes)
+        counts = Counter(hashes)
+        n_unique = len(counts)
+        n_dup_docs = n_total - n_unique
+        dup_mult = Counter(counts.values())
+        lines.append(f"[{label}]  total={n_total:,}  unique={n_unique:,}  "
+                     f"dup_docs={n_dup_docs:,} ({n_dup_docs / max(1, n_total) * 100:.1f}%)")
+        for mult, cnt in sorted(dup_mult.items()):
+            if mult > 1:
+                lines.append(f"  {mult}x: {cnt:,} docs "
+                             f"({cnt * mult:,} rows, {cnt * (mult - 1):,} extra)")
+        lengths = a.get("len", np.array([]))
+        if len(lengths) == n_total:
+            hash_to_len = {}
+            for i, h in enumerate(hashes):
+                hash_to_len.setdefault(h, []).append(int(lengths[i]))
+            dup_chars = sum(lens[0] * (len(lens) - 1)
+                            for lens in hash_to_len.values() if len(lens) > 1)
+            total_chars = int(lengths.sum())
+            if total_chars > 0:
+                lines.append(f"  Duplicate char fraction: {dup_chars / total_chars * 100:.1f}%")
+        dom_labels = a.get("dom_labels")
+        if dom_labels is not None and len(dom_labels) == n_total and len(lengths) == n_total:
+            lines.append("  Per-domain duplicate docs:")
+            domains = sorted(set(str(d) for d in dom_labels))
+            for d in domains:
+                d_mask = np.array([str(dl) == d for dl in dom_labels])
+                d_hashes = [hashes[i] for i in range(n_total) if d_mask[i]]
+                d_counts = Counter(d_hashes)
+                d_dup = sum(1 for v in d_counts.values() if v > 1)
+                d_total = len(d_hashes)
+                if d_total > 0:
+                    lines.append(f"    {d:>12s}: {d_dup:,}/{d_total:,} "
+                                 f"({d_dup / d_total * 100:.1f}% unique-doc dup)")
+        lines.append("")
+    path = os.path.join(out_dir, "duplicate_report.txt")
+    with open(path, "w") as f:
+        f.write("\n".join(lines))
+    print(f"  [Text] Saved: {path}")
+
+
 # ── text summary ─────────────────────────────────────────────────
 
 
@@ -362,6 +601,26 @@ def _write_txt(per_arm, stats, seq_len, out_dir):
                 "  domain top: "
                 + ", ".join(f"{d}={c / total:.1%}" for d, c in top)
             )
+        dom_labels = a.get("dom_labels")
+        if dom_labels is not None and len(dom_labels) and len(a["len"]):
+            all_doms = sorted(set(str(d) for d in dom_labels))
+            lines.append("  per-domain length (chars):")
+            for d in all_doms:
+                mask = np.array([str(dl) == d for dl in dom_labels])
+                dv = a["len"][mask]
+                if len(dv):
+                    lines.append(
+                        f"    {d:>12s}  n={len(dv):>8,}  mean={dv.mean():>8.0f}  "
+                        f"median={np.median(dv):>8.0f}  p25={np.percentile(dv, 25):>8.0f}  "
+                        f"p75={np.percentile(dv, 75):>8.0f}"
+                    )
+        for qk in ("char_count", "token_count"):
+            qv = a.get(qk)
+            if qv is not None and len(qv):
+                lines.append(
+                    f"  {qk:14s} mean={qv.mean():.1f}  median={np.median(qv):.1f}  "
+                    f"p25={np.percentile(qv, 25):.1f}  p75={np.percentile(qv, 75):.1f}"
+                )
         lines.append("")
     path = os.path.join(out_dir, "arm_data_comparison.txt")
     with open(path, "w") as f:
@@ -420,6 +679,7 @@ def main():
         stats_path = result_dir / "dataset_stats.json"
     stats = json.load(open(stats_path)) if stats_path.is_file() else {}
     domain_names = (stats.get("config") or {}).get("domain_names")
+    quality_cols = (stats.get("config") or {}).get("quality_cols", [])
 
     arms = {}
     for p in sorted(data_root.glob("*_data")):
@@ -443,20 +703,35 @@ def main():
 
     per_arm = {}
     for label, info in arms.items():
-        tasks = [(i, str(s), info["has_domain"], do_tok) for i, s in enumerate(info["shards"])]
+        tasks = [(i, str(s), info["has_domain"], do_tok, quality_cols)
+                 for i, s in enumerate(info["shards"])]
         L, E, R, D, TOK = [], [], [], [], []
         dom = Counter()
+        dom_labels_all = []
+        text_hashes_all = []
+        extra_arrays = {}
         with Pool(num_workers, initializer=_init_tok_worker,
                   initargs=(tokenizer_path, args.tokenizer_threads)) as pool:
-            for lens, ents, reps, divs, d, tl in tqdm(
+            for result in tqdm(
                 pool.imap_unordered(_scan_shard, tasks, chunksize=1),
                 total=len(tasks), desc=f"  {label}", leave=False,
             ):
-                L.append(lens); E.append(ents); R.append(reps); D.append(divs)
-                if tl is not None:
-                    TOK.append(tl)
-                if d:
-                    dom.update(d)
+                L.append(result["lens"]); E.append(result["ents"])
+                R.append(result["reps"]); D.append(result["divs"])
+                if result["tok_lens"] is not None:
+                    TOK.append(result["tok_lens"])
+                if result["dom"]:
+                    dom.update(result["dom"])
+                if result["dom_labels"] is not None:
+                    dom_labels_all.extend(result["dom_labels"])
+                if result["text_hashes"]:
+                    text_hashes_all.extend(result["text_hashes"])
+                for key, val in result.items():
+                    if key in ("lens", "ents", "reps", "divs", "dom", "tok_lens",
+                               "dom_labels", "text_hashes"):
+                        continue
+                    if isinstance(val, np.ndarray):
+                        extra_arrays.setdefault(key, []).append(val)
         if domain_names:
             dom = _normalize_domain(dom, domain_names)
         pa = {
@@ -466,6 +741,8 @@ def main():
             "div": np.concatenate(D) if D else np.array([], dtype=np.float32),
             "domain": dom,
             "has_domain": info["has_domain"],
+            "dom_labels": np.array(dom_labels_all) if dom_labels_all else None,
+            "text_hashes": text_hashes_all,
         }
         if TOK:
             tl_all = np.concatenate(TOK)
@@ -476,6 +753,9 @@ def main():
         else:
             pa["tok_len"] = None
             pa["boundaries"] = None
+        for key, arrs in extra_arrays.items():
+            if arrs:
+                pa[key] = np.concatenate(arrs)
         per_arm[label] = pa
 
     print("\n=== Generating figures ===")
@@ -497,6 +777,10 @@ def main():
     else:
         print("  [skip] fig_arm_token_length & fig_arm_boundaries: pass --tokenizer to enable")
     _fig_domain(per_arm, out_dir)
+    _fig_length_by_domain(per_arm, domain_names, out_dir)
+    _quality_length_correlation(per_arm, quality_cols, out_dir)
+    _fig_quality_hist(per_arm, quality_cols, out_dir)
+    _detect_duplicates(per_arm, domain_names, out_dir)
     _write_txt(per_arm, stats, args.seq_len, out_dir)
     print("\nDone.")
 
