@@ -192,29 +192,47 @@ def _scan_sampled_arm(parquet_path, quality_cols, domain_names):
     this is the only arm that can show rank<->length. Domain column name is the
     schema's domain_col (category_name for STEM); falls back to 'domain'.
 
-    Text-free: reads only the needed columns (no text, no tokenizer, no packing
-    sim) -> fast & low-memory. Length is taken from char_count (== len(text) as
-    written by save_sampled_dataset). ent/rep/div are left empty so the
-    text-only histograms simply skip this arm (they are redundant with the
-    quadmix arm, which is the same data pre-packing).
+    Text-free when possible: reads only the needed columns (no tokenizer, no
+    packing sim) -> fast & low-memory. Length is taken from char_count (==
+    len(text) as written by save_sampled_dataset). Older search outputs predate
+    the char_count column (added in 0e7bd0c); for those, fall back to reading
+    the 'text' column and computing len(text) per doc so the rank<->length
+    Spearman still works. ent/rep/div are left empty so the text-only
+    histograms simply skip this arm (they are redundant with the quadmix arm,
+    which is the same data pre-packing).
     """
     schema_names = set(pq.read_schema(parquet_path).names)
+    print(f"    [info] sampled columns: {sorted(schema_names)}")
     domain_col = None
     for c in ("category_name", "domain"):
         if c in schema_names:
             domain_col = c
             break
 
+    has_char_count = "char_count" in schema_names
     want = []
-    for c in ["char_count", "quality_rank"] + list(quality_cols or []):
+    if has_char_count:
+        want.append("char_count")
+    for c in ["quality_rank"] + list(quality_cols or []):
         if c in schema_names and c not in want:
             want.append(c)
     if domain_col and domain_col not in want:
         want.append(domain_col)
+    need_text = (not has_char_count) and ("text" in schema_names)
+    if need_text and "text" not in want:
+        want.append("text")
     table = pq.read_table(parquet_path, columns=want)
 
-    char_count = np.asarray(table["char_count"].to_numpy(), dtype=np.int64) \
-        if "char_count" in table.column_names else np.array([], dtype=np.int64)
+    if has_char_count:
+        char_count = np.asarray(table["char_count"].to_numpy(), dtype=np.int64)
+    elif need_text:
+        texts = table["text"].to_pylist()
+        char_count = np.array([len(t or "") for t in texts], dtype=np.int64)
+        print(f"    [info] no 'char_count' column (pre-0e7bd0c search output); "
+              f"computed char length from {len(texts):,} texts")
+    else:
+        char_count = np.array([], dtype=np.int64)
+        print(f"    [warn] no 'char_count' and no 'text' column; length unavailable")
 
     dom_labels = None
     dom = Counter()
@@ -300,7 +318,7 @@ def _packing_boundary_dist(tok_lens, seq_len=2048, buffer_size=2000, max_docs=20
 def _fig_hist(per_arm, key, xlabel, fname, out_dir, logx=False, vline=None):
     fig, ax = plt.subplots(figsize=(8, 4.5))
     pooled = np.concatenate(
-        [a[key] for a in per_arm.values() if len(a[key])]
+        [a[key] for a in per_arm.values() if a.get(key) is not None and len(a[key])]
     ) if per_arm else np.array([])
     if pooled.size == 0:
         plt.close(fig)
@@ -313,7 +331,9 @@ def _fig_hist(per_arm, key, xlabel, fname, out_dir, logx=False, vline=None):
     else:
         bins = np.linspace(lo, hi, 50)
     for i, (label, arm) in enumerate(per_arm.items()):
-        v = arm[key]
+        v = arm.get(key)
+        if v is None or len(v) == 0:
+            continue
         v = v[(v >= lo) & (v <= hi)]
         if v.size == 0:
             continue
@@ -336,7 +356,7 @@ def _fig_int_hist(per_arm, key, xlabel, fname, out_dir, xmax=None):
     """Bar histogram for small-integer distributions (e.g. boundaries/row)."""
     fig, ax = plt.subplots(figsize=(8, 4.5))
     pooled = np.concatenate(
-        [a[key] for a in per_arm.values() if len(a[key])]
+        [a[key] for a in per_arm.values() if a.get(key) is not None and len(a[key])]
     ) if per_arm else np.array([])
     if pooled.size == 0:
         plt.close(fig)
@@ -345,8 +365,8 @@ def _fig_int_hist(per_arm, key, xlabel, fname, out_dir, xmax=None):
     hi = int(pooled.max()) if xmax is None else xmax
     bins = np.arange(0, hi + 2) - 0.5
     for i, (label, arm) in enumerate(per_arm.items()):
-        v = arm[key]
-        if v.size == 0:
+        v = arm.get(key)
+        if v is None or len(v) == 0:
             continue
         vc = np.bincount(np.clip(v.astype(np.int64), 0, hi), minlength=hi + 1).astype(float)
         vc = vc / max(1, vc.sum())
