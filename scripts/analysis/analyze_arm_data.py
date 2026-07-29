@@ -247,13 +247,15 @@ def _fig_int_hist(per_arm, key, xlabel, fname, out_dir, xmax=None):
         v = arm[key]
         if v.size == 0:
             continue
-        vc = np.bincount(v.astype(np.int64), minlength=hi + 1).astype(float)
+        vc = np.bincount(np.clip(v.astype(np.int64), 0, hi), minlength=hi + 1).astype(float)
         vc = vc / max(1, vc.sum())
         ax.bar(
             np.arange(hi + 1) + (i - (len(per_arm) - 1) / 2) * 0.8 / len(per_arm),
             vc, 0.8 / len(per_arm), label=label, color=_COLORS[i % len(_COLORS)],
         )
     ax.set_xticks(range(hi + 1))
+    if xmax is not None:
+        ax.set_xticklabels([str(i) if i < hi else f"{hi}+" for i in range(hi + 1)])
     ax.set_xlabel(xlabel)
     ax.set_ylabel("fraction of rows")
     ax.set_title(xlabel)
