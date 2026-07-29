@@ -462,7 +462,8 @@ def _fig_length_by_domain(per_arm, domain_names, out_dir):
                 data.append(np.log10(np.maximum(vals, 1)))
                 labels.append(str(d))
         if data:
-            ax.boxplot(data, labels=labels, showfliers=False)
+            ax.boxplot(data, showfliers=False)
+            ax.set_xticklabels(labels)
         ax.set_title(f"{label}")
         ax.set_ylabel("log10(char length)")
         ax.tick_params(axis='x', rotation=30)
