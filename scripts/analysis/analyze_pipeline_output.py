@@ -5,6 +5,7 @@ Generates outputs directly in <exp-dir> (the experiment result directory):
   - fig_quality_score_dist.png — full corpus q̄ distribution by domain (overlaid)
   - fig_quality_rank_dist.png  — full corpus r̄ (solid) vs selected r̄ (dashed) by domain
   - fig_duplication_analysis.png — per-domain unique vs duplicate docs + sampling-value buckets
+  - fig_quality_length_decomposition.png — weight×ρ(length) stacked bar + sampling ω/S_max
   - analysis_summary.txt       — key diagnostics: tie detection, selection stats,
                                   quality-length ρ decomposition (which quality
                                   dimensions drive length bias via merge weights),
@@ -372,6 +373,99 @@ def plot_duplication_analysis(
     return _save_fig(fig, output_dir, "fig_duplication_analysis.png")
 
 
+# ── Quality-length decomposition figure ───────────────────────────
+
+
+def plot_quality_length_decomposition(
+    params,
+    quality_length_rhos,
+    quality_names,
+    domain_names,
+    num_domains,
+    output_dir,
+):
+    """Figure: weight×ρ(length) decomposition + sampling aggressiveness.
+
+    Panel 1: stacked bar of w_n × ρ_n per domain, showing which quality
+    dimensions drive length bias. Uniform-ρ reference line overlaid.
+    Panel 2: bar chart of ω (top%) per domain with S_max annotated.
+    """
+    N = params.num_criteria
+    dw = params.merge_config.domain_weights
+    domain_short = _get_domain_short(num_domains, domain_names)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+
+    # ── Panel 1: weight×ρ stacked bar ──
+    x = np.arange(num_domains)
+    width = 0.55
+    cmap = plt.cm.tab10
+    colors = [cmap(i) for i in range(N)]
+
+    contributions = np.zeros((N, num_domains))
+    for n in range(N):
+        for m in range(num_domains):
+            w_n = dw[n + m * N]
+            contributions[n, m] = w_n * quality_length_rhos[n]
+
+    pos_contrib = np.where(contributions > 0, contributions, 0)
+    neg_contrib = np.where(contributions < 0, contributions, 0)
+    pos_bottom = np.zeros(num_domains)
+    neg_bottom = np.zeros(num_domains)
+
+    for n in range(N):
+        pos_vals = pos_contrib[n]
+        neg_vals = neg_contrib[n]
+        if pos_vals.any():
+            ax1.bar(x, pos_vals, width, bottom=pos_bottom,
+                    label=quality_names[n], color=colors[n], alpha=0.85)
+            pos_bottom += pos_vals
+        if neg_vals.any():
+            ax1.bar(x, neg_vals, width, bottom=neg_bottom,
+                    color=colors[n], alpha=0.85)
+            neg_bottom += neg_vals
+
+    totals = pos_bottom + neg_bottom
+    uniform_rho = float(np.mean(quality_length_rhos))
+    ax1.axhline(y=uniform_rho, color="red", linestyle="--", linewidth=1.5,
+                label=f"Uniform ρ = {uniform_rho:.3f}")
+
+    for i, t in enumerate(totals):
+        ax1.text(i, t + 0.005, f"{t:.3f}", ha="center", va="bottom", fontsize=9)
+
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(domain_short, rotation=30, ha="right")
+    ax1.set_ylabel("Weighted ρ contribution")
+    ax1.set_title("Quality-Length Bias Decomposition (w × ρ)")
+    ax1.legend(fontsize=8, loc="best", ncol=2)
+    ax1.grid(axis="y", alpha=0.3, linestyle="--")
+    ax1.set_axisbelow(True)
+
+    # ── Panel 2: ω (top%) + S_max ──
+    omega_pct = np.array([params.sampling_configs[m].omega * 100
+                          for m in range(num_domains)])
+    s_max = np.array([2.0 ** params.sampling_configs[m].eta
+                      + params.sampling_configs[m].epsilon
+                      for m in range(num_domains)])
+
+    bars = ax2.bar(x, omega_pct, width, color="steelblue", alpha=0.8,
+                   edgecolor="white")
+    for i, (bar, sv) in enumerate(zip(bars, s_max)):
+        ax2.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.2,
+                 f"ω={omega_pct[i]:.1f}%\nS_max={sv:.1f}",
+                 ha="center", va="bottom", fontsize=9)
+
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(domain_short, rotation=30, ha="right")
+    ax2.set_ylabel("ω (top percentile selected, %)")
+    ax2.set_title("Sampling Aggressiveness")
+    ax2.grid(axis="y", alpha=0.3, linestyle="--")
+    ax2.set_axisbelow(True)
+
+    plt.tight_layout()
+    return _save_fig(fig, output_dir, "fig_quality_length_decomposition.png")
+
+
 # ── Summary writer ───────────────────────────────────────────────
 
 
@@ -396,6 +490,7 @@ def write_analysis_summary(
     sampling_values_col=None,
     fig_dup=None,
     quality_length_rhos=None,
+    fig_decomp=None,
 ):
     """Write analysis_summary.txt with key diagnostics."""
     lines = []
@@ -805,6 +900,8 @@ def write_analysis_summary(
     lines.append(f"  2. {fig_rank}")
     if fig_dup:
         lines.append(f"  3. {fig_dup}")
+    if fig_decomp:
+        lines.append(f"  4. {fig_decomp}")
     lines.append("")
 
     lines.append("=" * 70)
@@ -1255,6 +1352,16 @@ def main():
         args.exp_dir,
     )
 
+    print("  Generating quality-length decomposition figure...")
+    fig_decomp = plot_quality_length_decomposition(
+        params,
+        quality_length_rhos,
+        quality_names,
+        domain_names,
+        num_domains,
+        args.exp_dir,
+    )
+
     # ── Generate analysis summary ──
     print("\nGenerating analysis summary...")
     summary_out = os.path.join(args.exp_dir, "analysis_summary.txt")
@@ -1279,6 +1386,7 @@ def main():
         sampling_values_col=sampling_values_col,
         fig_dup=fig_dup,
         quality_length_rhos=quality_length_rhos,
+        fig_decomp=fig_decomp,
     )
     print(f"  Saved: {summary_out}")
 
