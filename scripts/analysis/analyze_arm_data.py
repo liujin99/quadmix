@@ -452,11 +452,14 @@ def _fig_domain(per_arm, out_dir):
 # ── length by domain ──────────────────────────────────────────────
 
 
-def _fig_length_by_domain(per_arm, domain_names, out_dir):
+def _fig_length_by_domain(per_arm, domain_names, out_dir,
+                          field="len", y_label="log10(char length)",
+                          filename="fig_length_by_domain.png", ref_line=None):
     arms_with = {l: a for l, a in per_arm.items()
-                 if a.get("dom_labels") is not None and len(a["dom_labels"])}
+                 if a.get("dom_labels") is not None and len(a["dom_labels"])
+                 and a.get(field) is not None and len(a[field])}
     if not arms_with:
-        print("  [skip] fig_length_by_domain: no per-doc domain labels")
+        print(f"  [skip] {filename}: no per-doc domain labels or {field} data")
         return
     all_doms = set()
     for a in arms_with.values():
@@ -470,18 +473,20 @@ def _fig_length_by_domain(per_arm, domain_names, out_dir):
         labels = []
         for d in domains:
             mask = arm["dom_labels"] == d
-            vals = arm["len"][mask]
+            vals = arm[field][mask]
             if len(vals):
                 data.append(np.log10(np.maximum(vals, 1)))
                 labels.append(str(d))
         if data:
             ax.boxplot(data, showfliers=False)
             ax.set_xticklabels(labels)
+        if ref_line is not None:
+            ax.axhline(np.log10(ref_line), color="0.5", ls="--", lw=0.8, zorder=0)
         ax.set_title(f"{label}")
-        ax.set_ylabel("log10(char length)")
+        ax.set_ylabel(y_label)
         ax.tick_params(axis='x', rotation=30)
     fig.suptitle("Document length by domain", fontsize=13)
-    _save_fig(fig, out_dir, "fig_length_by_domain.png")
+    _save_fig(fig, out_dir, filename)
 
 
 # ── quality-length correlation ───────────────────────────────────
@@ -1023,8 +1028,13 @@ def main():
                    default=5)
         _fig_int_hist(per_arm, "boundaries", "Doc boundaries per 2k row",
                       "fig_arm_boundaries.png", out_dir, xmax=min(bmax, 8))
+        _fig_length_by_domain(per_arm, domain_names, out_dir,
+                              field="tok_len", y_label="log10(token length)",
+                              filename="fig_token_length_by_domain.png",
+                              ref_line=args.seq_len)
     else:
-        print("  [skip] fig_arm_token_length & fig_arm_boundaries: pass --tokenizer to enable")
+        print("  [skip] fig_arm_token_length & fig_arm_boundaries & "
+              "fig_token_length_by_domain: pass --tokenizer to enable")
     _fig_domain(per_arm, out_dir)
     _fig_length_by_domain(per_arm, domain_names, out_dir)
     _quality_length_correlation(per_arm, quality_cols, out_dir)
