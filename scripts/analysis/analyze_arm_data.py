@@ -647,6 +647,105 @@ def _dup_report_lines(label, method, identifiers, lengths, dom_labels):
     return lines
 
 
+def _fig_duplicates(per_arm, out_dir):
+    """Bar chart: dup rate and multiplicity distribution across arms."""
+    dup_colors = ["#2ca02c", "#ff7f0e", "#d62728", "#9467bd", "#8c564b"]
+    mult_labels = ["1× (unique)", "2×", "3×", "4×", "5×+"]
+
+    stats = {}
+    for label, a in per_arm.items():
+        methods = {}
+        hashes = a.get("text_hashes")
+        doc_ids = a.get("doc_ids")
+        if hashes:
+            counts = Counter(hashes)
+            n_total = len(hashes)
+            n_unique = len(counts)
+            methods["text hash"] = {
+                "dup_rate": (n_total - n_unique) / max(1, n_total) * 100,
+                "mult_dist": Counter(counts.values()),
+                "n_total": n_total,
+            }
+        if doc_ids is not None:
+            doc_list = doc_ids.tolist() if hasattr(doc_ids, "tolist") else list(doc_ids)
+            counts = Counter(doc_list)
+            n_total = len(doc_list)
+            n_unique = len(counts)
+            methods["doc_id"] = {
+                "dup_rate": (n_total - n_unique) / max(1, n_total) * 100,
+                "mult_dist": Counter(counts.values()),
+                "n_total": n_total,
+            }
+        if methods:
+            stats[label] = methods
+
+    if not stats:
+        print("  [skip] fig_duplicates: no duplicate data available")
+        return
+
+    all_methods = sorted({m for ms in stats.values() for m in ms})
+    arms = list(stats.keys())
+    n_arms = len(arms)
+    n_methods = len(all_methods)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+    x = np.arange(n_arms)
+    width = 0.8 / max(1, n_methods)
+    for j, method in enumerate(all_methods):
+        rates = []
+        for arm in arms:
+            ms = stats[arm].get(method)
+            rates.append(ms["dup_rate"] if ms else 0.0)
+        bars = ax1.bar(
+            x + (j - (n_methods - 1) / 2) * width, rates, width,
+            label=method, color=_COLORS[j % len(_COLORS)],
+        )
+        for i, (bar, rate) in enumerate(zip(bars, rates)):
+            if rate > 0:
+                ax1.text(
+                    bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                    f"{rate:.1f}%", ha="center", va="bottom", fontsize=8,
+                )
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(arms, rotation=30, ha="right")
+    ax1.set_ylabel("duplicate rate (%)")
+    ax1.set_title("Duplicate rate by arm")
+    ax1.legend(fontsize=9)
+    ax1.grid(axis="y", alpha=0.3, linestyle="--")
+    ax1.set_axisbelow(True)
+
+    y = np.arange(n_arms)
+    left = np.zeros(n_arms)
+    for cat_idx, mult in enumerate([1, 2, 3, 4, 999]):
+        fracs = []
+        for arm in arms:
+            ms = stats[arm].get("doc_id") or stats[arm].get("text hash")
+            if not ms:
+                fracs.append(0.0)
+                continue
+            md = ms["mult_dist"]
+            n_total = ms["n_total"]
+            if mult == 999:
+                cnt = sum(c for m, c in md.items() if m >= 5)
+            else:
+                cnt = md.get(mult, 0)
+            fracs.append(cnt / max(1, n_total) * 100)
+        ax2.barh(y, fracs, left=left, label=mult_labels[cat_idx],
+                 color=dup_colors[cat_idx])
+        left += np.array(fracs)
+    ax2.set_yticks(y)
+    ax2.set_yticklabels(arms)
+    ax2.set_xlabel("fraction of rows (%)")
+    ax2.set_title("Document multiplicity distribution")
+    ax2.legend(fontsize=8, loc="lower right")
+    ax2.grid(axis="x", alpha=0.3, linestyle="--")
+    ax2.set_axisbelow(True)
+
+    fig.suptitle("Duplicate Detection", fontsize=13)
+    _save_fig(fig, out_dir, "fig_duplicates.png")
+
+
 def _detect_duplicates(per_arm, domain_names, out_dir):
     lines = ["=== Duplicate Detection (report only) ===", ""]
     for label, a in per_arm.items():
@@ -671,6 +770,7 @@ def _detect_duplicates(per_arm, domain_names, out_dir):
     with open(path, "w") as f:
         f.write("\n".join(lines))
     print(f"  [Text] Saved: {path}")
+    _fig_duplicates(per_arm, out_dir)
 
 
 # ── text summary ─────────────────────────────────────────────────
