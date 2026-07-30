@@ -22,8 +22,8 @@ Outputs (into --output-dir, default = --result-dir):
   quality_length_corr.txt   — Spearman(quality_signal, char_count) per arm.
                               Signals: raw quality_cols for every arm that
                               preserves them + the merged quality_rank (0=best)
-                              for the quadmix_sampled arm only (prepare_data
-                              drops quality_rank from the regular quadmix arm;
+                              for the quadmix arm only (prepare_data
+                              drops quality_rank from the regular quadmix_train arm;
                               pass --sampled-parquet to recover it).
   fig_quality_length_corr.png — heatmap of the above Spearman matrix
   fig_arm_<quality>.png       — per-arm quality-signal histograms
@@ -184,7 +184,7 @@ def _scan_shard(task):
 
 
 def _scan_sampled_arm(parquet_path, quality_cols, domain_names):
-    """Scan a QuadMix sampled_dataset.parquet as an extra 'quadmix_sampled' arm.
+    """Scan a QuadMix sampled_dataset.parquet as an extra 'quadmix' arm.
 
     sampled_dataset.parquet (batch_sampler.save_sampled_dataset) carries
     char_count / quality_rank (merged, 0=best) / raw quality_cols / <domain_col>
@@ -198,7 +198,7 @@ def _scan_sampled_arm(parquet_path, quality_cols, domain_names):
     the char_count column (added in 0e7bd0c); for those, fall back to reading
     the 'text' column and computing len(text) per doc so the rank<->length
     Spearman still works. ent/rep/div are left empty so the text-only
-    histograms simply skip this arm (they are redundant with the quadmix arm,
+    histograms simply skip this arm (they are redundant with the quadmix_train arm,
     which is the same data pre-packing).
     """
     schema_names = set(pq.read_schema(parquet_path).names)
@@ -776,10 +776,16 @@ def _detect_duplicates(per_arm, domain_names, out_dir):
 # ── text summary ─────────────────────────────────────────────────
 
 
+_STATS_KEY = {
+    "quadmix_train": "quadmix",
+    "quadmix": "_sampled_parquet",
+}
+
+
 def _write_txt(per_arm, stats, seq_len, out_dir):
     lines = ["=== Arm Data Comparison ===", ""]
     for label, a in per_arm.items():
-        st = stats.get(label, {})
+        st = stats.get(_STATS_KEY.get(label, label), {})
         lines.append(
             f"[{label}]  train_docs={st.get('train_docs', '?')}  "
             f"tokens={st.get('tokens', '?')}  shards={st.get('shards', '?')}"
@@ -861,7 +867,7 @@ def parse_args():
     p.add_argument(
         "--sampled-parquet", default=None,
         help="path to a QuadMix sampled_dataset.parquet (search output); scanned as an "
-             "extra 'quadmix_sampled' arm. It is the only arm carrying the merged "
+             "extra 'quadmix' arm. It is the only arm carrying the merged "
              "quality_rank (0=best) that prepare_data drops, so it enables the "
              "quality_rank<->length Spearman in the quality-length table.",
     )
@@ -988,13 +994,16 @@ def main():
                 pa[key] = np.concatenate(arrs)
         per_arm[label] = pa
 
+    if "quadmix" in per_arm:
+        per_arm["quadmix_train"] = per_arm.pop("quadmix")
+
     if args.sampled_parquet:
         sp = args.sampled_parquet
         if os.path.isfile(sp):
-            print(f"\n  arm 'quadmix_sampled': scanning {sp}")
-            per_arm["quadmix_sampled"] = _scan_sampled_arm(sp, quality_cols, domain_names)
-            print(f"    n_docs={len(per_arm['quadmix_sampled']['len']):,}  "
-                  f"has quality_rank={'quality_rank' in per_arm['quadmix_sampled']}")
+            print(f"\n  arm 'quadmix': scanning {sp}")
+            per_arm["quadmix"] = _scan_sampled_arm(sp, quality_cols, domain_names)
+            print(f"    n_docs={len(per_arm['quadmix']['len']):,}  "
+                  f"has quality_rank={'quality_rank' in per_arm['quadmix']}")
         else:
             print(f"  [warn] --sampled-parquet not found: {sp}")
 
