@@ -33,6 +33,10 @@ import json
 import os
 import sys
 
+for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+           "NUMEXPR_NUM_THREADS"):
+    os.environ.setdefault(_v, "1")
+
 try:
     import quadmix  # noqa: F401
 except ImportError:
@@ -421,7 +425,7 @@ def plot_quality_length_decomposition(
             pos_bottom += pos_vals
         if neg_vals.any():
             ax1.bar(x, neg_vals, width, bottom=neg_bottom,
-                    color=colors[n], alpha=0.85)
+                    label=quality_names[n], color=colors[n], alpha=0.85)
             neg_bottom += neg_vals
 
     totals = pos_bottom + neg_bottom
