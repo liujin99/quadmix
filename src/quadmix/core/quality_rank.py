@@ -78,6 +78,7 @@ def compute_quality_ranks(
     token_counts: Optional[npt.NDArray[np.int64]] = None,
     seed: Optional[int] = None,
     n_jobs: int = 1,
+    unique_domains: Optional[npt.NDArray[np.int64]] = None,
 ) -> npt.NDArray[np.float64]:
     """
     Compute quality percentile ranks ¯r within each domain (Equation 2).
@@ -101,6 +102,9 @@ def compute_quality_ranks(
                 across domains using threads. When n_jobs > 1,
                 each domain uses its own RNG (seed + m + 1) for
                 thread safety.
+        unique_domains: Optional precomputed sorted unique domain labels.
+                       If None (default), computed via np.unique(domain_labels).
+                       Pass to avoid a redundant full-corpus sort.
 
     Returns:
         Quality rank ¯r for each document.
@@ -112,7 +116,8 @@ def compute_quality_ranks(
     if token_counts is None:
         token_counts = np.ones(num_docs, dtype=np.int64)
 
-    unique_domains = np.unique(domain_labels)
+    if unique_domains is None:
+        unique_domains = np.unique(domain_labels)
 
     effective_jobs = n_jobs if n_jobs != -1 else (os.cpu_count() or 1)
     if effective_jobs > 1 and len(unique_domains) > 1:

@@ -16,6 +16,8 @@ QuaDMix Input Contract:
 """
 
 import os
+from typing import Optional
+
 import numpy as np
 import numpy.typing as npt
 
@@ -33,19 +35,20 @@ def _fast_rankdata_average(x: npt.NDArray[np.float64]) -> npt.NDArray[np.float64
     if n == 0:
         return np.array([], dtype=np.float64)
 
-    int_x = x.astype(np.int64)
-    if np.array_equal(x, int_x):
-        min_val = int_x.min()
-        max_val = int_x.max()
-        if min_val >= 0 and max_val < 10000:
-            counts = np.bincount(int_x, minlength=max_val + 1)
-            cum = np.cumsum(counts)
-            start = np.empty_like(cum)
-            start[0] = 1
-            start[1:] = cum[:-1] + 1
-            avg_ranks = (start + cum) / 2.0
-            return avg_ranks[int_x]
-    del int_x
+    if np.issubdtype(x.dtype, np.integer):
+        int_x = x.astype(np.int64)
+        if np.array_equal(x, int_x):
+            min_val = int_x.min()
+            max_val = int_x.max()
+            if min_val >= 0 and max_val < 10000:
+                counts = np.bincount(int_x, minlength=max_val + 1)
+                cum = np.cumsum(counts)
+                start = np.empty_like(cum)
+                start[0] = 1
+                start[1:] = cum[:-1] + 1
+                avg_ranks = (start + cum) / 2.0
+                return avg_ranks[int_x]
+        del int_x
 
     sorter = np.argsort(x, kind='quicksort')
     sorted_x = x[sorter]
@@ -73,6 +76,7 @@ def compute_merged_quality_scores(
     merge_config: MergedQualityConfig,
     normalizer: str = "rank",
     n_jobs: int = 1,
+    unique_domains: Optional[npt.NDArray[np.int64]] = None,
 ) -> npt.NDArray[np.float64]:
     """
     Compute merged quality scores ¯q for all documents (Equation 1).
@@ -89,6 +93,9 @@ def compute_merged_quality_scores(
                 The per-criterion normalization (e.g., rankdata) is
                 parallelized across criteria using threads (scipy's
                 rankdata releases the GIL during its Cython sort).
+        unique_domains: Optional precomputed sorted unique domain labels.
+                       If None (default), computed via np.unique(domain_labels).
+                       Pass to avoid a redundant full-corpus sort.
 
     Returns:
         Array of merged quality scores ¯q for each document.
@@ -120,7 +127,8 @@ def compute_merged_quality_scores(
         for n in range(num_criteria):
             normalized_quality[:, n] = _normalize_col(n)
 
-    unique_domains = np.unique(domain_labels)
+    if unique_domains is None:
+        unique_domains = np.unique(domain_labels)
 
     neg_count = int((domain_labels < 0).sum())
     if neg_count > 0:

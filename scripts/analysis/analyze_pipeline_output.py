@@ -160,9 +160,12 @@ def plot_quality_score_dist(
 
     fig, ax = plt.subplots(figsize=(10, 5))
 
-    all_scores = np.concatenate([merged_scores[idx] for idx in domain_indices if len(idx) > 0])
-    global_min = float(all_scores.min())
-    global_max = float(all_scores.max())
+    nonempty = [idx for idx in domain_indices if len(idx) > 0]
+    if nonempty:
+        global_min = min(float(merged_scores[idx].min()) for idx in nonempty)
+        global_max = max(float(merged_scores[idx].max()) for idx in nonempty)
+    else:
+        global_min, global_max = 0.0, 1.0
     if global_max - global_min < 1e-15:
         global_max = global_min + 1.0
     bin_edges = np.linspace(global_min, global_max, 81)
@@ -755,19 +758,44 @@ def write_analysis_summary(
     lines.append("-" * len(header))
 
     tie_warning_domains = []
-    for m in range(num_domains):
+
+    def _domain_stats(m):
         idx = domain_indices[m]
         scores = merged_scores[idx]
         if len(scores) == 0:
+            return None
+        values, counts = np.unique(scores, return_counts=True)
+        max_frac = counts.max() / len(scores)
+        return (
+            len(scores),
+            float(scores.min()),
+            float(scores.max()),
+            float(scores.mean()),
+            float(scores.std()),
+            int(len(values)),
+            float(max_frac),
+        )
+
+    n_jobs = getattr(args, "n_jobs", 1)
+    effective = n_jobs if n_jobs != -1 else (os.cpu_count() or 1)
+    if effective > 1 and num_domains > 1:
+        from joblib import Parallel, delayed
+        stats = Parallel(n_jobs=min(effective, num_domains), prefer="threads")(
+            delayed(_domain_stats)(m) for m in range(num_domains)
+        )
+    else:
+        stats = [_domain_stats(m) for m in range(num_domains)]
+
+    for m, s in enumerate(stats):
+        if s is None:
             lines.append(f"  {domain_short[m]:>12s} {'0':>12s} (empty)")
             continue
-        values, counts = np.unique(scores, return_counts=True)
-        max_frac = counts.max() / len(scores) if len(scores) > 0 else 0
+        n_docs, smin, smax, smean, sstd, n_uniq, max_frac = s
         lines.append(
-            f"  {domain_short[m]:>12s} {len(scores):>12,} "
-            f"{scores.min():>10.6f} {scores.max():>10.6f} "
-            f"{scores.mean():>10.6f} {scores.std():>10.6f} "
-            f"{len(values):>10,} {max_frac:>10.4%}"
+            f"  {domain_short[m]:>12s} {n_docs:>12,} "
+            f"{smin:>10.6f} {smax:>10.6f} "
+            f"{smean:>10.6f} {sstd:>10.6f} "
+            f"{n_uniq:>10,} {max_frac:>10.4%}"
         )
         if max_frac > 0.05:
             tie_warning_domains.append((domain_short[m], max_frac))
@@ -930,6 +958,45 @@ def _spearman(x, y):
     ry_m = ry - ry.mean()
     den = np.sqrt(np.sum(rx_m ** 2) * np.sum(ry_m ** 2))
     return float(np.sum(rx_m * ry_m) / den) if den > 0 else 0.0
+
+
+def _spearman_rho_vs_fixed(quality_scores, y, n_criteria, n_jobs):
+    """Spearman ρ of each quality criterion vs a FIXED y (e.g. char_counts).
+
+    Optimized over a per-criterion _spearman loop:
+      - the rank of y is computed ONCE (not N_criteria times),
+      - each x is ranked with a single argsort + scatter (not double argsort),
+      - the N_criteria columns are ranked in parallel via threads.
+    """
+    y = np.asarray(y, dtype=np.float64)
+    n = len(y)
+    if n < 2:
+        return np.zeros(n_criteria, dtype=np.float64)
+    order_y = np.argsort(y, kind="quicksort")
+    ry = np.empty(n, dtype=np.float64)
+    ry[order_y] = np.arange(n, dtype=np.float64)
+    ry_m = ry - ry.mean()
+    ry_ss = float(np.sum(ry_m ** 2))
+
+    def _rho_col(k):
+        x = np.asarray(quality_scores[:, k], dtype=np.float64)
+        if len(x) < 2:
+            return 0.0
+        order_x = np.argsort(x, kind="quicksort")
+        rx = np.empty(n, dtype=np.float64)
+        rx[order_x] = np.arange(n, dtype=np.float64)
+        rx_m = rx - rx.mean()
+        den = (float(np.sum(rx_m ** 2)) * ry_ss) ** 0.5
+        return float(np.sum(rx_m * ry_m) / den) if den > 0 else 0.0
+
+    effective = n_jobs if n_jobs != -1 else (os.cpu_count() or 1)
+    if effective > 1 and n_criteria > 1:
+        from joblib import Parallel, delayed
+        results = Parallel(n_jobs=min(effective, n_criteria), prefer="threads")(
+            delayed(_rho_col)(k) for k in range(n_criteria)
+        )
+        return np.array(results, dtype=np.float64)
+    return np.array([_rho_col(k) for k in range(n_criteria)], dtype=np.float64)
 
 
 def _domain_block(symbol, name, hard_v, easy_v, mid_v, domain_short, M):
@@ -1628,20 +1695,24 @@ def main():
     )
 
     # ── Recompute merged scores and ranks ──
-    print(f"[5/5] Recomputing merged quality scores (Eq.1)...")
+    print(f"       Indexing unique domains...", flush=True)
+    unique_domains = np.unique(domain_labels)
+    print(f"[5/5] Recomputing merged quality scores (Eq.1)...", flush=True)
     merged_scores = compute_merged_quality_scores(
         mgr.quality_scores,
         domain_labels,
         params.merge_config,
         normalizer=normalizer,
         n_jobs=args.n_jobs,
+        unique_domains=unique_domains,
     )
 
-    print(f"       Computing quality ranks (Eq.2)...")
+    print(f"       Computing quality ranks (Eq.2)...", flush=True)
     token_counts = mgr.estimate_token_counts()
     ranks = compute_quality_ranks(
         merged_scores, domain_labels, token_counts,
         seed=args.seed, n_jobs=args.n_jobs,
+        unique_domains=unique_domains,
     )
 
     selected_ranks = ranks[selected_doc_ids]
@@ -1651,10 +1722,10 @@ def main():
     char_counts = mgr.doc_char_counts
     quality_scores = mgr.quality_scores
     N_criteria = params.num_criteria
-    quality_length_rhos = np.array([
-        _spearman(quality_scores[:, n], char_counts)
-        for n in range(N_criteria)
-    ])
+    print(f"       Computing quality-length ρ ({N_criteria} criteria)...", flush=True)
+    quality_length_rhos = _spearman_rho_vs_fixed(
+        quality_scores, char_counts, N_criteria, args.n_jobs
+    )
     print(f"       Quality-length ρ: {quality_length_rhos}")
 
     # ── Generate figures ──
