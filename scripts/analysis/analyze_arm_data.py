@@ -144,7 +144,7 @@ def _scan_shard(task):
     if has_domain and "domain" in schema_names:
         cols.append("domain")
     extra_cols = []
-    for c in ["char_count", "token_count", "quality_rank"] + (quality_cols or []):
+    for c in ["doc_id", "char_count", "token_count", "quality_rank"] + (quality_cols or []):
         if c and c in schema_names and c not in cols:
             cols.append(c)
             extra_cols.append(c)
@@ -176,7 +176,7 @@ def _scan_shard(task):
     for c in extra_cols:
         if c in table.column_names:
             arr = table[c].to_pylist()
-            if c in ("char_count", "token_count"):
+            if c in ("doc_id", "char_count", "token_count"):
                 result[c] = np.array(arr, dtype=np.int64)
             else:
                 result[c] = np.array(arr, dtype=np.float64)
@@ -210,9 +210,12 @@ def _scan_sampled_arm(parquet_path, quality_cols, domain_names):
             break
 
     has_char_count = "char_count" in schema_names
+    has_doc_id = "doc_id" in schema_names
     want = []
     if has_char_count:
         want.append("char_count")
+    if has_doc_id:
+        want.append("doc_id")
     for c in ["quality_rank"] + list(quality_cols or []):
         if c in schema_names and c not in want:
             want.append(c)
@@ -241,6 +244,15 @@ def _scan_sampled_arm(parquet_path, quality_cols, domain_names):
         dom = Counter(dom_labels.tolist())
         if domain_names:
             dom = _normalize_domain(dom, domain_names)
+            _map = {i: n for i, n in enumerate(domain_names)}
+            dom_labels = np.array([
+                _map.get(int(d), str(d)) if isinstance(d, (int, np.integer)) and not isinstance(d, bool) else d
+                for d in dom_labels
+            ])
+
+    doc_ids = None
+    if "doc_id" in table.column_names:
+        doc_ids = np.asarray(table["doc_id"].to_numpy(), dtype=np.int64)
 
     pa = {
         "len": char_count,
@@ -251,6 +263,7 @@ def _scan_sampled_arm(parquet_path, quality_cols, domain_names):
         "has_domain": domain_col is not None,
         "dom_labels": dom_labels,
         "text_hashes": [],
+        "doc_ids": doc_ids,
         "tok_len": None,
         "boundaries": None,
         "char_count": char_count,
@@ -597,48 +610,62 @@ def _fig_quality_hist(per_arm, quality_cols, out_dir):
 # ── duplicate detection (report only, no dedup) ───────────────────
 
 
+def _dup_report_lines(label, method, identifiers, lengths, dom_labels):
+    """Generate report lines for one duplicate-detection method."""
+    n_total = len(identifiers)
+    counts = Counter(identifiers)
+    n_unique = len(counts)
+    n_dup_docs = n_total - n_unique
+    dup_mult = Counter(counts.values())
+    lines = [f"[{label}]  ({method}) total={n_total:,}  unique={n_unique:,}  "
+             f"dup_docs={n_dup_docs:,} ({n_dup_docs / max(1, n_total) * 100:.1f}%)"]
+    for mult, cnt in sorted(dup_mult.items()):
+        if mult > 1:
+            lines.append(f"  {mult}x: {cnt:,} docs "
+                         f"({cnt * mult:,} rows, {cnt * (mult - 1):,} extra)")
+    if len(lengths) == n_total:
+        id_to_len = {}
+        for i, idf in enumerate(identifiers):
+            id_to_len.setdefault(idf, []).append(int(lengths[i]))
+        dup_chars = sum(lens[0] * (len(lens) - 1)
+                        for lens in id_to_len.values() if len(lens) > 1)
+        total_chars = int(lengths.sum())
+        if total_chars > 0:
+            lines.append(f"  Duplicate char fraction: {dup_chars / total_chars * 100:.1f}%")
+    if dom_labels is not None and len(dom_labels) == n_total and len(lengths) == n_total:
+        lines.append("  Per-domain duplicate docs:")
+        domains = sorted(set(str(d) for d in dom_labels))
+        for d in domains:
+            d_mask = np.array([str(dl) == d for dl in dom_labels])
+            d_ids = [identifiers[i] for i in range(n_total) if d_mask[i]]
+            d_counts = Counter(d_ids)
+            d_dup = sum(1 for v in d_counts.values() if v > 1)
+            d_total = len(d_ids)
+            if d_total > 0:
+                lines.append(f"    {d:>12s}: {d_dup:,}/{d_total:,} "
+                             f"({d_dup / d_total * 100:.1f}% unique-doc dup)")
+    return lines
+
+
 def _detect_duplicates(per_arm, domain_names, out_dir):
     lines = ["=== Duplicate Detection (report only) ===", ""]
     for label, a in per_arm.items():
         hashes = a.get("text_hashes")
-        if not hashes:
-            lines.append(f"[{label}] no text hashes available")
-            lines.append("")
-            continue
-        n_total = len(hashes)
-        counts = Counter(hashes)
-        n_unique = len(counts)
-        n_dup_docs = n_total - n_unique
-        dup_mult = Counter(counts.values())
-        lines.append(f"[{label}]  total={n_total:,}  unique={n_unique:,}  "
-                     f"dup_docs={n_dup_docs:,} ({n_dup_docs / max(1, n_total) * 100:.1f}%)")
-        for mult, cnt in sorted(dup_mult.items()):
-            if mult > 1:
-                lines.append(f"  {mult}x: {cnt:,} docs "
-                             f"({cnt * mult:,} rows, {cnt * (mult - 1):,} extra)")
+        doc_ids = a.get("doc_ids")
         lengths = a.get("len", np.array([]))
-        if len(lengths) == n_total:
-            hash_to_len = {}
-            for i, h in enumerate(hashes):
-                hash_to_len.setdefault(h, []).append(int(lengths[i]))
-            dup_chars = sum(lens[0] * (len(lens) - 1)
-                            for lens in hash_to_len.values() if len(lens) > 1)
-            total_chars = int(lengths.sum())
-            if total_chars > 0:
-                lines.append(f"  Duplicate char fraction: {dup_chars / total_chars * 100:.1f}%")
         dom_labels = a.get("dom_labels")
-        if dom_labels is not None and len(dom_labels) == n_total and len(lengths) == n_total:
-            lines.append("  Per-domain duplicate docs:")
-            domains = sorted(set(str(d) for d in dom_labels))
-            for d in domains:
-                d_mask = np.array([str(dl) == d for dl in dom_labels])
-                d_hashes = [hashes[i] for i in range(n_total) if d_mask[i]]
-                d_counts = Counter(d_hashes)
-                d_dup = sum(1 for v in d_counts.values() if v > 1)
-                d_total = len(d_hashes)
-                if d_total > 0:
-                    lines.append(f"    {d:>12s}: {d_dup:,}/{d_total:,} "
-                                 f"({d_dup / d_total * 100:.1f}% unique-doc dup)")
+        reported = False
+        if hashes:
+            lines.extend(_dup_report_lines(
+                label, "by text hash", hashes, lengths, dom_labels))
+            reported = True
+        if doc_ids is not None:
+            doc_list = doc_ids.tolist()
+            lines.extend(_dup_report_lines(
+                label, "by doc_id (source corpus index)", doc_list, lengths, dom_labels))
+            reported = True
+        if not reported:
+            lines.append(f"[{label}] no text hashes or doc_ids available")
         lines.append("")
     path = os.path.join(out_dir, "duplicate_report.txt")
     with open(path, "w") as f:
@@ -808,6 +835,7 @@ def main():
         dom = Counter()
         dom_labels_all = []
         text_hashes_all = []
+        doc_ids_all = []
         extra_arrays = {}
         with Pool(num_workers, initializer=_init_tok_worker,
                   initargs=(tokenizer_path, args.tokenizer_threads)) as pool:
@@ -825,9 +853,11 @@ def main():
                     dom_labels_all.extend(result["dom_labels"])
                 if result["text_hashes"]:
                     text_hashes_all.extend(result["text_hashes"])
+                if result.get("doc_id") is not None:
+                    doc_ids_all.append(result["doc_id"])
                 for key, val in result.items():
                     if key in ("lens", "ents", "reps", "divs", "dom", "tok_lens",
-                               "dom_labels", "text_hashes"):
+                               "dom_labels", "text_hashes", "doc_id"):
                         continue
                     if isinstance(val, np.ndarray):
                         extra_arrays.setdefault(key, []).append(val)
@@ -842,6 +872,7 @@ def main():
             "has_domain": info["has_domain"],
             "dom_labels": np.array(dom_labels_all) if dom_labels_all else None,
             "text_hashes": text_hashes_all,
+            "doc_ids": np.concatenate(doc_ids_all) if doc_ids_all else None,
         }
         if TOK:
             tl_all = np.concatenate(TOK)
