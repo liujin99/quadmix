@@ -13,8 +13,7 @@ Generates outputs directly in <exp-dir> (the experiment result directory):
                                   (ω/λ/η/ε translated to top%×oversampling)
 
 Optional (when <exp-dir>/proxy_experiments/ exists):
-  - proxy_val_loss_analysis.txt — hard-vs-easy val_loss analysis judging reverse-CE viability
-  - fig_proxy_val_loss.png       — per-domain η / α_noise / λ means for hard vs easy groups
+  - proxy_val_loss_analysis.txt — hard-vs-easy val_loss analysis: is reverse-optimization (max val_loss) safe?
 
 The script recomputes merged quality scores and ranks for the FULL corpus using
 the optimal parameters from the pipeline output, then compares the full corpus
@@ -950,14 +949,17 @@ def _domain_block(symbol, name, hard_v, easy_v, mid_v, domain_short, M):
 
 
 def _analyze_proxy_val_loss(exp_dir, domain_names, quality_names, extreme_count):
-    """Analyze proxy val_loss hard-vs-easy to judge reverse-CE viability.
+    """Hard-vs-easy val_loss analysis: is reverse-optimization (max val_loss) safe?
 
     Loads <exp-dir>/proxy_experiments/exp_*/meta.json, sorts by val_loss,
     splits into hard (highest) / easy (lowest) / mid, and compares their
     per-domain eta/lambda/omega/epsilon, alpha(noise), lambda-entropy, and
-    per-task losses. Outputs proxy_val_loss_analysis.txt + fig_proxy_val_loss.png.
+    per-task losses. Outputs proxy_val_loss_analysis.txt.
 
-    Verdict: would reverse-CE (max val_loss) pick diverse or messy data?
+    Verdict checks whether the highest-loss runs relax quality/noise filtering
+    or concentrate on one domain (=> reverse-optimization would pick garbage).
+    Only rules out the 'picks garbage' failure mode; does not predict whether
+    reversing improves downstream score.
     """
     proxy_dir = os.path.join(exp_dir, "proxy_experiments")
     print(f"\n[Proxy val_loss] Loading experiments from: {proxy_dir}")
@@ -1164,42 +1166,42 @@ def _analyze_proxy_val_loss(exp_dir, domain_names, quality_names, extreme_count)
     low_entropy = hard_entropy < easy_entropy
 
     lines.append("-" * 70)
-    lines.append("Verdict: Would reverse-CE (max val_loss) pick diverse or messy data?")
+    lines.append("Verdict: Is reverse-optimization (picking MAX val_loss) safe?")
     lines.append("-" * 70)
     lines.append(
-        f"  hard eta (mean)    = {hard_eta_mean:.4f}  easy = {easy_eta_mean:.4f}  "
-        f"-> {'LOW (relaxed quality filtering)' if low_eta else 'normal/high (still filters quality)'}"
+        f"  quality filter (eta)    : hard={hard_eta_mean:.4f}  easy={easy_eta_mean:.4f}  "
+        f"-> {'RELAXED (may pick low-quality)' if low_eta else 'maintained (still filters) OK'}"
     )
     if noise_criterion:
         lines.append(
-            f"  hard alpha_noise   = {hard_an_mean:.4f}  easy = {easy_an_mean:.4f}  "
-            f"-> {'LOW (does not penalize noise)' if low_alpha_noise else 'normal (still penalizes noise)'}"
+            f"  noise penalty (alpha)   : hard={hard_an_mean:.4f}  easy={easy_an_mean:.4f}  "
+            f"-> {'RELAXED (may let noise in)' if low_alpha_noise else 'maintained (still penalizes) OK'}"
         )
     else:
-        lines.append("  hard alpha_noise   = (unavailable, noise criterion not detected)")
+        lines.append("  noise penalty (alpha)   : (no noise criterion detected, skipped)")
     lines.append(
-        f"  hard lambda-entropy= {hard_entropy:.4f}  easy = {easy_entropy:.4f}  "
-        f"-> {'LOW (niche/concentrated domains)' if low_entropy else 'HIGH (balanced/diverse domains)'}"
+        f"  domain balance (entropy): hard={hard_entropy:.4f}  easy={easy_entropy:.4f}  "
+        f"-> {'LOW (may pick one domain)' if low_entropy else 'HIGH (balanced) OK'}"
     )
     lines.append("")
 
     if low_eta and low_alpha_noise:
         verdict = (
-            "[!] E DEAD: hard experiments relax BOTH eta and alpha_noise -> "
-            "reverse-CE would pick messy/noisy (low-quality) data. Do NOT pursue "
-            "reverse-CE without a quality floor."
+            "[!] NOT SAFE: highest-loss runs relaxed BOTH quality and noise "
+            "filtering -> reverse-optimization would pick low-quality/noisy "
+            "data. Do NOT reverse without a quality floor."
         )
     elif low_entropy:
         verdict = (
-            "[!] E RISKY: hard experiments concentrate lambda -> reverse-CE "
-            "would pick niche/one-domain data. Risk of domain imbalance."
+            "[!] RISKY: highest-loss runs concentrate on one domain -> "
+            "reverse-optimization would pick niche data; domain imbalance risk."
         )
     else:
         verdict = (
-            "[+] E VIABLE: hard experiments maintain quality filtering "
-            "(eta/alpha_noise not lower) with diverse lambda -> reverse-CE "
-            "would pick genuinely hard, diverse data. Worth a full search "
-            "+ downstream run."
+            "[+] SAFE: highest-loss runs keep quality + noise filtering + "
+            "domain balance -> reverse-optimization would not pick garbage. "
+            "Note: this only rules out the 'picks garbage' failure mode; it "
+            "does NOT predict whether reversing improves downstream score."
         )
     lines.append("  " + verdict)
     lines.append("")
@@ -1212,33 +1214,360 @@ def _analyze_proxy_val_loss(exp_dir, domain_names, quality_names, extreme_count)
         f.write("\n".join(lines) + "\n")
     print(f"  [Text]  Saved: {out_path}")
 
-    # ── Figure: per-domain hard vs easy means ──
-    panels = [(r"$\eta$ (quality exponent)", hard_eta, easy_eta)]
-    if noise_criterion:
-        panels.append((r"$\alpha_{noise}$ (noise weight)", hard_an, easy_an))
-    panels.append((r"$\lambda$ (domain weight)", hard_lam, easy_lam))
 
-    ncol = len(panels)
-    fig, axes = plt.subplots(1, ncol, figsize=(5 * ncol, 4.5))
-    if ncol == 1:
-        axes = [axes]
-    x = np.arange(M)
-    width = 0.38
-    for ax, (title, hv, ev) in zip(axes, panels):
-        ax.bar(x - width / 2, hv, width, label="hard", color="#ED7D31", alpha=0.85)
-        ax.bar(x + width / 2, ev, width, label="easy", color="#5B9BD5", alpha=0.85)
-        ax.set_xticks(x)
-        ax.set_xticklabels(domain_short, rotation=30, ha="right")
-        ax.set_title(title)
-        ax.legend(fontsize=9, loc="best")
-        ax.grid(axis="y", alpha=0.3, linestyle="--")
-        ax.set_axisbelow(True)
-    fig.suptitle(
-        "Proxy val_loss: Hard (highest) vs Easy (lowest) per-domain means",
-        y=1.02, fontsize=12,
+# ── Diversity analysis (quality-diversity tradeoff) ───────────────
+
+
+def _analyze_diversity(
+    exp_dir,
+    mgr,
+    domain_names,
+    num_domains,
+):
+    """Compute diversity_score for each proxy experiment and analyze
+    the quality-diversity tradeoff.
+
+    For each experiment:
+      n_unique = len(np.unique(selected_indices))
+      unique_tokens = (doc_char_counts[unique_idx] // 4).sum()
+      diversity_score = n_unique / max(n_unique)   # normalized [0, 1]
+
+    Outputs:
+      diversity_analysis.txt
+      fig_diversity_tradeoff.png
+      fig_diversity_lambda_sweep.png
+    """
+    proxy_dir = os.path.join(exp_dir, "proxy_experiments")
+    print(f"\n[Diversity] Loading experiments from: {proxy_dir}")
+
+    char_counts = mgr.doc_char_counts
+    if char_counts is None:
+        print("[Diversity] doc_char_counts not available — skipping")
+        return
+
+    exp_names = sorted(
+        d for d in os.listdir(proxy_dir)
+        if d.startswith("exp_") and os.path.isdir(os.path.join(proxy_dir, d))
     )
+
+    records = []
+    n_missing_npy = 0
+    n_oob = 0
+    for exp_name in exp_names:
+        meta_path = os.path.join(proxy_dir, exp_name, "meta.json")
+        npy_path = os.path.join(proxy_dir, exp_name, "selected_indices.npy")
+        if not os.path.exists(meta_path):
+            continue
+        with open(meta_path) as f:
+            meta = json.load(f)
+        if "val_loss" not in meta:
+            continue
+        if not os.path.exists(npy_path):
+            n_missing_npy += 1
+            continue
+        sel_idx = np.load(npy_path)
+        if len(sel_idx) == 0:
+            continue
+        if sel_idx.max() >= len(char_counts):
+            n_oob += 1
+            continue
+
+        n_total = len(sel_idx)
+        unique_idx = np.unique(sel_idx)
+        n_unique = len(unique_idx)
+        unique_tokens = int(np.maximum(char_counts[unique_idx] // 4, 1).sum())
+        if unique_tokens == 0:
+            continue
+        dup_rate = 1.0 - n_unique / max(n_total, 1)
+        records.append({
+            "exp_id": meta.get("experiment_id", exp_name),
+            "exp_name": exp_name,
+            "val_loss": float(meta["val_loss"]),
+            "n_total": n_total,
+            "n_unique": n_unique,
+            "unique_tokens": unique_tokens,
+            "dup_rate": dup_rate,
+            "doc_density": n_unique / unique_tokens,
+            "sampling_params": meta.get("sampling_params", {}),
+        })
+
+    n = len(records)
+    if n_missing_npy > 0:
+        print(f"[Diversity] Skipped {n_missing_npy} experiments without selected_indices.npy")
+    if n_oob > 0:
+        print(f"[Diversity] Skipped {n_oob} experiments with out-of-bounds indices")
+    if n < 4:
+        print(f"[Diversity] Only {n} usable experiments (need >=4), skipping.")
+        return
+    print(f"[Diversity] Loaded {n} experiments")
+
+    max_n_unique = max(r["n_unique"] for r in records)
+    for r in records:
+        r["diversity_score"] = r["n_unique"] / max_n_unique
+
+    val_losses = np.array([r["val_loss"] for r in records])
+    div_scores = np.array([r["diversity_score"] for r in records])
+    n_uniques = np.array([r["n_unique"] for r in records])
+    densities = np.array([r["doc_density"] for r in records])
+
+    rho_vd = _spearman(val_losses, div_scores)
+    rho_vn = _spearman(val_losses, n_uniques)
+    rho_density = _spearman(val_losses, densities)
+
+    order = np.argsort(val_losses)
+    pareto_idx = []
+    best_div_so_far = -1.0
+    for i in order:
+        d = div_scores[i]
+        if d > best_div_so_far:
+            pareto_idx.append(int(i))
+            best_div_so_far = d
+    pareto_set = set(pareto_idx)
+
+    lambdas = [0.0, 0.01, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0]
+    lambda_results = []
+    for lam in lambdas:
+        adjusted = val_losses + lam * (1.0 - div_scores)
+        best_i = int(np.argmin(adjusted))
+        lambda_results.append({
+            "lambda": lam,
+            "best_idx": best_i,
+            "exp_id": records[best_i]["exp_id"],
+            "val_loss": records[best_i]["val_loss"],
+            "diversity_score": records[best_i]["diversity_score"],
+            "n_unique": records[best_i]["n_unique"],
+        })
+
+    min_vl = float(val_losses.min())
+    candidates = []
+    candidate_ids = set()
+    for i in pareto_idx:
+        r = records[i]
+        if r["val_loss"] <= min_vl * 1.05 and r["diversity_score"] > 0.85:
+            candidates.append(r)
+            candidate_ids.add(r["exp_id"])
+    for lr in lambda_results:
+        r = records[lr["best_idx"]]
+        if r["exp_id"] not in candidate_ids and lr["diversity_score"] > 0.80:
+            candidates.append(r)
+            candidate_ids.add(r["exp_id"])
+
+    lines = []
+    lines.append("=" * 70)
+    lines.append("Diversity Analysis (Quality-Diversity Tradeoff)")
+    lines.append("=" * 70)
+    lines.append("")
+    lines.append(f"Experiments       : {n}")
+    lines.append(f"max(n_unique)     : {max_n_unique:,} (D_ref)")
+    lines.append(f"doc_char_counts   : available ({len(char_counts):,} docs in source)")
+    lines.append("")
+
+    lines.append("-" * 70)
+    lines.append("Diversity Metrics Summary")
+    lines.append("-" * 70)
+    for key, label in [
+        ("val_loss", "val_loss"),
+        ("n_unique", "n_unique"),
+        ("unique_tokens", "unique_tokens"),
+        ("doc_density", "doc_density"),
+        ("diversity_score", "diversity_score"),
+        ("dup_rate", "dup_rate"),
+    ]:
+        vals = np.array([r[key] for r in records])
+        lines.append(
+            f"  {label:16s} min={vals.min():.4f}  max={vals.max():.4f}  "
+            f"mean={vals.mean():.4f}  std={vals.std():.4f}"
+        )
+    lines.append("")
+
+    lines.append("-" * 70)
+    lines.append("Spearman Correlations (val_loss vs diversity metrics)")
+    lines.append("-" * 70)
+    lines.append(f"  rho(val_loss, diversity_score)  = {rho_vd:+.4f}")
+    lines.append(f"  rho(val_loss, n_unique)         = {rho_vn:+.4f}")
+    lines.append(f"  rho(val_loss, doc_density)      = {rho_density:+.4f}")
+    lines.append("")
+    if rho_vd < -0.3:
+        lines.append("  -> Tradeoff CONFIRMED: lower val_loss <-> lower diversity (anti-correlated)")
+    elif abs(rho_vd) < 0.1:
+        lines.append("  -> NO tradeoff: val_loss and diversity uncorrelated; theta* may be an outlier")
+    elif rho_vd > 0.3:
+        lines.append("  -> UNEXPECTED: val_loss and diversity positively correlated")
+    else:
+        lines.append(f"  -> Weak tradeoff (|rho|={abs(rho_vd):.4f})")
+    lines.append("")
+
+    lines.append("-" * 70)
+    lines.append("Per-Experiment Diversity (sorted by val_loss, top 30)")
+    lines.append("-" * 70)
+    header = (
+        f"  {'exp_id':>6s} {'val_loss':>10s} {'n_total':>10s} {'n_unique':>10s} "
+        f"{'uniq_tok':>10s} {'density':>10s} {'div_score':>10s} {'dup_rate':>8s} {'pareto':>6s}"
+    )
+    lines.append(header)
+    lines.append("  " + "-" * (len(header) - 2))
+
+    sorted_idx = np.argsort(val_losses)
+    for i in sorted_idx[:30]:
+        r = records[i]
+        p_tag = "*" if i in pareto_set else ""
+        lines.append(
+            f"  {str(r['exp_id']):>6s} {r['val_loss']:>10.4f} {r['n_total']:>10,} {r['n_unique']:>10,} "
+            f"{r['unique_tokens']:>10,} {r['doc_density']:>10.6f} {r['diversity_score']:>10.4f} "
+            f"{r['dup_rate']:>8.2%} {p_tag:>6s}"
+        )
+    lines.append("")
+
+    lines.append("-" * 70)
+    lines.append(f"Pareto Frontier ({len(pareto_idx)} non-dominated points)")
+    lines.append("-" * 70)
+    lines.append(f"  {'exp_id':>6s} {'val_loss':>10s} {'div_score':>10s} {'n_unique':>10s}")
+    lines.append("  " + "-" * 40)
+    for i in pareto_idx:
+        r = records[i]
+        lines.append(
+            f"  {str(r['exp_id']):>6s} {r['val_loss']:>10.4f} {r['diversity_score']:>10.4f} {r['n_unique']:>10,}"
+        )
+    lines.append("")
+
+    lines.append("-" * 70)
+    lines.append("Lambda Sweep: adjusted_loss = val_loss + lambda * (1 - diversity_score)")
+    lines.append("-" * 70)
+    lines.append(f"  {'lambda':>6s} {'exp_id':>6s} {'val_loss':>10s} {'div_score':>10s} {'n_unique':>10s} {'d_val_loss':>10s}")
+    lines.append("  " + "-" * 58)
+    for lr in lambda_results:
+        dv = lr["val_loss"] - min_vl
+        lines.append(
+            f"  {lr['lambda']:>6.2f} {str(lr['exp_id']):>6s} {lr['val_loss']:>10.4f} "
+            f"{lr['diversity_score']:>10.4f} {lr['n_unique']:>10,} {dv:>+10.4f}"
+        )
+    lines.append("")
+
+    lines.append("-" * 70)
+    lines.append("Phase 2 Candidates (high diversity, minimal val_loss sacrifice)")
+    lines.append("-" * 70)
+    if not candidates:
+        lines.append("  (no candidates found -- see Pareto frontier and lambda sweep)")
+    else:
+        for r in candidates[:10]:
+            lines.append(
+                f"  exp_id={r['exp_id']}  val_loss={r['val_loss']:.4f}  "
+                f"diversity={r['diversity_score']:.4f}  n_unique={r['n_unique']:,}"
+            )
+            sp = r.get("sampling_params", {})
+            if sp:
+                lines.append("    sampling_params:")
+                for dk in sorted(sp):
+                    p = sp[dk]
+                    lines.append(
+                        f"      {dk:>12s}: lambda={p.get('lambda','?')}, "
+                        f"omega={p.get('omega','?')}, eta={p.get('eta','?')}, "
+                        f"epsilon={p.get('epsilon','?')}"
+                    )
+    lines.append("")
+
+    lines.append("-" * 70)
+    lines.append("Interpretation")
+    lines.append("-" * 70)
+    if rho_vd < -0.3:
+        lines.append("  Tradeoff confirmed. The diversity penalty is needed.")
+        found = False
+        for lr in lambda_results:
+            if lr["diversity_score"] > 0.85 and lr["lambda"] > 0:
+                dv_pct = (lr["val_loss"] - min_vl) / min_vl * 100
+                lines.append(
+                    f"  lambda={lr['lambda']:.2f}: diversity={lr['diversity_score']:.4f}, "
+                    f"val_loss sacrifice={dv_pct:.1f}%"
+                )
+                found = True
+                break
+        if not found:
+            lines.append("  WARNING: no lambda achieves diversity > 0.85 -- tradeoff too steep")
+    elif abs(rho_vd) < 0.1:
+        lines.append("  No tradeoff. theta* is likely an outlier; diversity penalty will easily fix this.")
+    elif rho_vd > 0.3:
+        lines.append("  Unexpected positive correlation -- re-examine the theory.")
+    else:
+        lines.append(f"  Weak tradeoff (|rho|={abs(rho_vd):.4f}). Penalty may help but effect unclear.")
+    lines.append("")
+    lines.append("=" * 70)
+    lines.append("End of Diversity Analysis")
+    lines.append("=" * 70)
+
+    out_path = os.path.join(exp_dir, "diversity_analysis.txt")
+    with open(out_path, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    print(f"  [Text]  Saved: {out_path}")
+
+    fig, ax = plt.subplots(figsize=(10, 7))
+    dominated = [i for i in range(n) if i not in pareto_set]
+    if dominated:
+        ax.scatter(
+            val_losses[dominated], div_scores[dominated],
+            c="steelblue", alpha=0.5, s=20, label=f"dominated ({len(dominated)})",
+        )
+    ax.scatter(
+        val_losses[pareto_idx], div_scores[pareto_idx],
+        c="red", s=40, zorder=5, label=f"Pareto frontier ({len(pareto_idx)})",
+    )
+    pareto_vl = val_losses[pareto_idx]
+    pareto_ds = div_scores[pareto_idx]
+    ax.plot(pareto_vl, pareto_ds, "r--", lw=1.0, alpha=0.6)
+
+    best_vl_idx = int(np.argmin(val_losses))
+    ax.annotate(
+        f"theta* (exp {records[best_vl_idx]['exp_id']})\nval_loss={val_losses[best_vl_idx]:.4f}\ndiv={div_scores[best_vl_idx]:.4f}",
+        xy=(val_losses[best_vl_idx], div_scores[best_vl_idx]),
+        xytext=(30, -30), textcoords="offset points",
+        arrowprops=dict(arrowstyle="->", color="black"),
+        fontsize=8, ha="left",
+    )
+
+    for r in candidates[:5]:
+        ax.annotate(
+            f"exp {r['exp_id']}",
+            xy=(r["val_loss"], r["diversity_score"]),
+            xytext=(15, 15), textcoords="offset points",
+            fontsize=7, ha="left",
+            arrowprops=dict(arrowstyle="->", color="green", alpha=0.6),
+        )
+
+    ax.set_xlabel("Proxy val_loss (lower = better quality)")
+    ax.set_ylabel("Diversity score (higher = more unique docs)")
+    ax.set_title(f"Quality-Diversity Tradeoff (Spearman rho={rho_vd:+.4f}, n={n})")
+    ax.legend(fontsize=9)
+    ax.grid(alpha=0.3, linestyle="--")
+    ax.set_axisbelow(True)
     plt.tight_layout()
-    _save_fig(fig, exp_dir, "fig_proxy_val_loss.png")
+    _save_fig(fig, exp_dir, "fig_diversity_tradeoff.png")
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+    lam_arr = np.array([lr["lambda"] for lr in lambda_results])
+    vl_arr = np.array([lr["val_loss"] for lr in lambda_results])
+    ds_arr = np.array([lr["diversity_score"] for lr in lambda_results])
+
+    ax1.plot(lam_arr, vl_arr, "o-", color="steelblue", lw=1.5)
+    ax1.axhline(min_vl, color="gray", ls="--", lw=0.8, label=f"min val_loss={min_vl:.4f}")
+    ax1.set_ylabel("val_loss of selected exp")
+    ax1.set_title("Lambda Sweep: adjusted_loss = val_loss + lambda*(1-diversity)")
+    ax1.legend(fontsize=8)
+    ax1.grid(alpha=0.3, linestyle="--")
+    ax1.set_axisbelow(True)
+
+    ax2.plot(lam_arr, ds_arr, "s-", color="coral", lw=1.5)
+    ax2.axhline(0.85, color="green", ls="--", lw=0.8, label="diversity=0.85")
+    ax2.set_xlabel("lambda (penalty weight)")
+    ax2.set_ylabel("diversity_score of selected exp")
+    ax2.legend(fontsize=8)
+    ax2.grid(alpha=0.3, linestyle="--")
+    ax2.set_axisbelow(True)
+
+    plt.tight_layout()
+    _save_fig(fig, exp_dir, "fig_diversity_lambda_sweep.png")
+
+    print(f"  [Diversity] Spearman(val_loss, diversity) = {rho_vd:+.4f}")
+    print(f"  [Diversity] Pareto frontier: {len(pareto_idx)} points")
+    print(f"  [Diversity] Candidates: {len(candidates)}")
 
 
 # ── Main ─────────────────────────────────────────────────────────
@@ -1398,6 +1727,14 @@ def main():
         )
     else:
         print("\n[skip] proxy_experiments/ not found — val_loss hard-vs-easy analysis skipped")
+
+    # ── Diversity analysis (quality-diversity tradeoff) ──
+    if os.path.isdir(proxy_dir):
+        _analyze_diversity(
+            args.exp_dir, mgr, domain_names, num_domains,
+        )
+    else:
+        print("[skip] proxy_experiments/ not found — diversity analysis skipped")
 
     print("\nDone.")
 
