@@ -5,7 +5,11 @@ Generates outputs directly in <exp-dir> (the experiment result directory):
   - fig_quality_score_dist.png — full corpus q̄ distribution by domain (overlaid)
   - fig_quality_rank_dist.png  — full corpus r̄ (solid) vs selected r̄ (dashed) by domain
   - fig_duplication_analysis.png — per-domain unique vs duplicate docs + sampling-value buckets
-  - analysis_summary.txt       — key diagnostics (tie detection, selection stats, etc.)
+  - analysis_summary.txt       — key diagnostics: tie detection, selection stats,
+                                  quality-length ρ decomposition (which quality
+                                  dimensions drive length bias via merge weights),
+                                  and sampling aggressiveness interpretation
+                                  (ω/λ/η/ε translated to top%×oversampling)
 
 Optional (when <exp-dir>/proxy_experiments/ exists):
   - proxy_val_loss_analysis.txt — hard-vs-easy val_loss analysis judging reverse-CE viability
@@ -391,6 +395,7 @@ def write_analysis_summary(
     fig_rank,
     sampling_values_col=None,
     fig_dup=None,
+    quality_length_rhos=None,
 ):
     """Write analysis_summary.txt with key diagnostics."""
     lines = []
@@ -432,6 +437,91 @@ def write_analysis_summary(
             f"  {domain_short[m]:>12s}: "
             f"λ={sc.lambda_:.4f}, ω={sc.omega:.6f}, "
             f"η={sc.eta:.6f}, ε={sc.epsilon:.6f}"
+        )
+    lines.append("")
+
+    # ── Quality-Length Correlation Decomposition ──
+    lines.append("-" * 70)
+    lines.append("Quality-Length Correlation Decomposition (Spearman ρ vs char_count)")
+    lines.append("-" * 70)
+    if quality_length_rhos is not None and len(quality_length_rhos) == N:
+        col_w = max(len(qn) for qn in quality_names) if quality_names else 10
+        hdr_dim = "Dimension".ljust(col_w)
+        hdr = f"  {hdr_dim} {'ρ(len)':>8s}"
+        for m in range(num_domains):
+            hdr += f"  w({domain_short[m]})"
+        hdr += f"  {'w_avg':>8s}  {'w×ρ':>8s}"
+        lines.append(hdr)
+        lines.append("  " + "-" * (len(hdr) - 2))
+
+        for n in range(N):
+            qname = quality_names[n].ljust(col_w) if quality_names else f"q{n}".ljust(col_w)
+            rho_n = quality_length_rhos[n]
+            w_vals = [dw[n + m * N] for m in range(num_domains)]
+            w_avg = float(np.mean(w_vals))
+            wr = w_avg * rho_n
+            row = f"  {qname} {rho_n:>+8.4f}"
+            for m in range(num_domains):
+                row += f"  {w_vals[m]:.4f}"
+            row += f"  {w_avg:>8.4f}  {wr:>+8.4f}"
+            lines.append(row)
+
+        lines.append("  " + "-" * (len(hdr) - 2))
+        w_rho_per_domain = []
+        for m in range(num_domains):
+            weights_m = dw[m * N : (m + 1) * N]
+            wr_m = float(np.dot(weights_m, quality_length_rhos))
+            w_rho_per_domain.append(wr_m)
+        uniform_rho = float(np.mean(quality_length_rhos))
+
+        row_w = "  " + "Weighted ρ:".ljust(col_w + 9)
+        for m in range(num_domains):
+            row_w += f"  {w_rho_per_domain[m]:.4f}"
+        row_w += f"  {float(np.mean(w_rho_per_domain)):>8.4f}"
+        lines.append(row_w)
+
+        row_u = "  " + "Uniform ρ (ref):".ljust(col_w + 9)
+        for _ in range(num_domains):
+            row_u += f"  {uniform_rho:.4f}"
+        row_u += f"  {uniform_rho:>8.4f}"
+        lines.append(row_u)
+
+        row_a = "  " + "Amplification:".ljust(col_w + 9)
+        for m in range(num_domains):
+            amp = (w_rho_per_domain[m] / uniform_rho - 1) * 100 if abs(uniform_rho) > 1e-12 else 0.0
+            row_a += f"  {amp:>+6.0f}%"
+        mean_amp = (float(np.mean(w_rho_per_domain)) / uniform_rho - 1) * 100 if abs(uniform_rho) > 1e-12 else 0.0
+        row_a += f"  {mean_amp:>+7.0f}%"
+        lines.append(row_a)
+        lines.append("")
+    else:
+        lines.append("  (quality_length_rhos not available or dimension mismatch)")
+        lines.append("")
+
+    # ── Sampling Aggressiveness ──
+    lines.append("-" * 70)
+    lines.append("Sampling Aggressiveness Interpretation")
+    lines.append("-" * 70)
+    hdr = (
+        f"  {'Domain':>12s} {'ω(top%)':>8s} {'λ(mode)':>10s} "
+        f"{'η(oversamp)':>12s} {'ε(tail)':>8s} {'S_max':>6s}  {'Effective':>12s}"
+    )
+    lines.append(hdr)
+    lines.append("  " + "-" * (len(hdr) - 2))
+    for m in range(num_domains):
+        sc = params.sampling_configs[m]
+        omega_pct = sc.omega * 100
+        if sc.lambda_ > 400:
+            lam_mode = "step"
+        elif sc.lambda_ > 100:
+            lam_mode = "steep"
+        else:
+            lam_mode = "smooth"
+        s_max = 2.0 ** sc.eta + sc.epsilon
+        eff = f"top{omega_pct:.1f}%×{s_max:.1f}"
+        lines.append(
+            f"  {domain_short[m]:>12s} {omega_pct:>7.1f}% {lam_mode:>10s} "
+            f"{sc.eta:>12.4f} {sc.epsilon:>8.6f} {s_max:>6.2f}  {eff:>12s}"
         )
     lines.append("")
 
@@ -1127,6 +1217,16 @@ def main():
     selected_ranks = ranks[selected_doc_ids]
     selected_domain_labels = domain_labels[selected_doc_ids]
 
+    # ── Quality-length Spearman ρ per dimension (full corpus) ──
+    char_counts = mgr.doc_char_counts
+    quality_scores = mgr.quality_scores
+    N_criteria = params.num_criteria
+    quality_length_rhos = np.array([
+        _spearman(quality_scores[:, n], char_counts)
+        for n in range(N_criteria)
+    ])
+    print(f"       Quality-length ρ: {quality_length_rhos}")
+
     # ── Generate figures ──
     print(f"\nGenerating outputs in: {args.exp_dir}")
     _setup_style()
@@ -1178,6 +1278,7 @@ def main():
         fig_rank,
         sampling_values_col=sampling_values_col,
         fig_dup=fig_dup,
+        quality_length_rhos=quality_length_rhos,
     )
     print(f"  Saved: {summary_out}")
 
