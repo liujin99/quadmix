@@ -53,6 +53,7 @@ TOP_K="10"
 TARGET_TOKENS="0"
 SEARCH_MODE="r2_weighted"
 PREPROCESSED_DIR_SET=0
+DPW="0.0"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -64,6 +65,7 @@ while [[ $# -gt 0 ]]; do
         --target-tokens) TARGET_TOKENS="$2"; shift 2 ;;
         --preprocessed-dir) PREPROCESSED_DIR="$2"; PREPROCESSED_DIR_SET=1; shift 2 ;;
         --search-mode)     SEARCH_MODE="$2"; shift 2 ;;
+        --diversity-penalty-weight) DPW="$2"; shift 2 ;;
         -h|--help)
             echo "Usage: bash scripts/demo_reoptimize.sh --source-dir <path> [options]"
             echo ""
@@ -78,6 +80,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --target-tokens N        Target in billions (default: 0)"
             echo "  --preprocessed-dir PATH  Preprocessed shards dir"
             echo "  --search-mode MODE       r2_weighted (default), equal_weight, or r2_sigma_weighted"
+            echo "  --diversity-penalty-weight λ  Diversity penalty (default: 0.0, disabled)"
             exit 0
             ;;
         *)
@@ -169,6 +172,7 @@ echo "  Preprocessed:  $PREPROCESSED_DIR"
 echo "  Search points: $NUM_SEARCH"
 echo "  Top-K:         $TOP_K"
 echo "  Search mode:   $SEARCH_MODE"
+[[ "$DPW" != "0.0" ]] && echo "  Diversity λ:   $DPW"
 [[ "$TARGET_TOKENS" != "0" ]] && echo "  Target tokens: ${TARGET_TOKENS}B"
 echo ""
 echo "╚═════════════════════════════════════════╝"
@@ -182,6 +186,7 @@ ARGS=(
     --top-k "$TOP_K"
     --target-tokens "$TARGET_TOKENS"
     --search-mode "$SEARCH_MODE"
+    --diversity-penalty-weight "$DPW"
 )
 
 [[ -n "$OUTPUT" ]] && ARGS+=(--output "$OUTPUT")

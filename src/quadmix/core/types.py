@@ -259,6 +259,13 @@ class QuaDMixConfig:
     #       Single-model path: no sigma available; kappa>0 warns and skips.
     search_lcb_kappa: float = 1.0
 
+    # Phase 3: diversity penalty weight for LightGBM training target.
+    # When > 0, adjusts the regressor target to
+    #   adjusted_loss = val_loss + λ · (1 − n_unique / max_n_unique)
+    # so the surrogate learns to prefer parameter regions that select more
+    # unique documents (higher diversity). Default 0.0 = disabled.
+    diversity_penalty_weight: float = 0.0
+
     # Sampling bounds (paper defaults)
     lambda_min: float = 0.0
     lambda_max: float = 1.0

@@ -477,6 +477,7 @@ class QuaDMixOptimizer:
         self._top_k_value: Optional[int] = None
         self._search_lift: Optional[float] = None
         self._search_meta: Optional[Dict[str, Any]] = None
+        self._diversity_stats: Optional[Dict[str, Any]] = None
 
     def add_proxy_results(self, results: List[ProxyResult]):
         """Add proxy experiment results."""
@@ -497,6 +498,13 @@ class QuaDMixOptimizer:
         params_list = [r.parameters for r in self._proxy_results]
         losses = np.array([r.validation_loss for r in self._proxy_results], dtype=np.float64)
 
+        # Phase 3: extract n_unique for diversity penalty
+        dpw = self.config.diversity_penalty_weight
+        if dpw > 0:
+            n_uniques = np.array([
+                r.metadata.get("n_unique", 0) for r in self._proxy_results
+            ], dtype=np.float64)
+
         # Filter out inf/nan values
         valid_mask = np.isfinite(losses)
         if not np.all(valid_mask):
@@ -504,6 +512,33 @@ class QuaDMixOptimizer:
             print(f"[QuaDMixOptimizer] WARNING: filtering {invalid_count} experiments with non-finite val_loss")
             params_list = [p for p, v in zip(params_list, valid_mask) if v]
             losses = losses[valid_mask]
+            if dpw > 0:
+                n_uniques = n_uniques[valid_mask]
+
+        # Phase 3: apply diversity penalty to training target
+        if dpw > 0:
+            mask = n_uniques > 0
+            if mask.sum() > 1:
+                max_nu = n_uniques[mask].max()
+                diversity_score = np.where(mask, n_uniques / max_nu, 0.0)
+                penalty = dpw * (1.0 - diversity_score)
+                losses = losses + penalty
+                self._diversity_stats = {
+                    "penalty_weight": float(dpw),
+                    "n_unique_min": int(n_uniques[mask].min()),
+                    "n_unique_max": int(max_nu),
+                    "n_unique_mean": float(n_uniques[mask].mean()),
+                    "diversity_score_min": float((n_uniques[mask] / max_nu).min()),
+                    "diversity_score_max": float((n_uniques[mask] / max_nu).max()),
+                }
+                print(f"[QuaDMixOptimizer] Diversity penalty applied: "
+                      f"λ={dpw}, unique docs [{int(n_uniques[mask].min()):,}, {int(max_nu):,}]")
+            else:
+                self._diversity_stats = None
+                print(f"[QuaDMixOptimizer] WARNING: diversity penalty requested but "
+                      f"insufficient n_unique data ({mask.sum()}/{len(mask)} valid)")
+        else:
+            self._diversity_stats = None
 
         # Split into train/validation (skip split if too few samples)
         n_total = len(params_list)
@@ -1074,6 +1109,7 @@ class QuaDMixOptimizer:
             "K_folds": int(K_folds),
             "n_sigma_computed": int(n_sigma),
             "sampler_method": self.config.sampler_method,
+            "diversity_penalty_weight": float(self.config.diversity_penalty_weight),
         }
 
         return optimal_params, candidates, predicted_losses
@@ -1195,6 +1231,7 @@ class QuaDMixOptimizer:
             "search_weight_mode": self.config.search_weight_mode,
             "sampler_method": self.config.sampler_method,
             "search_lcb_kappa": self.config.search_lcb_kappa,
+            "diversity_penalty_weight": self.config.diversity_penalty_weight,
             "ensemble_val_r2": self._ensemble_val_r2,
             "ensemble_val_mae": self._ensemble_val_mae,
             "equal_weight_r2": self._equal_weight_r2,

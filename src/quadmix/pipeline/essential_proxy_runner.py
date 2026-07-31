@@ -1012,8 +1012,11 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         if sampled_doc_count is None:
             sampled_doc_count = len(selected_idx_out)
 
+        n_unique = int(len(np.unique(selected_idx_out)))
+
         print(f"  [Exp {experiment_id:04d}] QuaDMix sampled {sampled_doc_count} docs "
-              f"(from {len(self._train_idx):,}), training with {len(selected_idx_out)}")
+              f"(from {len(self._train_idx):,}), training with {len(selected_idx_out)} "
+              f"({n_unique:,} unique)")
 
         _timer_prefix = f"exp{experiment_id:04d}"
 
@@ -1220,6 +1223,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 "num_steps": step_ct,
                 "sampled_docs": sampled_doc_count,
                 "training_docs": len(selected_idx_out),
+                "n_unique": n_unique,
                 "val_docs": len(self._val_token_ids),
                 "assistant_loss": True,
                 "quality_weights": quality_weights,

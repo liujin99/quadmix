@@ -115,6 +115,14 @@ def load_proxy_results(proxy_dir: str):
 
         params = ParameterSet.from_dict(meta["quality_weights"], meta["sampling_params"])
         per_task_losses = meta.get("per_task_losses")
+        if "n_unique" not in meta:
+            idx_path = os.path.join(proxy_dir, exp_name, "selected_indices.npy")
+            if os.path.exists(idx_path):
+                try:
+                    idx = np.load(idx_path)
+                    meta["n_unique"] = int(len(np.unique(idx)))
+                except Exception:
+                    pass
         results.append(ProxyResult(
             parameters=params,
             validation_loss=meta["val_loss"],
@@ -140,6 +148,10 @@ def build_parser():
     p.add_argument("--search-mode", default="r2_weighted",
                    choices=["r2_weighted", "equal_weight", "r2_sigma_weighted"],
                    help="Search weighting mode (default: r2_weighted)")
+    p.add_argument("--diversity-penalty-weight", type=float, default=0.0,
+                   help="Diversity penalty λ for LightGBM target: "
+                        "adjusted_loss = val_loss + λ·(1 - n_unique/max). "
+                        "0.0 = disabled (default)")
     p.add_argument("--schema", required=True,
                    help="Path to dataset schema YAML (required)")
     return p
@@ -203,6 +215,7 @@ def main():
         top_k_average=top_k,
         target_tokens=int(args.target_tokens * 1e9) if args.target_tokens > 0 else 0,
         search_weight_mode=args.search_mode,
+        diversity_penalty_weight=args.diversity_penalty_weight,
     )
 
     pipeline = QuaDMixPipeline(config)
@@ -261,8 +274,10 @@ def main():
     )
 
     n_docs = len(domain_labels)
+    n_unique_final = int(len(np.unique(selected_indices)))
     print(f"  Original documents: {n_docs:,}")
     print(f"  Selected samples:   {len(selected_indices):,}")
+    print(f"  Unique documents:    {n_unique_final:,}")
     print(f"  Sampling ratio:     {len(selected_indices)/n_docs:.4f}x")
 
     orig_dist = np.bincount(domain_labels[domain_labels >= 0],
@@ -297,6 +312,7 @@ def main():
             "search_weight_mode": config.search_weight_mode,
             "sampler_method": config.sampler_method,
             "search_lcb_kappa": config.search_lcb_kappa,
+            "diversity_penalty_weight": config.diversity_penalty_weight,
         },
         "metrics": {
             "aggregate_train_r2": pipeline._optimizer.train_r2,
@@ -313,6 +329,7 @@ def main():
             "best_predicted_loss": (pipeline._optimizer.search_meta or {}).get("best_predicted_mu", float(predicted_losses.min())),
             "top_k_avg_loss": (pipeline._optimizer.search_meta or {}).get("top_k_avg_mu", top_k_avg_loss),
             "best_sigma_at_selected": (pipeline._optimizer.search_meta or {}).get("best_sigma_at_selected"),
+            "diversity_stats": getattr(pipeline._optimizer, "_diversity_stats", None),
         },
         "search_meta": dict(pipeline._optimizer.search_meta or {}),
         "reliability": {
@@ -325,6 +342,8 @@ def main():
         "sampling": {
             "num_original_docs": n_docs,
             "num_selected_docs": len(selected_indices),
+            "num_unique_docs": n_unique_final,
+            "unique_ratio": n_unique_final / n_docs if n_docs > 0 else 0.0,
             "sampling_ratio": len(selected_indices) / n_docs,
             "domain_distribution_change": _build_domain_dist_change(
                 domain_labels, selected_indices, config.num_domains, domain_names),
