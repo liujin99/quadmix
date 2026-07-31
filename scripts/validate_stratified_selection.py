@@ -1,14 +1,28 @@
 #!/usr/bin/env python3
-"""Length-stratified selection — post-hoc validation script.
+"""Post-hoc quartile budget allocation — validation script.
 
 Uses existing optimal_parameters.json + the full data pool to produce a
-sampled_dataset.parquet where quality ranking (Eq.2) is done within
-(domain × length-stratum) cells instead of within the full domain.
+sampled_dataset.parquet where quality ranking (Eq.2) is computed normally
+(non-stratified), but the sampling budget is redistributed equally across
+length quartiles within each domain.
 
-This is a standalone script: no pipeline code is modified.  It reuses
-the same Eq.1 (merge), Eq.3 (sigmoid sampling), and save logic as the
-production pipeline, only swapping Eq.2 (compute_quality_ranks →
-compute_stratified_quality_ranks).
+This isolates the length-distribution variable: domain proportions and
+quality ranking are identical to the baseline QuadMix run, only the
+allocation of selections across length quartiles changes.
+
+Algorithm:
+  1. Eq.1 (merge) + Eq.2 (compute_quality_ranks, non-stratified) + Eq.3
+     (compute_sampling_values) → S(r) per document.
+  2. Run baseline selection (_select_documents_vectorized) → record
+     N_domain (selected count per domain).  Domain proportions are
+     therefore identical to the QuadMix baseline.
+  3. For each domain, split pool into K=4 quartiles by char_count.
+     Scale S(r) within each quartile so that Σ scaled_S(r) = N_domain/K
+     (equal budget per quartile).  This preserves quality prioritisation
+     within each quartile while equalising the length distribution.
+  4. Re-select with scaled S(r) → sampled_dataset.parquet.
+
+Standalone script: no pipeline code is modified.
 
 Usage:
   python scripts/validate_stratified_selection.py \
@@ -41,9 +55,10 @@ from quadmix.core.types import ParameterSet
 from quadmix.data.metadata_manager import ShardMetadataManager
 from quadmix.data.dataset_schema import DatasetSchema
 from quadmix.core.quality_merger import compute_merged_quality_scores
-from quadmix.core.quality_rank import compute_stratified_quality_ranks
+from quadmix.core.quality_rank import compute_quality_ranks
+from quadmix.core.sampler import compute_sampling_values
 from quadmix.sampling.batch_sampler import (
-    sample_with_optimal_params,
+    _select_documents_vectorized,
     save_sampled_dataset,
 )
 
@@ -65,7 +80,7 @@ def resolve_schema_path(schema_arg):
 
 def parse_args():
     p = argparse.ArgumentParser(
-        description="Length-stratified selection validation",
+        description="Post-hoc quartile budget allocation validation",
     )
     p.add_argument("--preprocessed-dir", required=True,
                    help="Directory with parquet shards (same as pipeline --preprocessed-dir)")
@@ -76,12 +91,22 @@ def parse_args():
     p.add_argument("--output", "-o", default=None,
                    help="Output directory (default: result/stratified_<timestamp>)")
     p.add_argument("--n-strata", type=int, default=4,
-                   help="Number of length strata per domain (default: 4)")
+                   help="Number of length quartiles per domain (default: 4)")
     p.add_argument("--target-tokens", type=float, default=0.0,
                    help="Target tokens in billions (0 = no limit)")
     p.add_argument("--seed", type=int, default=42,
                    help="Random seed")
     return p.parse_args()
+
+
+def _compute_quartile_ids(char_counts, K):
+    """Assign quartile IDs (0..K-1) based on char_count quantiles."""
+    quantiles = np.linspace(0, 1, K + 1)
+    boundaries = np.quantile(char_counts, quantiles)
+    stratum_ids = np.zeros(len(char_counts), dtype=np.int64)
+    for k in range(1, K):
+        stratum_ids[char_counts > boundaries[k]] = k
+    return stratum_ids, boundaries
 
 
 def main():
@@ -92,13 +117,15 @@ def main():
     )
     os.makedirs(output_dir, exist_ok=True)
 
+    K = args.n_strata
+
     print("=" * 70)
-    print("  Length-Stratified Selection Validation")
+    print("  Post-hoc Quartile Budget Allocation Validation")
     print(f"  Data:    {args.preprocessed_dir}")
     print(f"  Params:  {args.params_file}")
     print(f"  Schema:  {args.schema}")
     print(f"  Output:  {output_dir}")
-    print(f"  Strata:  {args.n_strata}")
+    print(f"  Quartiles: {K}")
     print(f"  Seed:    {args.seed}")
     print("=" * 70)
 
@@ -131,8 +158,8 @@ def main():
     optimal_params = reconstruct_params_from_json(args.params_file)
     for m, sc in enumerate(optimal_params.sampling_configs):
         name = domain_names[m] if m < len(domain_names) else f"D{m}"
-        print(f"  [{m}] {name}: λ={sc.lambda_:.2f}, ω={sc.omega:.6f}, "
-              f"η={sc.eta:.4f}, ε={sc.epsilon:.6f}")
+        print(f"  [{m}] {name}: lambda={sc.lambda_:.2f}, omega={sc.omega:.6f}, "
+              f"eta={sc.eta:.4f}, epsilon={sc.epsilon:.6f}")
     print(f"  Stage 2: {time.time()-_t:.1f}s")
 
     # ── Stage 3: Eq.1 — Merge quality scores ────────────────
@@ -144,55 +171,117 @@ def main():
     print(f"  Merged: [{merged.min():.4f}, {merged.max():.4f}]")
     print(f"  Stage 3: {time.time()-_t:.1f}s")
 
-    # ── Stage 4: Eq.2 (stratified) — Stratified quality ranks
+    # ── Stage 4: Eq.2 (non-stratified) — Quality ranks ─────
     _t = time.time()
-    print(f"\n[Stage 4] Computing stratified quality ranks (Eq.2-stratified)...")
-    print(f"  {args.n_strata} strata per domain, per-domain char_count boundaries")
-    final_ranks = compute_stratified_quality_ranks(
-        merged, domain_labels, token_counts, char_counts,
-        num_strata=args.n_strata, seed=args.seed, n_jobs=-1,
+    print(f"\n[Stage 4] Computing quality ranks (Eq.2, non-stratified)...")
+    final_ranks = compute_quality_ranks(
+        merged, domain_labels, token_counts, seed=args.seed, n_jobs=-1,
     )
     print(f"  Ranks: [{final_ranks.min():.4f}, {final_ranks.max():.4f}]")
     print(f"  Stage 4: {time.time()-_t:.1f}s")
 
-    # ── Stage 5: Eq.3 — Sigmoid sampling ────────────────────
+    # ── Stage 5: Eq.3 — S(r) + baseline selection ─────────
     _t = time.time()
-    print(f"\n[Stage 5] Applying sigmoid sampling (Eq.3)...")
-    rng = np.random.default_rng(args.seed)
-    selected_indices, sampling_values, _ = sample_with_optimal_params(
-        final_ranks, domain_labels, optimal_params, rng=rng,
+    print(f"\n[Stage 5] Computing S(r) and baseline selection (Eq.3)...")
+    sampling_values = compute_sampling_values(
+        final_ranks, domain_labels, optimal_params,
     )
-    print(f"  Original docs:  {n_docs:,}")
-    print(f"  Selected docs:  {len(selected_indices):,}")
-    print(f"  Sampling ratio: {len(selected_indices)/n_docs:.4f}x")
+    rng = np.random.default_rng(args.seed)
+    baseline_indices, _, _ = _select_documents_vectorized(sampling_values, rng)
+
+    num_domains = optimal_params.num_domains
+    baseline_domain_counts = np.bincount(
+        domain_labels[baseline_indices][domain_labels[baseline_indices] >= 0],
+        minlength=num_domains,
+    )
+
+    print(f"  Baseline selected: {len(baseline_indices):,} docs")
+    print(f"  Domain counts (baseline):")
+    for m in range(num_domains):
+        if baseline_domain_counts[m] > 0:
+            name = domain_names[m] if m < len(domain_names) else f"D{m}"
+            print(f"    [{m}] {name:>10s}: {baseline_domain_counts[m]:>7,}")
     print(f"  Stage 5: {time.time()-_t:.1f}s")
 
-    # ── Stage 6: Target token adjustment ────────────────────
+    # ── Stage 6: Post-hoc quartile budget allocation ────────
+    _t = time.time()
+    print(f"\n[Stage 6] Post-hoc quartile budget allocation ({K} quartiles/domain)...")
+    print(f"  Scaling S(r) within each (domain x quartile) so that")
+    print(f"  each quartile gets N_domain/{K} budget (equal allocation).")
+
+    # Collect per-quartile stats for reporting
+    per_quartile_stats = {}
+
+    for m in range(num_domains):
+        if baseline_domain_counts[m] == 0:
+            continue
+        name = domain_names[m] if m < len(domain_names) else f"D{m}"
+        N_domain = int(baseline_domain_counts[m])
+        budget_per_q = N_domain / K
+
+        domain_mask = domain_labels == m
+        domain_indices = np.where(domain_mask)[0]
+        domain_chars = char_counts[domain_mask].astype(np.float64)
+        domain_sv = sampling_values[domain_mask]
+
+        stratum_ids, boundaries = _compute_quartile_ids(domain_chars, K)
+
+        q_stats = []
+        for k in range(K):
+            s_mask = stratum_ids == k
+            if not s_mask.any():
+                continue
+            original_sum = float(domain_sv[s_mask].sum())
+            if original_sum < 1e-10:
+                continue
+            scale = budget_per_q / original_sum
+            sampling_values[domain_indices[s_mask]] = domain_sv[s_mask] * scale
+            q_stats.append({
+                "char_range": [int(boundaries[k]), int(boundaries[k + 1])],
+                "pool_docs": int(s_mask.sum()),
+                "original_S_sum": round(original_sum, 1),
+                "budget": round(budget_per_q, 1),
+                "scale": round(scale, 6),
+            })
+
+        per_quartile_stats[name] = q_stats
+        print(f"  [{m}] {name:>10s}: N_domain={N_domain:,}, "
+              f"budget/quartile={budget_per_q:.0f}")
+
+    # Re-select with scaled S(r)
+    rng_alloc = np.random.default_rng(args.seed + 1000)
+    selected_indices, _, selection_weights = _select_documents_vectorized(
+        sampling_values, rng_alloc,
+    )
+
+    print(f"\n  Stratified selected: {len(selected_indices):,} docs")
+    print(f"  Stage 6: {time.time()-_t:.1f}s")
+
+    # ── Stage 7: Target token adjustment ────────────────────
     target_tokens = int(args.target_tokens * 1e9) if args.target_tokens > 0 else 0
     if target_tokens > 0:
         actual_tokens = float(np.sum(token_counts[selected_indices]))
-        print(f"\n[Stage 6] Target token adjustment:")
-        print(f"  θ* produces: {actual_tokens/1e9:.2f}B tokens")
-        print(f"  Target:      {target_tokens/1e9:.1f}B tokens")
+        print(f"\n[Stage 7] Target token adjustment:")
+        print(f"  Selection produces: {actual_tokens/1e9:.2f}B tokens")
+        print(f"  Target:             {target_tokens/1e9:.1f}B tokens")
         if actual_tokens > target_tokens:
             keep_prob = target_tokens / actual_tokens
             rng_discard = np.random.default_rng(args.seed + 1)
             keep_mask = rng_discard.random(len(selected_indices)) < keep_prob
             selected_indices = selected_indices[keep_mask]
             final_tokens = float(np.sum(token_counts[selected_indices]))
-            print(f"  Uniform discard (keep_prob={keep_prob:.4f}) → "
+            print(f"  Uniform discard (keep_prob={keep_prob:.4f}) -> "
                   f"{final_tokens/1e9:.2f}B tokens")
         elif actual_tokens < target_tokens * 0.95:
-            print(f"  [WARN] θ* produces less than target")
+            print(f"  [WARN] selection produces less than target")
         else:
-            print(f"  Accept θ* result (within tolerance)")
+            print(f"  Accept result (within tolerance)")
 
     # ── Distribution analysis ───────────────────────────────
     print(f"\n{'─' * 70}")
     print("Distribution Analysis")
     print(f"{'─' * 70}")
 
-    num_domains = optimal_params.num_domains
     orig_dist = np.bincount(domain_labels[domain_labels >= 0],
                             minlength=num_domains)
     sel_dist = np.bincount(
@@ -200,50 +289,47 @@ def main():
         minlength=num_domains,
     )
 
-    print(f"\n  Domain distribution:")
+    print(f"\n  Domain distribution (baseline vs stratified):")
+    print(f"    {'domain':>10s}  {'baseline':>10s}  {'stratified':>10s}  {'delta':>8s}")
     for m in range(num_domains):
         if orig_dist[m] > 0:
             name = domain_names[m] if m < len(domain_names) else f"D{m}"
-            ratio = sel_dist[m] / orig_dist[m]
-            print(f"    [{m}] {name:>10s}: {orig_dist[m]:>7,} → "
-                  f"{sel_dist[m]:>7,}  ({ratio:.2f}x)")
+            b = int(baseline_domain_counts[m])
+            s = int(sel_dist[m])
+            delta_pct = (s - b) / b * 100 if b > 0 else 0.0
+            print(f"    {name:>10s}  {b:>10,}  {s:>10,}  {delta_pct:>+7.1f}%")
 
-    # ── Per-stratum selection breakdown ───────────────────
-    K = args.n_strata
+    # ── Per-quartile selection breakdown ───────────────────
+    print(f"\n  Per-quartile selection breakdown ({K} quartiles per domain):")
     per_stratum = {}
-    print(f"\n  Per-stratum selection breakdown ({K} strata per domain):")
     for m in range(num_domains):
         if orig_dist[m] == 0:
             continue
         name = domain_names[m] if m < len(domain_names) else f"D{m}"
         domain_indices = np.where(domain_labels == m)[0]
         domain_chars = char_counts[domain_indices].astype(np.float64)
-        quantiles = np.linspace(0, 1, K + 1)
-        boundaries = np.quantile(domain_chars, quantiles)
-        stratum_ids = np.zeros(len(domain_indices), dtype=np.int64)
-        for k in range(1, K):
-            stratum_ids[domain_chars > boundaries[k]] = k
+        stratum_ids, boundaries = _compute_quartile_ids(domain_chars, K)
         domain_selected = np.isin(domain_indices, selected_indices)
 
         print(f"\n    domain={name}:")
-        print(f"      {'stratum':>8s}  {'char_range':>22s}  "
-              f"{'original':>10s}  {'selected':>10s}  {'ratio':>6s}")
+        print(f"      {'quartile':>8s}  {'char_range':>22s}  "
+              f"{'pool':>10s}  {'selected':>10s}  {'pct':>6s}")
         strata = []
         for k in range(K):
             s_mask = stratum_ids == k
-            orig_n = int(s_mask.sum())
+            pool_n = int(s_mask.sum())
             sel_n = int((s_mask & domain_selected).sum())
-            ratio = sel_n / orig_n * 100 if orig_n > 0 else 0.0
+            pct = sel_n / pool_n * 100 if pool_n > 0 else 0.0
             lo = int(boundaries[k])
             hi = int(boundaries[k + 1])
             rng_str = f"[{lo}, {hi})"
             print(f"      {'Q' + str(k):>8s}  {rng_str:>22s}  "
-                  f"{orig_n:>10,}  {sel_n:>10,}  {ratio:>5.1f}%")
+                  f"{pool_n:>10,}  {sel_n:>10,}  {pct:>5.1f}%")
             strata.append({
                 "char_range": [lo, hi],
-                "original": orig_n,
+                "pool": pool_n,
                 "selected": sel_n,
-                "ratio_pct": round(ratio, 2),
+                "pct": round(pct, 2),
             })
         per_stratum[name] = strata
 
@@ -264,9 +350,9 @@ def main():
     print(f"    Repeat rate:   "
           f"{(1 - len(unique_indices)/len(selected_indices))*100:.1f}%")
 
-    # ── Stage 7: Save outputs ────────────────────────────────
+    # ── Stage 8: Save outputs ────────────────────────────────
     _t = time.time()
-    print(f"\n[Stage 7] Saving outputs...")
+    print(f"\n[Stage 8] Saving outputs...")
 
     sampled_path = os.path.join(output_dir, "sampled_dataset.parquet")
 
@@ -295,12 +381,13 @@ def main():
                  os.path.join(output_dir, "optimal_parameters.json"))
 
     summary = {
-        "method": "length_stratified",
+        "method": "post_hoc_quartile_allocation",
         "params_file": args.params_file,
         "preprocessed_dir": args.preprocessed_dir,
-        "n_strata": args.n_strata,
+        "n_strata": K,
         "seed": args.seed,
         "num_original_docs": n_docs,
+        "num_baseline_selected": len(baseline_indices),
         "num_selected_docs": len(selected_indices),
         "num_unique_docs": len(unique_indices),
         "sampling_ratio": len(selected_indices) / n_docs,
@@ -313,6 +400,10 @@ def main():
             "p75": float(np.percentile(sel_chars, 75)),
             "p90": float(np.percentile(sel_chars, 90)),
         },
+        "baseline_domain_counts": {
+            domain_names[m] if m < len(domain_names) else f"D{m}": int(baseline_domain_counts[m])
+            for m in range(num_domains) if baseline_domain_counts[m] > 0
+        },
         "domain_distribution": {
             domain_names[m] if m < len(domain_names) else f"D{m}": {
                 "original": int(orig_dist[m]),
@@ -322,7 +413,8 @@ def main():
             }
             for m in range(num_domains) if orig_dist[m] > 0
         },
-        "per_stratum_distribution": per_stratum,
+        "per_quartile_scaling": per_quartile_stats,
+        "per_quartile_distribution": per_stratum,
         "elapsed_seconds": round(time.time() - t_start, 1),
     }
     summary_path = os.path.join(output_dir, "stratified_summary.json")
@@ -332,8 +424,9 @@ def main():
                   else int(x) if isinstance(x, (np.integer,)) else x)
 
     print(f"\n{'=' * 70}")
-    print(f"  Stratified Selection Complete! ({time.time()-t_start:.1f}s)")
-    print(f"  Selected: {len(selected_indices):,} docs "
+    print(f"  Quartile Allocation Complete! ({time.time()-t_start:.1f}s)")
+    print(f"  Baseline:  {len(baseline_indices):,} docs")
+    print(f"  Selected:  {len(selected_indices):,} docs "
           f"({total_tokens_est/1e9:.2f}B tokens)")
     print(f"  Output: {output_dir}/")
     print(f"    ├── sampled_dataset.parquet")
