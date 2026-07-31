@@ -382,6 +382,27 @@ def main():
     stage_times["stage8_save"] = time.time() - _t
     print(f"[Stage 8] Save outputs: {stage_times['stage8_save']:.1f}s")
 
+    # ── Stage 8b: Copy proxy experiment metadata for analysis ──
+    _t = time.time()
+    import shutil
+    output_proxy_dir = os.path.join(output_dir, "proxy_experiments")
+    os.makedirs(output_proxy_dir, exist_ok=True)
+    n_copied = 0
+    for exp_name in sorted(os.listdir(args.proxy_dir)):
+        exp_src = os.path.join(args.proxy_dir, exp_name)
+        if not exp_name.startswith("exp_") or not os.path.isdir(exp_src):
+            continue
+        exp_dst = os.path.join(output_proxy_dir, exp_name)
+        os.makedirs(exp_dst, exist_ok=True)
+        for fname in ("meta.json", "selected_indices.npy"):
+            src = os.path.join(exp_src, fname)
+            if os.path.exists(src):
+                shutil.copy2(src, os.path.join(exp_dst, fname))
+        n_copied += 1
+    stage_times["stage8b_copy_proxy"] = time.time() - _t
+    print(f"[Stage 8] Copied {n_copied} experiment metadata to: {output_proxy_dir}")
+    print(f"[Stage 8] Copy proxy metadata: {stage_times['stage8b_copy_proxy']:.1f}s")
+
     # ── Stage 9: Report ──
     _t = time.time()
     print(f"\n[Stage 9] Generating comparison report...")
@@ -441,6 +462,7 @@ def main():
     print(f"    ├── optimal_parameters.json")
     print(f"    ├── pipeline_summary.json")
     print(f"    ├── sampled_dataset.parquet")
+    print(f"    ├── proxy_experiments/  ({n_copied} exps)")
     print(f"    ├── quadmix_report.md")
     print(f"    ├── fig1_domain_distribution.png")
     print(f"    └── fig2_quality_weights.png")
