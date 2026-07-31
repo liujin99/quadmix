@@ -48,7 +48,7 @@ from quadmix.sampling.batch_sampler import (
 )
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(_SCRIPT_DIR))
+_PROJECT_ROOT = os.path.dirname(_SCRIPT_DIR)
 
 
 def reconstruct_params_from_json(json_path):
