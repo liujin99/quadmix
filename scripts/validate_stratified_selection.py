@@ -208,6 +208,45 @@ def main():
             print(f"    [{m}] {name:>10s}: {orig_dist[m]:>7,} → "
                   f"{sel_dist[m]:>7,}  ({ratio:.2f}x)")
 
+    # ── Per-stratum selection breakdown ───────────────────
+    K = args.n_strata
+    per_stratum = {}
+    print(f"\n  Per-stratum selection breakdown ({K} strata per domain):")
+    for m in range(num_domains):
+        if orig_dist[m] == 0:
+            continue
+        name = domain_names[m] if m < len(domain_names) else f"D{m}"
+        domain_indices = np.where(domain_labels == m)[0]
+        domain_chars = char_counts[domain_indices].astype(np.float64)
+        quantiles = np.linspace(0, 1, K + 1)
+        boundaries = np.quantile(domain_chars, quantiles)
+        stratum_ids = np.zeros(len(domain_indices), dtype=np.int64)
+        for k in range(1, K):
+            stratum_ids[domain_chars > boundaries[k]] = k
+        domain_selected = np.isin(domain_indices, selected_indices)
+
+        print(f"\n    domain={name}:")
+        print(f"      {'stratum':>8s}  {'char_range':>22s}  "
+              f"{'original':>10s}  {'selected':>10s}  {'ratio':>6s}")
+        strata = []
+        for k in range(K):
+            s_mask = stratum_ids == k
+            orig_n = int(s_mask.sum())
+            sel_n = int((s_mask & domain_selected).sum())
+            ratio = sel_n / orig_n * 100 if orig_n > 0 else 0.0
+            lo = int(boundaries[k])
+            hi = int(boundaries[k + 1])
+            rng_str = f"[{lo}, {hi})"
+            print(f"      {'Q' + str(k):>8s}  {rng_str:>22s}  "
+                  f"{orig_n:>10,}  {sel_n:>10,}  {ratio:>5.1f}%")
+            strata.append({
+                "char_range": [lo, hi],
+                "original": orig_n,
+                "selected": sel_n,
+                "ratio_pct": round(ratio, 2),
+            })
+        per_stratum[name] = strata
+
     sel_chars = char_counts[selected_indices]
     total_tokens_est = float(np.sum(token_counts[selected_indices]))
     unique_indices = np.unique(selected_indices)
@@ -283,6 +322,7 @@ def main():
             }
             for m in range(num_domains) if orig_dist[m] > 0
         },
+        "per_stratum_distribution": per_stratum,
         "elapsed_seconds": round(time.time() - t_start, 1),
     }
     summary_path = os.path.join(output_dir, "stratified_summary.json")
