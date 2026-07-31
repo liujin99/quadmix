@@ -26,7 +26,6 @@ except ImportError:
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'src'))
 
 import numpy as np
-import pandas as pd
 
 from quadmix.core.types import ParameterSet
 from quadmix.data.metadata_manager import ShardMetadataManager
@@ -172,7 +171,8 @@ def main():
     # ── Stage 5: Eq.3 — Sigmoid sampling ─────────────────────
     _t = time.time()
     print(f"\n[Stage 5] Applying sigmoid sampling (Eq.3)...")
-    from quadmix.sampling.batch_sampler import sample_with_optimal_params
+    from quadmix.sampling.batch_sampler import (
+        sample_with_optimal_params, save_sampled_dataset)
     rng = np.random.default_rng(args.seed)
     selected_indices, sampling_values, _ = sample_with_optimal_params(
         final_ranks, domain_labels, optimal_params, rng=rng,
@@ -229,21 +229,19 @@ def main():
     _t = time.time()
     print(f"\n[Stage 7] Saving outputs...")
 
-    sampled_texts = mm.read_texts(selected_indices)
-    sel_domain = domain_labels[selected_indices]
-    sel_rank = final_ranks[selected_indices]
-    sel_sv = sampling_values[selected_indices]
-    sel_weights = 1.0 / np.maximum(sel_sv, 1e-10)
-
     sampled_path = os.path.join(output_dir, "sampled_dataset.parquet")
-    pd.DataFrame({
-        schema.text_col: sampled_texts,
-        "doc_id": selected_indices,
-        schema.domain_col: sel_domain,
-        "quality_rank": sel_rank,
-        "sampling_weight": sel_weights,
-        "sampling_value": sel_sv,
-    }).to_parquet(sampled_path, index=False)
+    save_sampled_dataset(
+        get_text_fn=mm.read_texts,
+        num_total_docs=n_docs,
+        selected_indices=selected_indices,
+        output_path=sampled_path,
+        domain_labels=domain_labels,
+        quality_ranks=final_ranks,
+        sampling_values=sampling_values,
+        format="parquet",
+        text_col=schema.text_col,
+        domain_col=schema.domain_col,
+    )
     print(f"  Sampled dataset: {sampled_path}")
 
     shutil.copy2(args.params_file, os.path.join(output_dir, "optimal_parameters.json"))

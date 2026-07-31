@@ -12,6 +12,8 @@ import time
 import numpy as np
 import numpy.typing as npt
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from quadmix.core.types import ParameterSet
 from quadmix.core.sampler import compute_sampling_values
@@ -156,18 +158,41 @@ def save_sampled_dataset(
         for name, arr in quality_scores.items():
             records[name] = arr[selected_indices]
 
-    df = pd.DataFrame(records)
-
+    t_write = time.time()
     if format == "parquet":
-        df.to_parquet(output_path, index=False)
+        # Build the arrow Table directly, bypassing pandas. The text column is
+        # constructed from the 4.7M unique strings + pa.compute.take(inverse)
+        # so arrow copies only the unique string contents into its data buffer
+        # once; take() then reuses that buffer via a new offsets array (no
+        # per-row string re-copy). Numeric columns are plain numpy → arrow
+        # memcpy. zstd + row_group_size lets pyarrow compress in chunks.
+        arrays = {}
+        for name, val in records.items():
+            if name == text_col:
+                unique_arrow = pa.array(texts_arr, type=pa.large_string())
+                arrays[name] = pa.compute.take(unique_arrow, inverse)
+            else:
+                arrays[name] = pa.array(val)
+        table = pa.table(arrays)
+        pq.write_table(
+            table,
+            output_path,
+            row_group_size=500_000,
+            compression="zstd",
+            compression_level=3,
+            use_dictionary=True,
+        )
     elif format == "jsonl":
-        df.to_json(output_path, orient="records", lines=True, force_ascii=False)
+        pd.DataFrame(records).to_json(
+            output_path, orient="records", lines=True, force_ascii=False)
     else:
         raise ValueError(f"Unsupported format: {format}")
 
-    read_elapsed = time.time() - t0
+    write_elapsed = time.time() - t_write
+    total_elapsed = time.time() - t0
     print(f"[Save] Sampled dataset saved to: {output_path}")
     print(f"[Save]   Original docs: {num_total_docs}")
     print(f"[Save]   Selected docs: {n_selected} (unique: {n_unique})")
     print(f"[Save]   Sampling ratio: {n_selected / max(1, num_total_docs):.4f}x")
-    print(f"[Save]   Text read: {read_elapsed:.1f}s")
+    print(f"[Save]   Text read: {total_elapsed - write_elapsed:.1f}s | "
+          f"Write: {write_elapsed:.1f}s | Total: {total_elapsed:.1f}s")

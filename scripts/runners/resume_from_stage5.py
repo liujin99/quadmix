@@ -257,7 +257,8 @@ def main():
     print(f"\n[Stage 7] Applying optimal parameters for final sampling...")
     from quadmix.core.quality_merger import compute_merged_quality_scores
     from quadmix.core.quality_rank import compute_quality_ranks
-    from quadmix.sampling.batch_sampler import sample_with_optimal_params
+    from quadmix.sampling.batch_sampler import (
+        sample_with_optimal_params, save_sampled_dataset)
 
     print(f"[Stage 7] Merging quality scores (Eq.1)...")
     merged = compute_merged_quality_scores(
@@ -362,22 +363,19 @@ def main():
         json.dump(summary, f, indent=2,
                   default=lambda x: float(x) if isinstance(x, (np.floating,)) else x)
 
-    sampled_texts = mm.read_texts(selected_indices)
-    import pandas as pd
-    sel_domain = domain_labels[selected_indices]
-    sel_rank = final_ranks[selected_indices]
-    sel_sv = sampling_values[selected_indices]
-    sel_weights = 1.0 / np.maximum(sel_sv, 1e-10)
-
     sampled_path = os.path.join(output_dir, "sampled_dataset.parquet")
-    pd.DataFrame({
-        schema.text_col: sampled_texts,
-        "doc_id": selected_indices,
-        schema.domain_col: sel_domain,
-        "quality_rank": sel_rank,
-        "sampling_weight": sel_weights,
-        "sampling_value": sel_sv,
-    }).to_parquet(sampled_path, index=False)
+    save_sampled_dataset(
+        get_text_fn=mm.read_texts,
+        num_total_docs=n_docs,
+        selected_indices=selected_indices,
+        output_path=sampled_path,
+        domain_labels=domain_labels,
+        quality_ranks=final_ranks,
+        sampling_values=sampling_values,
+        format="parquet",
+        text_col=schema.text_col,
+        domain_col=schema.domain_col,
+    )
     print(f"[Stage 8] Sampled dataset saved: {sampled_path}")
     stage_times["stage8_save"] = time.time() - _t
     print(f"[Stage 8] Save outputs: {stage_times['stage8_save']:.1f}s")
