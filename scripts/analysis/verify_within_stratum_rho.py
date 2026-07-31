@@ -190,10 +190,11 @@ def plot_within_stratum_rho(
                 ha="center", fontsize=8, color=color, fontweight="bold",
             )
 
-    # ── Panel 2: Heatmap ──
+    # ── Panel 2: Heatmap (rows=dimensions, columns=strata) ──
     vmax = max(abs(global_rhos).max(), abs(within_rhos_matrix).max())
+    within_T = within_rhos_matrix.T  # (n_criteria, n_strata)
     im = ax2.imshow(
-        within_rhos_matrix, aspect="auto", cmap="RdBu_r",
+        within_T, aspect="auto", cmap="RdBu_r",
         vmin=-vmax, vmax=vmax,
     )
 
@@ -210,9 +211,9 @@ def plot_within_stratum_rho(
     ax2.set_yticklabels(quality_names, fontsize=9)
     ax2.set_title("Per-Stratum ρ (short → long)")
 
-    for k in range(n_strata):
-        for j in range(n_criteria):
-            val = within_rhos_matrix[k, j]
+    for j in range(n_criteria):
+        for k in range(n_strata):
+            val = within_T[j, k]
             color = "white" if abs(val) > 0.3 * vmax else "black"
             ax2.text(
                 k, j, f"{val:+.3f}",
