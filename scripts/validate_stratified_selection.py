@@ -187,7 +187,7 @@ def main():
         final_ranks, domain_labels, optimal_params,
     )
     rng = np.random.default_rng(args.seed)
-    baseline_indices, _, _ = _select_documents_vectorized(sampling_values, rng)
+    baseline_indices, _ = _select_documents_vectorized(sampling_values, rng)
 
     num_domains = optimal_params.num_domains
     baseline_domain_counts = np.bincount(
@@ -250,7 +250,7 @@ def main():
 
     # Re-select with scaled S(r)
     rng_alloc = np.random.default_rng(args.seed + 1000)
-    selected_indices, _, selection_weights = _select_documents_vectorized(
+    selected_indices, _ = _select_documents_vectorized(
         sampling_values, rng_alloc,
     )
 
