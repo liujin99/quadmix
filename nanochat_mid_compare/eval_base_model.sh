@@ -10,7 +10,7 @@
 #   bash nanochat_mid_compare/eval_base_model.sh
 #
 # Or with custom config:
-#   BASE_MODEL_TAG=d24_0320 \
+#   BASE_MODEL_TAG=d28 \
 #   OUTPUT_DIR=/path/to/output \
 #   bash nanochat_mid_compare/eval_base_model.sh
 #
@@ -26,7 +26,7 @@ set -euo pipefail
 NANOCHAT_MODEL_DIR="${NANOCHAT_MODEL_DIR:-/home/ma-user/work/nanochat_model_dir}"
 
 # Base model tag (pretrained model in $NANOCHAT_MODEL_DIR/base_checkpoints/<tag>/)
-BASE_MODEL_TAG="${BASE_MODEL_TAG:-d24_0320}"
+BASE_MODEL_TAG="${BASE_MODEL_TAG:-d28}"
 
 # Nanochat repo root
 NANOCHAT_REPO="${NANOCHAT_REPO:-/home/ma-user/work/nanochat_midtrain_326}"

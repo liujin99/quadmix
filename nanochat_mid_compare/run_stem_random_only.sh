@@ -40,7 +40,7 @@ FILE_PATTERN="${FILE_PATTERN:-*.parquet}"
 NANOCHAT_MODEL_DIR="${NANOCHAT_MODEL_DIR:-/home/ma-user/work/nanochat_model_dir}"
 
 # Base model tag
-BASE_MODEL_TAG="${BASE_MODEL_TAG:-d24}"
+BASE_MODEL_TAG="${BASE_MODEL_TAG:-d28}"
 
 # Nanochat repo root
 NANOCHAT_REPO="${NANOCHAT_REPO:-/home/ma-user/work/nanochat-npu}"

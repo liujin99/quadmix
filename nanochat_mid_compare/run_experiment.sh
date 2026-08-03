@@ -48,7 +48,7 @@ QUALITY_METHODS="${QUALITY_METHODS:-dclm,fineweb_edu}"
 NANOCHAT_MODEL_DIR="${NANOCHAT_MODEL_DIR:-/home/ma-user/work/nanochat_model_dir}"
 
 # Base model tag (pretrained model in $NANOCHAT_MODEL_DIR/base_checkpoints/<tag>/)
-BASE_MODEL_TAG="${BASE_MODEL_TAG:-d24_0320}"
+BASE_MODEL_TAG="${BASE_MODEL_TAG:-d28}"
 
 # Nanochat repo root
 NANOCHAT_REPO="${NANOCHAT_REPO:-/home/ma-user/work/nanochat_midtrain_326}"
@@ -67,7 +67,7 @@ exec > >(tee "$RESULT_DIR/experiment.log") 2>&1
 # Training token budget: min(target_ratio * num_scaling_params, dataset_tokens)
 # - If data < ratio * params: use all data (1 epoch, no overfitting)
 # - If data > ratio * params: cap at ratio * params (no over-training)
-# d24 model: num_scaling_params (total) ≈ 730M
+# d28 model: num_scaling_params auto-detected from checkpoint meta JSON
 TARGET_PARAM_DATA_RATIO="${TARGET_PARAM_DATA_RATIO:-0.5}"
 NUM_SCALING_PARAMS="${NUM_SCALING_PARAMS:-}"
 DEVICE_BATCH_SIZE="${DEVICE_BATCH_SIZE:-8}"

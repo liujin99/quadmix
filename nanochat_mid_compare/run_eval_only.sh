@@ -7,7 +7,7 @@
 #
 # Usage:
 #   bash nanochat_mid_compare/run_eval_only.sh \
-#     --model-tag d24_0320_quadmix_20260625_193457 \
+#     --model-tag d28_quadmix_20260625_193457 \
 #     --result-dir nanochat_mid_compare/results/quadmix_only_20260625_193457
 #
 # ──────────────────────────────────────────────────────────────
@@ -22,7 +22,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 MODEL_TAG=""
 RESULT_DIR=""
-BASE_MODEL_TAG="${BASE_MODEL_TAG:-d24_0320}"
+BASE_MODEL_TAG="${BASE_MODEL_TAG:-d28}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --model-tag) MODEL_TAG="$2"; shift 2 ;;

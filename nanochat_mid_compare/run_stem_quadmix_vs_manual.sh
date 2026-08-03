@@ -47,7 +47,7 @@ MANUAL_RATIO="${MANUAL_RATIO:-数学=60:物理=15:化学=12.5:生物学=12.5}"
 NANOCHAT_MODEL_DIR="${NANOCHAT_MODEL_DIR:-/home/ma-user/work/nanochat_model_dir}"
 
 # Base model tag
-BASE_MODEL_TAG="${BASE_MODEL_TAG:-d24}"
+BASE_MODEL_TAG="${BASE_MODEL_TAG:-d28}"
 
 # Nanochat repo root
 NANOCHAT_REPO="${NANOCHAT_REPO:-/home/ma-user/work/nanochat-npu}"
