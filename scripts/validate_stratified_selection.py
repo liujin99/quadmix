@@ -235,18 +235,27 @@ def main():
             if original_sum < 1e-10:
                 continue
             scale = budget_per_q / original_sum
-            sampling_values[domain_indices[s_mask]] = domain_sv[s_mask] * scale
+            scaled = domain_sv[s_mask] * scale
+            sc = optimal_params.sampling_configs[m]
+            s_cap = 2.0 ** sc.eta + sc.epsilon
+            scaled = np.clip(scaled, 0, s_cap)
+            sampling_values[domain_indices[s_mask]] = scaled
+            clipped_sum = float(scaled.sum())
             q_stats.append({
                 "char_range": [int(boundaries[k]), int(boundaries[k + 1])],
                 "pool_docs": int(s_mask.sum()),
                 "original_S_sum": round(original_sum, 1),
                 "budget": round(budget_per_q, 1),
                 "scale": round(scale, 6),
+                "scaled_S_sum": round(clipped_sum, 1),
+                "clipped": clipped_sum < budget_per_q * 0.99,
             })
 
         per_quartile_stats[name] = q_stats
+        n_clipped = sum(1 for q in q_stats if q["clipped"])
+        clip_msg = f"  ({n_clipped}/{len(q_stats)} quartiles clipped to 2x cap)" if n_clipped else ""
         print(f"  [{m}] {name:>10s}: N_domain={N_domain:,}, "
-              f"budget/quartile={budget_per_q:.0f}")
+              f"budget/quartile={budget_per_q:.0f}{clip_msg}")
 
     # Re-select with scaled S(r)
     rng_alloc = np.random.default_rng(args.seed + 1000)
