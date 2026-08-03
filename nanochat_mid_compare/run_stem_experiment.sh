@@ -63,6 +63,7 @@ exec > >(tee "$RESULT_DIR/experiment.log") 2>&1
 
 # ── Mid-training hyperparameters ──
 TARGET_PARAM_DATA_RATIO="${TARGET_PARAM_DATA_RATIO:-0.5}"
+DATA_MULTIPLIER="${DATA_MULTIPLIER:-2.5}"
 DEVICE_BATCH_SIZE="${DEVICE_BATCH_SIZE:-2}"
 NUM_NPU="${NUM_NPU:-8}"
 CORE_METRIC_EVERY="${CORE_METRIC_EVERY:--1}"
@@ -240,6 +241,7 @@ echo "  Manual Ratio:        $MANUAL_RATIO"
 echo ""
 echo "  Mid-training config:"
 echo "    target-param-data-ratio: $TARGET_PARAM_DATA_RATIO"
+echo "    data-multiplier:         $DATA_MULTIPLIER"
 echo "    num-scaling-params:      $NUM_SCALING_PARAMS (auto-detected)"
 echo "    device-batch-size:       $DEVICE_BATCH_SIZE"
 echo "    NPU cards:               $NUM_NPU"
@@ -275,6 +277,7 @@ PREP_ARGS=(
     --manual-ratio "$MANUAL_RATIO"
     --data-ratio "$TARGET_PARAM_DATA_RATIO"
     --num-scaling-params "$NUM_SCALING_PARAMS"
+    --data-multiplier "$DATA_MULTIPLIER"
     --shard-size "$SHARD_SIZE"
     --val-ratio "$VAL_RATIO"
     --seed "$SEED"
@@ -341,9 +344,13 @@ for key in stats:
         ql = stats[key]
         print(f'    Quality ({method}): {ql[\"train_docs\"]:,} train docs, {ql[\"tokens\"]:,} tokens, {ql[\"shards\"]} shards')
 budget = stats['config'].get('budget_cap', 'N/A')
+training = stats['config'].get('training_budget', 'N/A')
 target = stats['config'].get('target_tokens', 'N/A')
-print(f'    Budget cap: {budget}')
-print(f'    Target tokens: {target}')
+mult = stats['config'].get('data_multiplier', 'N/A')
+print(f'    Budget cap:       {budget}')
+print(f'    Training budget:  {training}')
+print(f'    Target tokens:    {target}')
+print(f'    Data multiplier:  {mult}')
 "
 echo ""
 echo "╚════════════════════════════════════════════════════════════╝"
@@ -472,7 +479,7 @@ run_mid_training() {
     echo "    Source:     $BASE_MODEL_TAG (base)"
     echo "    Save as:    $MODEL_TAG (mid)"
     echo "    Dataset:    $DATASET_TOKENS tokens"
-    echo "    Train:      $TRAIN_TOKENS tokens (budget_cap, ratio=$TARGET_PARAM_DATA_RATIO)"
+    echo "    Train:      $TRAIN_TOKENS tokens (training_budget, ratio=$TARGET_PARAM_DATA_RATIO)"
     echo "    Steps:      $NUM_ITERATIONS"
     echo "    Log:        $LOG_FILE"
 
@@ -502,13 +509,13 @@ run_mid_training() {
 }
 
 STATS_FILE="$DATA_DIR/dataset_stats.json"
-BUDGET_CAP=$(STATS_FILE="$STATS_FILE" python3 -c "
+TRAIN_BUDGET=$(STATS_FILE="$STATS_FILE" python3 -c "
 import os, json
 s = json.load(open(os.environ['STATS_FILE']))
-print(s['config'].get('budget_cap', '0'))
+print(s['config'].get('training_budget', s['config'].get('budget_cap', '0')))
 ")
-if [ "$BUDGET_CAP" -le 0 ] 2>/dev/null || [ -z "$BUDGET_CAP" ]; then
-    echo "ERROR: budget_cap is missing or zero in dataset_stats.json" >&2
+if [ "$TRAIN_BUDGET" -le 0 ] 2>/dev/null || [ -z "$TRAIN_BUDGET" ]; then
+    echo "ERROR: training_budget is missing or zero in dataset_stats.json" >&2
     echo "       Delete $DATA_DIR and re-run prepare_data to regenerate." >&2
     exit 1
 fi
@@ -527,14 +534,14 @@ if 'manual_ratio' in s:
 else:
     print('0')
 ")
-echo "  Common training budget: $BUDGET_CAP tokens (from budget_cap)"
+echo "  Common training budget: $TRAIN_BUDGET tokens (data_multiplier=$DATA_MULTIPLIER)"
 
 echo ""
 echo "╔══ Step 3a: Mid-training on QuadMix data ══╗"
 echo ""
 
 QUADMIX_LOG="$RESULT_DIR/mid_train_quadmix.log"
-run_mid_training "$QUADMIX_DATA" "$QUADMIX_MODEL_TAG" "stem_quadmix_mid" "$QUADMIX_LOG" "$QUADMIX_TOKENS" "$BUDGET_CAP"
+run_mid_training "$QUADMIX_DATA" "$QUADMIX_MODEL_TAG" "stem_quadmix_mid" "$QUADMIX_LOG" "$QUADMIX_TOKENS" "$TRAIN_BUDGET"
 
 echo ""
 echo "╚════════════════════════════════════════════════════════════╝"
@@ -545,7 +552,7 @@ echo "╔══ Step 3b: Mid-training on Random data ══╗"
 echo ""
 
 RANDOM_LOG="$RESULT_DIR/mid_train_random.log"
-run_mid_training "$RANDOM_DATA" "$RANDOM_MODEL_TAG" "stem_random_mid" "$RANDOM_LOG" "$RANDOM_TOKENS" "$BUDGET_CAP"
+run_mid_training "$RANDOM_DATA" "$RANDOM_MODEL_TAG" "stem_random_mid" "$RANDOM_LOG" "$RANDOM_TOKENS" "$TRAIN_BUDGET"
 
 echo ""
 echo "╚════════════════════════════════════════════════════════════╝"
@@ -556,7 +563,7 @@ echo "╔══ Step 3c: Mid-training on Manual Ratio data ══╗"
 echo ""
 
 MANUAL_RATIO_LOG="$RESULT_DIR/mid_train_manual_ratio.log"
-run_mid_training "$MANUAL_RATIO_DATA" "$MANUAL_RATIO_MODEL_TAG" "stem_manual_ratio_mid" "$MANUAL_RATIO_LOG" "$MANUAL_RATIO_TOKENS" "$BUDGET_CAP"
+run_mid_training "$MANUAL_RATIO_DATA" "$MANUAL_RATIO_MODEL_TAG" "stem_manual_ratio_mid" "$MANUAL_RATIO_LOG" "$MANUAL_RATIO_TOKENS" "$TRAIN_BUDGET"
 
 echo ""
 echo "╚════════════════════════════════════════════════════════════╝"

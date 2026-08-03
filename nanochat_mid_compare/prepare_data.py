@@ -10,9 +10,12 @@ optional "domain" label column when the source schema provides one), compatible
 with nanochat's dataloader (last shard = validation).
 
 Token budget logic:
-  target_tokens = data_ratio x num_scaling_params
-  budget_cap    = target_tokens x 1.1
-  All baselines prepare data up to budget_cap to ensure fair comparison.
+  target_tokens    = data_ratio x num_scaling_params
+  training_budget   = target_tokens x 1.1
+  budget_cap        = training_budget x data_multiplier (default 1.0)
+  All baselines prepare data up to budget_cap; training uses training_budget.
+  Set data_multiplier > 1.0 to prepare more data than needed and avoid
+  dataloader cycling (e.g., 2.5x ensures <1 epoch even with ~35% cropping).
 
 Usage (essential-web, backward compatible):
     python prepare_data.py \
@@ -631,6 +634,10 @@ def main():
                         help="Target data:param ratio for token budget calculation")
     parser.add_argument("--num-scaling-params", type=int, default=None,
                         help="Number of scaling params. Used with --data-ratio to compute token budget.")
+    parser.add_argument("--data-multiplier", type=float, default=1.0,
+                        help="Multiplier for data preparation budget (default: 1.0). "
+                             "E.g., 2.5 prepares 2.5x more data than training budget "
+                             "to avoid dataloader cycling.")
     parser.add_argument("--quality-method", type=str, default="",
                         help="Comma-separated quality score methods for top-k selection (empty = disabled)")
     parser.add_argument("--shard-size", type=int, default=10000,
@@ -831,15 +838,18 @@ def main():
 
         if args.data_ratio is not None and args.num_scaling_params is not None:
             target_tokens = int(args.data_ratio * args.num_scaling_params)
-            budget_cap = int(target_tokens * 1.1)
+            training_budget = int(target_tokens * 1.1)
+            budget_cap = int(training_budget * args.data_multiplier)
             print(f"\n  Token budget: target={target_tokens:,}, "
                   f"quadmix_total={quadmix_total_tokens:,}, "
-                  f"budget_cap={budget_cap:,}")
+                  f"training_budget={training_budget:,}, "
+                  f"budget_cap={budget_cap:,} (multiplier={args.data_multiplier})")
         else:
-            budget_cap = int(quadmix_total_tokens * 1.1)
+            training_budget = int(quadmix_total_tokens * 1.1)
+            budget_cap = int(training_budget * args.data_multiplier)
             target_tokens = quadmix_total_tokens
             print(f"\n  Token budget: no data-ratio specified, using quadmix_total={quadmix_total_tokens:,} "
-                  f"x 1.1 = {budget_cap:,}")
+                  f"x 1.1 = {training_budget:,} (multiplier={args.data_multiplier} -> budget_cap={budget_cap:,})")
 
         random.shuffle(quadmix_docs)
         if sum(d["token_count"] for d in quadmix_docs) > budget_cap:
@@ -851,9 +861,11 @@ def main():
     else:
         quadmix_docs = []
         target_tokens = int(args.data_ratio * args.num_scaling_params)
-        budget_cap = int(target_tokens * 1.1)
+        training_budget = int(target_tokens * 1.1)
+        budget_cap = int(training_budget * args.data_multiplier)
         print(f"  QuadMix skipped (no --quadmix-sampled-data provided)")
-        print(f"\n  Token budget: target={target_tokens:,}, budget_cap={budget_cap:,}")
+        print(f"\n  Token budget: target={target_tokens:,}, "
+              f"training_budget={training_budget:,}, budget_cap={budget_cap:,} (multiplier={args.data_multiplier})")
 
     print(f"\n[2] Scanning source shards metadata...")
     prep_files, prep_metadata = scan_shards(
@@ -1075,7 +1087,9 @@ def main():
         stats["config"]["data_ratio"] = args.data_ratio
         stats["config"]["num_scaling_params"] = args.num_scaling_params
         stats["config"]["target_tokens"] = target_tokens
+        stats["config"]["training_budget"] = training_budget
         stats["config"]["budget_cap"] = budget_cap
+        stats["config"]["data_multiplier"] = args.data_multiplier
 
     if do_manual_ratio:
         mr_label_parts = [f"{d}={r}" for d, r in sorted(manual_ratio_map.items())]
