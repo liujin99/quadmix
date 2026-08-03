@@ -14,6 +14,8 @@ Generates outputs directly in <exp-dir> (the experiment result directory):
 
 Optional (when <exp-dir>/proxy_experiments/ exists):
   - proxy_val_loss_analysis.txt — hard-vs-easy val_loss analysis: is reverse-optimization (max val_loss) safe?
+  - optimizer_domain_analysis.txt — per-domain proportion vs val_loss + LightGBM feature importance
+  - fig_optimizer_domain_vs_loss.png — scatter: domain proportion vs val_loss per domain
 
 The script recomputes merged quality scores and ranks for the FULL corpus using
 the optimal parameters from the pipeline output, then compares the full corpus
@@ -1294,6 +1296,339 @@ def _analyze_proxy_val_loss(exp_dir, domain_names, quality_names, extreme_count)
     print(f"  [Text]  Saved: {out_path}")
 
 
+# ── Optimizer domain-proportion analysis ──────────────────────────
+
+
+def _analyze_optimizer_domain_proportions(
+    exp_dir,
+    domain_labels,
+    domain_names,
+    quality_names,
+    num_domains,
+    num_criteria,
+):
+    """Analyze why the optimizer chose the domain proportions it did.
+
+    For each proxy experiment:
+    1. Load selected_indices.npy → compute per-domain proportion
+    2. Load meta.json → get val_loss and parameters
+
+    Then:
+    3. Correlate domain proportions with val_loss (Spearman)
+    4. Retrain LightGBM → feature_importance()
+    5. Scatter plot: domain proportion vs val_loss
+    6. Output: optimizer_domain_analysis.txt
+    """
+    proxy_dir = os.path.join(exp_dir, "proxy_experiments")
+    print(f"\n[Optimizer] Loading experiments from: {proxy_dir}")
+
+    exp_names = sorted(
+        d for d in os.listdir(proxy_dir)
+        if d.startswith("exp_") and os.path.isdir(os.path.join(proxy_dir, d))
+    )
+
+    records = []
+    n_missing_npy = 0
+    n_oob = 0
+    for exp_name in exp_names:
+        meta_path = os.path.join(proxy_dir, exp_name, "meta.json")
+        npy_path = os.path.join(proxy_dir, exp_name, "selected_indices.npy")
+        if not os.path.exists(meta_path):
+            continue
+        with open(meta_path) as f:
+            meta = json.load(f)
+        if ("val_loss" not in meta or "sampling_params" not in meta
+                or "quality_weights" not in meta):
+            continue
+        if not os.path.exists(npy_path):
+            n_missing_npy += 1
+            continue
+        sel_idx = np.load(npy_path)
+        if len(sel_idx) == 0:
+            continue
+        if sel_idx.max() >= len(domain_labels):
+            n_oob += 1
+            continue
+
+        sel_domains = domain_labels[sel_idx]
+        valid = sel_domains >= 0
+        counts = np.bincount(
+            sel_domains[valid], minlength=num_domains
+        ).astype(np.float64)
+        total = counts.sum()
+        props = counts / total if total > 0 else counts
+
+        records.append({
+            "exp_name": exp_name,
+            "val_loss": float(meta["val_loss"]),
+            "domain_props": props,
+            "meta": meta,
+        })
+
+    n = len(records)
+    if n_missing_npy > 0:
+        print(f"[Optimizer] Skipped {n_missing_npy} experiments without selected_indices.npy")
+    if n_oob > 0:
+        print(f"[Optimizer] Skipped {n_oob} experiments with out-of-bounds indices")
+    if n < 6:
+        print(f"[Optimizer] Only {n} usable experiments (need >=6), skip.")
+        return
+    print(f"[Optimizer] Loaded {n} experiments")
+
+    val_losses = np.array([r["val_loss"] for r in records], dtype=np.float64)
+    domain_proportions = np.array(
+        [r["domain_props"] for r in records]
+    )  # (n, M)
+
+    domain_short = _get_domain_short(num_domains, list(domain_names))
+
+    # ── Retrain LightGBM ──
+    params_list = []
+    for r in records:
+        pset = ParameterSet.from_dict(
+            r["meta"]["quality_weights"], r["meta"]["sampling_params"]
+        )
+        params_list.append(pset)
+
+    print(
+        f"[Optimizer] Retraining LightGBM ({n} samples, "
+        f"{(num_criteria + 4) * num_domains} features)..."
+    )
+    from quadmix.pipeline.optimizer import RegressionModel
+
+    model = RegressionModel(model_type="lightgbm")
+    model.fit(
+        params_list, val_losses,
+        num_domains=num_domains, num_criteria=num_criteria,
+        verbose=False,
+    )
+    importance = model.feature_importance()
+    r2_score = model.score(params_list, val_losses)
+
+    # ── Scatter plot: domain proportion vs val_loss ──
+    fig, axes = plt.subplots(
+        1, num_domains, figsize=(5 * num_domains, 4), squeeze=False
+    )
+    for m in range(num_domains):
+        ax = axes.flat[m]
+        ax.scatter(
+            domain_proportions[:, m] * 100, val_losses,
+            alpha=0.4, s=12, c="#5B9BD5",
+        )
+        rho_m = _spearman(domain_proportions[:, m], val_losses)
+        ax.set_xlabel(f"{domain_short[m]} proportion (%)")
+        ax.set_ylabel("val_loss")
+        ax.set_title(f"{domain_short[m]}: ρ={rho_m:+.4f}")
+    fig.suptitle(
+        "Domain proportion vs val_loss (proxy experiments)", fontsize=13
+    )
+    fig.tight_layout()
+    _save_fig(fig, exp_dir, "fig_optimizer_domain_vs_loss.png")
+
+    # ── Easy vs hard groups ──
+    order = np.argsort(val_losses)
+    k = min(5, max(1, n // 3))
+    easy_idx = order[:k]
+    hard_idx = order[-k:]
+
+    # ── Build text output ──
+    lines = []
+    lines.append("=" * 70)
+    lines.append("Optimizer Domain Proportion Analysis")
+    lines.append("=" * 70)
+    lines.append(f"Proxy dir        : {proxy_dir}")
+    lines.append(f"Experiments      : {n}")
+    lines.append(f"Domains          : {num_domains} ({list(domain_names)})")
+    lines.append(f"Quality criteria : {num_criteria} ({list(quality_names)})")
+    lines.append("")
+
+    lines.append("-" * 70)
+    lines.append("Domain Proportion Summary (across all experiments)")
+    lines.append("-" * 70)
+    lines.append(
+        f"  {'Domain':<15s} {'mean%':>8s} {'std%':>8s} {'min%':>8s} "
+        f"{'max%':>8s} {'Spearman ρ':>12s}"
+    )
+    lines.append(f"  {'-' * 60}")
+    for m in range(num_domains):
+        props_m = domain_proportions[:, m] * 100
+        rho = _spearman(domain_proportions[:, m], val_losses)
+        lines.append(
+            f"  {domain_short[m]:<15s} {props_m.mean():>8.2f} "
+            f"{props_m.std():>8.2f} {props_m.min():>8.2f} "
+            f"{props_m.max():>8.2f} {rho:>+12.4f}"
+        )
+    lines.append("")
+
+    lines.append("-" * 70)
+    lines.append(
+        f"Easy (lowest val_loss) vs Hard (highest val_loss) — top {k}"
+    )
+    lines.append("-" * 70)
+    lines.append(
+        f"  {'Domain':<15s} {'easy%':>8s} {'hard%':>8s} {'d(h-e)':>10s}"
+    )
+    lines.append(f"  {'-' * 45}")
+    for m in range(num_domains):
+        easy_mean = domain_proportions[easy_idx, m].mean() * 100
+        hard_mean = domain_proportions[hard_idx, m].mean() * 100
+        lines.append(
+            f"  {domain_short[m]:<15s} {easy_mean:>8.2f} {hard_mean:>8.2f} "
+            f"{hard_mean - easy_mean:>+10.2f}"
+        )
+    lines.append(
+        f"  {'val_loss':<15s} {val_losses[easy_idx].mean():>8.4f} "
+        f"{val_losses[hard_idx].mean():>8.4f}"
+    )
+    lines.append("")
+
+    # ── LightGBM feature importance ──
+    lines.append("-" * 70)
+    lines.append(f"LightGBM Feature Importance (R² = {r2_score:.4f})")
+    lines.append("-" * 70)
+    domain_imp = {}
+    if importance:
+        imp_sorted = sorted(importance.items(), key=lambda x: -x[1])
+        lines.append(f"  {'Feature':<25s} {'Importance':>12s}")
+        lines.append(f"  {'-' * 40}")
+        for name, imp in imp_sorted[:20]:
+            lines.append(f"  {name:<25s} {imp:>12.1f}")
+        lines.append("")
+
+        lines.append("  Grouped by parameter type:")
+        groups = {}
+        for name, imp in importance.items():
+            prefix = name.split("_")[0]
+            groups[prefix] = groups.get(prefix, 0.0) + imp
+        total_imp = sum(groups.values())
+        for prefix in sorted(groups.keys(), key=lambda p: -groups[p]):
+            pct = groups[prefix] / total_imp * 100 if total_imp > 0 else 0
+            lines.append(
+                f"    {prefix:<15s} {groups[prefix]:>10.1f} ({pct:>5.1f}%)"
+            )
+        lines.append("")
+
+        lines.append("  Grouped by domain (sum of all params):")
+        for name, imp in importance.items():
+            parts = name.split("_")
+            if len(parts) >= 2 and parts[1].isdigit():
+                m_idx = int(parts[1])
+                domain_imp[m_idx] = domain_imp.get(m_idx, 0.0) + imp
+        dom_total = sum(domain_imp.values())
+        for m in sorted(domain_imp.keys()):
+            pct = domain_imp[m] / dom_total * 100 if dom_total > 0 else 0
+            short = domain_short[m] if m < len(domain_short) else f"D{m}"
+            lines.append(
+                f"    {short:<15s} {domain_imp[m]:>10.1f} ({pct:>5.1f}%)"
+            )
+        lines.append("")
+    else:
+        lines.append("  (feature importance not available)")
+        lines.append("")
+
+    # ── Diagnosis ──
+    lines.append("-" * 70)
+    lines.append(
+        "Diagnosis: Why did the optimizer choose high math proportion?"
+    )
+    lines.append("-" * 70)
+
+    math_idx = None
+    for m, name in enumerate(domain_names):
+        if "math" in str(name).lower() or "数学" in str(name):
+            math_idx = m
+            break
+
+    if math_idx is not None:
+        rho_math = _spearman(domain_proportions[:, math_idx], val_losses)
+        easy_math = domain_proportions[easy_idx, math_idx].mean() * 100
+        hard_math = domain_proportions[hard_idx, math_idx].mean() * 100
+        lines.append(
+            f"  Math proportion vs val_loss: Spearman ρ = {rho_math:+.4f}"
+        )
+        lines.append(
+            f"  Easy group math%: {easy_math:.2f}, "
+            f"Hard group math%: {hard_math:.2f}"
+        )
+        if rho_math < -0.1:
+            lines.append(
+                f"  -> More math → lower val_loss (ρ < -0.1)"
+            )
+            lines.append(
+                f"     The optimizer favors math because math-heavy experiments"
+            )
+            lines.append(
+                f"     have lower val_loss. Possible causes:"
+            )
+            lines.append(
+                f"     (a) math text is more predictable/compressible,"
+            )
+            lines.append(
+                f"     (b) the validation set is math-heavy,"
+            )
+            lines.append(
+                f"     (c) math quality scores correlate with lower loss."
+            )
+        elif rho_math > 0.1:
+            lines.append(
+                f"  -> More math → HIGHER val_loss (ρ > 0.1)"
+            )
+            lines.append(
+                f"     The optimizer does NOT favor math via val_loss;"
+            )
+            lines.append(
+                f"     the high math proportion in optimal parameters is"
+            )
+            lines.append(
+                f"     a side effect of other parameter choices."
+            )
+        else:
+            lines.append(
+                f"  -> Math proportion has weak correlation with val_loss"
+            )
+            lines.append(
+                f"     (|ρ| ≤ 0.1); the high math proportion is likely"
+            )
+            lines.append(
+                f"     a side effect of other parameters."
+            )
+        lines.append("")
+
+    if importance and domain_imp:
+        dom_total = sum(domain_imp.values())
+        for m in sorted(domain_imp.keys(), key=lambda x: -domain_imp[x]):
+            pct = domain_imp[m] / dom_total * 100 if dom_total > 0 else 0
+            if pct > 40:
+                short = domain_short[m] if m < len(domain_short) else f"D{m}"
+                lines.append(
+                    f"  Domain {short} dominates feature importance "
+                    f"({pct:.1f}%)"
+                )
+                lines.append(
+                    f"  -> The optimizer's val_loss prediction is"
+                )
+                lines.append(
+                    f"     primarily driven by {short} parameters."
+                )
+                break
+
+    if importance:
+        top_feature = max(importance.items(), key=lambda x: x[1])
+        lines.append(
+            f"  Top individual feature: {top_feature[0]} "
+            f"(importance={top_feature[1]:.1f})"
+        )
+    lines.append("")
+    lines.append("=" * 70)
+    lines.append("End of Optimizer Domain Proportion Analysis")
+    lines.append("=" * 70)
+
+    out_path = os.path.join(exp_dir, "optimizer_domain_analysis.txt")
+    with open(out_path, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    print(f"  [Text]  Saved: {out_path}")
+
+
 # ── Diversity analysis (quality-diversity tradeoff) ───────────────
 
 
@@ -1912,6 +2247,15 @@ def main():
         )
     else:
         print("\n[skip] proxy_experiments/ not found — val_loss hard-vs-easy analysis skipped")
+
+    # ── Optimizer domain-proportion analysis (optional) ──
+    if os.path.isdir(proxy_dir):
+        _analyze_optimizer_domain_proportions(
+            args.exp_dir, domain_labels, domain_names, quality_names,
+            num_domains, N_criteria,
+        )
+    else:
+        print("[skip] proxy_experiments/ not found — optimizer domain analysis skipped")
 
     # ── Diversity analysis (quality-diversity tradeoff) ──
     if os.path.isdir(proxy_dir):
