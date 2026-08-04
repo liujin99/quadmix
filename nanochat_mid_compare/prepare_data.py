@@ -306,9 +306,30 @@ def read_docs_from_shards(shard_paths, selections, num_workers=None, desc=None, 
         idx = shard_cursors[shard_id]
         result.append(shard_result_map[shard_id][idx])
         shard_cursors[shard_id] = idx + 1
-    if max_char_repeat_ratio > 0:
+    if max_char_repeat_ratio > 0 and result:
         n_before = len(result)
-        result = [d for d in result if not _has_char_repetition(d["text"], max_char_repeat_ratio)]
+        global _filter_texts
+        _filter_texts = [d["text"] for d in result]
+        fork_ctx = mp.get_context("fork")
+        nw = min(num_workers, len(result)) or 1
+        filter_pool = fork_ctx.Pool(nw)
+        chunk_size = max(1, len(_filter_texts) // (nw * 4))
+        ranges = [(i, min(i + chunk_size, len(_filter_texts)), 10**18, max_char_repeat_ratio)
+                  for i in range(0, len(_filter_texts), chunk_size)]
+        valid_indices_all = []
+        n_repeat = 0
+        for indices, ne, tl, nr in tqdm(
+                filter_pool.imap_unordered(_filter_docs_by_range, ranges, chunksize=1),
+                total=len(ranges),
+                desc=f"  Filtering docs ({nw} processes)",
+                file=sys.stdout, mininterval=1.0,
+        ):
+            valid_indices_all.extend(indices)
+            n_repeat += nr
+        filter_pool.close()
+        filter_pool.join()
+        _filter_texts = None
+        result = [result[i] for i in valid_indices_all]
         n_filtered = n_before - len(result)
         if n_filtered > 0:
             print(f"  Filtered {n_filtered:,} docs (single char >{max_char_repeat_ratio*100:.0f}% repetition)")
