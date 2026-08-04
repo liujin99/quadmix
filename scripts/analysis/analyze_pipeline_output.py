@@ -6,11 +6,15 @@ Generates outputs directly in <exp-dir> (the experiment result directory):
   - fig_quality_rank_dist.png  — full corpus r̄ (solid) vs selected r̄ (dashed) by domain
   - fig_duplication_analysis.png — per-domain unique vs duplicate docs + sampling-value buckets
   - fig_quality_length_decomposition.png — weight×ρ(length) stacked bar + sampling ω/S_max
+  - fig_token_length_dist.png — token length distribution per domain with T marker (needs --tokenizer)
+  - fig_crop_analysis.png      — total vs trained vs cropped tokens + crop rate decomposition
+  - fig_packing_boundaries.png — doc boundaries per packed row (BOS-bestfit simulation)
   - analysis_summary.txt       — key diagnostics: tie detection, selection stats,
                                   quality-length ρ decomposition (which quality
                                   dimensions drive length bias via merge weights),
-                                  and sampling aggressiveness interpretation
-                                  (ω/λ/η/ε translated to top%×oversampling)
+                                  sampling aggressiveness interpretation
+                                  (ω/λ/η/ε translated to top%×oversampling),
+                                  and token length & crop waste analysis
 
 Optional (when <exp-dir>/proxy_experiments/ exists):
   - proxy_val_loss_analysis.txt — hard-vs-easy val_loss analysis: is reverse-optimization (max val_loss) safe?
@@ -21,18 +25,28 @@ The script recomputes merged quality scores and ranks for the FULL corpus using
 the optimal parameters from the pipeline output, then compares the full corpus
 distribution with the selected documents' distribution.
 
+Token-length & crop analysis requires a nanochat tokenizer (--tokenizer or
+$NANOCHAT_MODEL_DIR/tokenizer). When available, the script samples up to
+--tokenize-sample docs from the sampled parquet, tokenizes them via
+multiprocessing, and simulates BOS-bestfit packing to estimate the crop rate
+(tokens discarded by the dataloader's crop-and-discard behavior).
+
 Usage:
-  python scripts/analysis/analyze_pipeline_output.py \
-      --exp-dir <pipeline_output> \
-      --source-dir <source_data> \
-      --schema configs/schema_stem.yaml \
-      --seed 42 \
-      --proxy-hard-easy-count 20
+  python scripts/analysis/analyze_pipeline_output.py \\
+      --exp-dir <pipeline_output> \\
+      --source-dir <source_data> \\
+      --schema configs/schema_stem.yaml \\
+      --seed 42 \\
+      --proxy-hard-easy-count 20 \\
+      --tokenizer /path/to/tokenizer \\
+      --seq-len 2048 \\
+      --tokenize-sample 50000
 """
 
 import argparse
 import json
 import os
+import pickle
 import sys
 
 for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
@@ -122,6 +136,37 @@ def parse_args():
         "the baseline theta* as a blue star marker with an arrow "
         "showing the improvement direction.",
     )
+    parser.add_argument(
+        "--tokenizer",
+        default=None,
+        help="nanochat tokenizer.pkl or its dir (enables token-length & crop "
+        "analysis; default: $NANOCHAT_MODEL_DIR/tokenizer)",
+    )
+    parser.add_argument(
+        "--seq-len", type=int, default=2048,
+        help="training context length in tokens (default: 2048)",
+    )
+    parser.add_argument(
+        "--pack-buffer", type=int, default=2000,
+        help="dataloader packing buffer size (default: 2000, same as mid_train.py)",
+    )
+    parser.add_argument(
+        "--max-pack-docs", type=int, default=20000,
+        help="max docs sampled for packing simulation (default: 20000)",
+    )
+    parser.add_argument(
+        "--tokenize-sample", type=int, default=50000,
+        help="number of docs to tokenize for length distribution (0 = all, "
+        "default: 50000)",
+    )
+    parser.add_argument(
+        "--tokenizer-threads", type=int, default=1,
+        help="threads per tokenizing worker (default: 1)",
+    )
+    parser.add_argument(
+        "--num-workers", type=int, default=None,
+        help="multiprocessing workers for tokenization (default: min(32, cpu_count))",
+    )
     return parser.parse_args()
 
 
@@ -146,6 +191,209 @@ def resolve_schema_path(schema_arg):
         os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     )
     return os.path.join(project_root, schema_arg)
+
+
+# ── Tokenizer worker (for token-length & crop analysis) ─────────
+
+
+_ENC = None
+_BOS_ID = None
+_TOK_THREADS = 1
+
+
+def _init_tok_worker(tokenizer_path, tok_threads):
+    global _ENC, _BOS_ID, _TOK_THREADS
+    _TOK_THREADS = tok_threads
+    if not tokenizer_path:
+        return
+    pkl = tokenizer_path if os.path.isfile(tokenizer_path) \
+        else os.path.join(tokenizer_path, "tokenizer.pkl")
+    with open(pkl, "rb") as f:
+        _ENC = pickle.load(f)
+    _BOS_ID = _ENC.encode_single_token("<|bos|>")
+
+
+def _tokenize_lens(texts):
+    """Return numpy int64 array of token lengths (incl. +1 BOS the dataloader prepends)."""
+    if _ENC is None:
+        return None
+    n = len(texts)
+    out = np.empty(n, dtype=np.int64)
+    bs = 256
+    for s in range(0, n, bs):
+        chunk = [t or "" for t in texts[s:s + bs]]
+        try:
+            encs = _ENC.encode_ordinary_batch(chunk, num_threads=_TOK_THREADS)
+        except (AttributeError, TypeError):
+            encs = [_ENC.encode_ordinary(t) for t in chunk]
+        for j, ids in enumerate(encs):
+            out[s + j] = len(ids) + 1
+    return out
+
+
+def _tokenize_batch(task):
+    """Worker: tokenize a batch of texts, return (batch_idx, token_lengths)."""
+    idx, texts = task
+    return idx, _tokenize_lens(texts)
+
+
+def _resolve_tokenizer_path(args):
+    """Resolve tokenizer path: --tokenizer arg, then $NANOCHAT_MODEL_DIR/tokenizer."""
+    if args.tokenizer:
+        pkl = args.tokenizer if os.path.isfile(args.tokenizer) \
+            else os.path.join(args.tokenizer, "tokenizer.pkl")
+        if os.path.isfile(pkl):
+            return args.tokenizer
+        print(f"  [warn] --tokenizer points to {args.tokenizer} but no tokenizer.pkl found")
+        return None
+    model_dir = os.environ.get(
+        "NANOCHAT_MODEL_DIR", "/home/ma-user/work/nanochat_model_dir")
+    default_tok = os.path.join(model_dir, "tokenizer")
+    default_pkl = os.path.join(default_tok, "tokenizer.pkl")
+    if os.path.isfile(default_pkl):
+        print(f"  [info] tokenizer auto-detected: {default_pkl}")
+        return default_tok
+    return None
+
+
+# ── Packing simulation (BOS-bestfit, mirrors nanochat dataloader) ─
+
+
+def _packing_crop_analysis(tok_lens, seq_len=2048, buffer_size=2000, max_docs=20000):
+    """Simulate BOS-bestfit packing; return crop statistics.
+
+    Mirrors nanochat dataloader's _bos_bestfit algorithm:
+    1. Buffer N documents (up to buffer_size)
+    2. For each row, greedily pick the LARGEST doc that fits entirely
+    3. When nothing fits, crop the SHORTEST doc's tail to fill remaining space
+
+    Returns dict with total_tokens, trained_tokens, cropped_tokens, crop_rate,
+    n_rows, boundaries, docs_over_T, tokens_over_T, theoretical_min_waste,
+    additional_waste, seq_len, buffer_size, sample_size.
+    """
+    if tok_lens is None or len(tok_lens) == 0:
+        return None
+    a = np.asarray(tok_lens)
+    if len(a) > max_docs:
+        step = max(1, len(a) // max_docs)
+        a = a[::step][:max_docs]
+    row_capacity = seq_len + 1
+    buf = []
+    boundaries = []
+    total_tokens = int(a.sum())
+    trained_tokens = 0
+    cropped_tokens = 0
+    docs_over_T = int(np.sum(a > row_capacity))
+    tokens_over_T = int(a[a > row_capacity].sum()) if docs_over_T > 0 else 0
+    i = 0
+    N = len(a)
+    while i < N or buf:
+        pos = 0
+        docs_in_row = 0
+        while pos < row_capacity and (i < N or buf):
+            while len(buf) < buffer_size and i < N:
+                buf.append(int(a[i]))
+                i += 1
+            if not buf:
+                break
+            remaining = row_capacity - pos
+            best_idx, best_len = -1, 0
+            for k in range(len(buf)):
+                dl = buf[k]
+                if dl <= remaining and dl > best_len:
+                    best_idx = k
+                    best_len = dl
+            if best_idx >= 0:
+                buf.pop(best_idx)
+                pos += best_len
+                trained_tokens += best_len
+            else:
+                sk = min(range(len(buf)), key=lambda x: buf[x])
+                doc_len = buf.pop(sk)
+                trained_tokens += remaining
+                cropped_tokens += doc_len - remaining
+                pos += remaining
+            docs_in_row += 1
+        boundaries.append(docs_in_row - 1)
+    crop_rate = cropped_tokens / max(total_tokens, 1)
+    theo_min = tokens_over_T / max(total_tokens, 1)
+    return {
+        "total_tokens": total_tokens,
+        "trained_tokens": trained_tokens,
+        "cropped_tokens": cropped_tokens,
+        "crop_rate": crop_rate,
+        "n_rows": len(boundaries),
+        "boundaries": np.array(boundaries, dtype=np.int32),
+        "docs_over_T": docs_over_T,
+        "tokens_over_T": tokens_over_T,
+        "theoretical_min_waste": theo_min,
+        "additional_waste": crop_rate - theo_min,
+        "seq_len": seq_len,
+        "buffer_size": buffer_size,
+        "sample_size": len(a),
+    }
+
+
+# ── Tokenization driver ──────────────────────────────────────────
+
+
+def _tokenize_sampled_docs(sampled_df, tokenizer_path, sample_size,
+                           num_workers, tok_threads, domain_col, domain_names):
+    """Sample docs from sampled_df, tokenize them, return (tok_lens, domain_labels).
+
+    Samples up to sample_size docs (random, seed=42) from the sampled parquet,
+    tokenizes them via multiprocessing, and returns token lengths plus per-doc
+    domain labels (integer codes 0..M-1).
+    """
+    n_total = len(sampled_df)
+    if "text" not in sampled_df.columns:
+        print("  [warn] sampled_dataset has no 'text' column — skipping token analysis")
+        return None, None
+    if sample_size > 0 and sample_size < n_total:
+        rng = np.random.default_rng(42)
+        indices = rng.choice(n_total, size=sample_size, replace=False)
+        indices.sort()
+    else:
+        indices = np.arange(n_total)
+    texts_all = sampled_df["text"].to_numpy()[indices]
+    domain_labels = None
+    if domain_col and domain_col in sampled_df.columns:
+        raw = sampled_df[domain_col].to_numpy()[indices]
+        if raw.dtype.kind in ("i", "u"):
+            domain_labels = raw.astype(np.int64)
+        elif raw.dtype.kind in ("U", "S", "O"):
+            label_map = {}
+            if domain_names:
+                for i, name in enumerate(domain_names):
+                    label_map[str(name)] = i
+                    label_map[i] = i
+            domain_labels = np.array(
+                [label_map.get(str(d), label_map.get(int(d), -1)
+                                if isinstance(d, (int, np.integer)) and not isinstance(d, bool)
+                                else -1)
+                 for d in raw],
+                dtype=np.int64,
+            )
+
+    from multiprocessing import Pool
+    from tqdm import tqdm
+
+    batch_size = max(256, len(texts_all) // (num_workers * 4))
+    tasks = [
+        (i, texts_all[i:i + batch_size].tolist())
+        for i in range(0, len(texts_all), batch_size)
+    ]
+    parts = []
+    with Pool(num_workers, initializer=_init_tok_worker,
+              initargs=(tokenizer_path, tok_threads)) as pool:
+        for idx, lens in tqdm(
+            pool.imap_unordered(_tokenize_batch, tasks, chunksize=1),
+            total=len(tasks), desc="  tokenize", leave=False,
+        ):
+            parts.append((idx, lens))
+    parts.sort(key=lambda x: x[0])
+    tok_lens = np.concatenate([lens for _, lens in parts]) if parts else np.array([], dtype=np.int64)
+    return tok_lens, domain_labels
 
 
 # ── Plot helpers ─────────────────────────────────────────────────
@@ -483,6 +731,119 @@ def plot_quality_length_decomposition(
     return _save_fig(fig, output_dir, "fig_quality_length_decomposition.png")
 
 
+# ── Token length & crop analysis figures ──────────────────────────
+
+
+def plot_token_length_dist(tok_lens, seq_len, domain_labels,
+                           domain_names, num_domains, output_dir):
+    """Histogram of token lengths with T=seq_len vertical marker."""
+    if tok_lens is None or len(tok_lens) == 0:
+        print("  [skip] fig_token_length_dist: no token length data")
+        return None
+    colors = _get_colors(num_domains)
+    domain_short = _get_domain_short(num_domains, domain_names)
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    lo, hi = np.percentile(tok_lens, [1, 99])
+    lo = max(1.0, lo)
+    bins = np.logspace(np.log10(lo), np.log10(hi), 50)
+
+    ax.hist(tok_lens, bins=bins, density=True, histtype="step", lw=2,
+            label=f"All (n={len(tok_lens):,})", color="black")
+
+    if domain_labels is not None:
+        unique_doms = np.unique(domain_labels)
+        for d in unique_doms:
+            if d < 0 or (num_domains and d >= num_domains):
+                continue
+            mask = domain_labels == d
+            vals = tok_lens[mask]
+            if len(vals) < 10:
+                continue
+            label = domain_short[d] if num_domains and d < len(domain_short) else f"D{d}"
+            ax.hist(vals, bins=bins, density=True, histtype="step", lw=1.5,
+                    alpha=0.7, label=f"{label} (n={len(vals):,})",
+                    color=colors[d] if d < len(colors) else "gray")
+
+    ax.axvline(seq_len, color="red", ls="--", lw=1.5, label=f"T={seq_len}")
+    ax.set_xscale("log")
+    ax.set_xlabel("Document length (tokens, incl. BOS)")
+    ax.set_ylabel("density")
+    ax.set_title("Token Length Distribution (sampled dataset)")
+    ax.legend(fontsize=8)
+    ax.grid(alpha=0.3, linestyle="--")
+    ax.set_axisbelow(True)
+    plt.tight_layout()
+    return _save_fig(fig, output_dir, "fig_token_length_dist.png")
+
+
+def plot_crop_analysis(crop_stats, output_dir):
+    """Bar chart: total vs trained vs cropped tokens + crop rate decomposition."""
+    if crop_stats is None:
+        print("  [skip] fig_crop_analysis: no crop stats")
+        return None
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+    categories = ["Total\ntokens", "Trained\ntokens", "Cropped\ntokens"]
+    values = [crop_stats["total_tokens"],
+              crop_stats["trained_tokens"],
+              crop_stats["cropped_tokens"]]
+    bar_colors = ["steelblue", "seagreen", "coral"]
+    bars = ax1.bar(categories, values, color=bar_colors, edgecolor="white")
+    for bar, val in zip(bars, values):
+        ax1.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                 f"{val:,}", ha="center", va="bottom", fontsize=10)
+    ax1.set_ylabel("Tokens")
+    ax1.set_title(
+        f"Token Breakdown (T={crop_stats['seq_len']}, "
+        f"sample={crop_stats['sample_size']:,})"
+    )
+    ax1.grid(axis="y", alpha=0.3, linestyle="--")
+    ax1.set_axisbelow(True)
+
+    theo = crop_stats["theoretical_min_waste"] * 100
+    addl = crop_stats["additional_waste"] * 100
+    ax2.bar(["Theoretical min\n(docs > T+1)", "Additional\n(row-end slack)"],
+            [theo, addl], color=["#ff7f0e", "#d62728"], edgecolor="white")
+    ax2.set_ylabel("Crop rate (%)")
+    ax2.set_title(
+        f"Crop Rate Decomposition (total={crop_stats['crop_rate'] * 100:.1f}%)"
+    )
+    ax2.grid(axis="y", alpha=0.3, linestyle="--")
+    ax2.set_axisbelow(True)
+
+    plt.tight_layout()
+    return _save_fig(fig, output_dir, "fig_crop_analysis.png")
+
+
+def plot_packing_boundaries(boundaries, output_dir, seq_len=2048):
+    """Bar histogram: doc boundaries per packed row (docs_in_row - 1)."""
+    if boundaries is None or len(boundaries) == 0:
+        print("  [skip] fig_packing_boundaries: no boundary data")
+        return None
+
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    hi = min(int(boundaries.max()), 8)
+    vc = np.bincount(
+        np.clip(boundaries.astype(np.int64), 0, hi), minlength=hi + 1
+    ).astype(float)
+    vc = vc / max(1, vc.sum())
+
+    ax.bar(np.arange(hi + 1), vc, 0.8, color="steelblue")
+    ax.set_xticks(range(hi + 1))
+    labels = [str(i) if i < hi else f"{hi}+" for i in range(hi + 1)]
+    ax.set_xticklabels(labels)
+    ax.set_xlabel(f"Doc boundaries per {seq_len}-token row")
+    ax.set_ylabel("fraction of rows")
+    ax.set_title("Packing Boundary Distribution (BOS-bestfit simulation)")
+    ax.grid(axis="y", alpha=0.3, linestyle="--")
+    ax.set_axisbelow(True)
+    plt.tight_layout()
+    return _save_fig(fig, output_dir, "fig_packing_boundaries.png")
+
+
 # ── Summary writer ───────────────────────────────────────────────
 
 
@@ -508,6 +869,11 @@ def write_analysis_summary(
     fig_dup=None,
     quality_length_rhos=None,
     fig_decomp=None,
+    crop_stats=None,
+    tok_lens=None,
+    fig_token_len=None,
+    fig_crop=None,
+    fig_boundaries=None,
 ):
     """Write analysis_summary.txt with key diagnostics."""
     lines = []
@@ -918,6 +1284,101 @@ def write_analysis_summary(
     )
     lines.append("")
 
+    # ── Token Length & Crop Analysis ──
+    if crop_stats is not None:
+        lines.append("-" * 70)
+        lines.append("Token Length & Crop Analysis (BOS-bestfit packing)")
+        lines.append("-" * 70)
+        lines.append(f"Sample size      : {crop_stats['sample_size']:,} docs")
+        lines.append(f"Seq length (T)   : {crop_stats['seq_len']}")
+        lines.append(f"Pack buffer      : {crop_stats['buffer_size']}")
+        lines.append("")
+
+        if tok_lens is not None and len(tok_lens) > 0:
+            row_cap = crop_stats["seq_len"] + 1
+            over_doc_pct = float(np.mean(tok_lens > row_cap) * 100)
+            over_tok_pct = crop_stats["theoretical_min_waste"] * 100
+            lines.append("Token Length Distribution:")
+            lines.append(
+                f"  mean={tok_lens.mean():.1f}  median={np.median(tok_lens):.1f}  "
+                f"p25={np.percentile(tok_lens, 25):.0f}  "
+                f"p75={np.percentile(tok_lens, 75):.0f}  "
+                f"p90={np.percentile(tok_lens, 90):.0f}  "
+                f"max={tok_lens.max()}"
+            )
+            lines.append(f"  %docs > T+1={row_cap}: {over_doc_pct:.1f}%")
+            lines.append(
+                f"  %tokens in docs > T+1: {over_tok_pct:.1f}% "
+                f"(theoretical minimum waste)"
+            )
+            lines.append("")
+
+        lines.append(
+            f"Packing Simulation (BOS-bestfit, buffer={crop_stats['buffer_size']}, "
+            f"T={crop_stats['seq_len']}):"
+        )
+        lines.append(f"  Total tokens (sample)  : {crop_stats['total_tokens']:,}")
+        lines.append(f"  Trained tokens          : {crop_stats['trained_tokens']:,}")
+        lines.append(f"  Cropped tokens          : {crop_stats['cropped_tokens']:,}")
+        lines.append(f"  Crop rate               : {crop_stats['crop_rate'] * 100:.1f}%")
+        lines.append(
+            f"  Theoretical minimum     : {crop_stats['theoretical_min_waste'] * 100:.1f}% "
+            f"(docs > T+1, can never fit)"
+        )
+        lines.append(
+            f"  Additional waste        : {crop_stats['additional_waste'] * 100:.1f}% "
+            f"(row-end slack)"
+        )
+        lines.append(f"  Packed rows             : {crop_stats['n_rows']:,}")
+
+        bd = crop_stats["boundaries"]
+        if len(bd) > 0:
+            lines.append(
+                f"  Docs/row (mean)         : {bd.mean() + 1:.2f}"
+            )
+            lines.append(
+                f"  Rows with 1 doc (long)  : "
+                f"{float(np.mean(bd == 0) * 100):.1f}%"
+            )
+        lines.append("")
+
+        dsp = summary.get("dataset_size_prediction", {})
+        est_tokens = dsp.get("estimated_tokens")
+        if est_tokens:
+            est_int = int(est_tokens)
+            cropped_est = int(crop_stats["crop_rate"] * est_int)
+            trained_est = est_int - cropped_est
+            lines.append(f"Extrapolated to full dataset (~{est_int:,} tokens):")
+            lines.append(
+                f"  Tokens discarded (est.) : ~{cropped_est:,} "
+                f"({crop_stats['crop_rate'] * 100:.1f}% x {est_int:,})"
+            )
+            lines.append(f"  Tokens trained on (est.): ~{trained_est:,}")
+            if trained_est > 0:
+                flat_gain = cropped_est / trained_est * 100
+                lines.append(
+                    f"  Flat loader would save  : ~{cropped_est:,} "
+                    f"(+{flat_gain:.1f}% more training tokens)"
+                )
+            lines.append("")
+
+        if crop_stats["crop_rate"] > 0.20:
+            lines.append(
+                f"⚠ SIGNIFICANT crop waste ({crop_stats['crop_rate'] * 100:.1f}%) "
+                f"— consider --loader flat in mid_train.py"
+            )
+        elif crop_stats["crop_rate"] > 0.10:
+            lines.append(
+                f"⚠ MODERATE crop waste ({crop_stats['crop_rate'] * 100:.1f}%) "
+                f"— some tokens lost to packing"
+            )
+        else:
+            lines.append(
+                f"✓ LOW crop waste ({crop_stats['crop_rate'] * 100:.1f}%) "
+                f"— packing is efficient"
+            )
+        lines.append("")
+
     # ── CJK Font Note ──
     if not _report_mod._CJK_FONT_AVAILABLE and domain_names is not None:
         has_cjk = any(_str_has_cjk(n) for n in domain_names[:num_domains])
@@ -944,6 +1405,12 @@ def write_analysis_summary(
         lines.append(f"  3. {fig_dup}")
     if fig_decomp:
         lines.append(f"  4. {fig_decomp}")
+    if fig_token_len:
+        lines.append(f"  5. {fig_token_len}")
+    if fig_crop:
+        lines.append(f"  6. {fig_crop}")
+    if fig_boundaries:
+        lines.append(f"  7. {fig_boundaries}")
     lines.append("")
 
     lines.append("=" * 70)
@@ -2147,6 +2614,37 @@ def main():
     )
     print(f"       Quality-length ρ: {quality_length_rhos}")
 
+    # ── Token length & crop analysis (optional, needs tokenizer) ──
+    crop_stats = None
+    tok_lens = None
+    tokenizer_path = _resolve_tokenizer_path(args)
+    if tokenizer_path:
+        num_workers = args.num_workers or min(32, os.cpu_count() or 1)
+        domain_col = None
+        for c in ("category_name", "domain"):
+            if c in sampled_df.columns:
+                domain_col = c
+                break
+        print(f"\n  Tokenizing sampled docs (sample={args.tokenize_sample:,}, "
+              f"workers={num_workers}, domain_col={domain_col})...")
+        tok_lens, tok_dom_labels = _tokenize_sampled_docs(
+            sampled_df, tokenizer_path, args.tokenize_sample,
+            num_workers, args.tokenizer_threads, domain_col, domain_names,
+        )
+        if tok_lens is not None and len(tok_lens) > 0:
+            print(f"  Tokenized {len(tok_lens):,} docs, "
+                  f"mean={tok_lens.mean():.1f} tokens/doc")
+            crop_stats = _packing_crop_analysis(
+                tok_lens, args.seq_len, args.pack_buffer, args.max_pack_docs,
+            )
+            if crop_stats:
+                print(f"  Crop rate: {crop_stats['crop_rate'] * 100:.1f}% "
+                      f"(theoretical min: {crop_stats['theoretical_min_waste'] * 100:.1f}%, "
+                      f"additional: {crop_stats['additional_waste'] * 100:.1f}%)")
+    else:
+        print("\n  [skip] No tokenizer found — token-length & crop analysis skipped "
+              "(pass --tokenizer or set $NANOCHAT_MODEL_DIR)")
+
     # ── Generate figures ──
     print(f"\nGenerating outputs in: {args.exp_dir}")
     _setup_style()
@@ -2185,6 +2683,24 @@ def main():
         args.exp_dir,
     )
 
+    if tok_lens is not None and len(tok_lens) > 0:
+        print("  Generating token length distribution figure...")
+        fig_token_len = plot_token_length_dist(
+            tok_lens, args.seq_len, tok_dom_labels,
+            domain_names, num_domains, args.exp_dir,
+        )
+        if crop_stats:
+            print("  Generating crop analysis figure...")
+            fig_crop = plot_crop_analysis(crop_stats, args.exp_dir)
+            print("  Generating packing boundary figure...")
+            fig_boundaries = plot_packing_boundaries(
+                crop_stats["boundaries"], args.exp_dir, args.seq_len,
+            )
+    else:
+        fig_token_len = None
+        fig_crop = None
+        fig_boundaries = None
+
     # ── Generate analysis summary ──
     print("\nGenerating analysis summary...")
     summary_out = os.path.join(args.exp_dir, "analysis_summary.txt")
@@ -2210,6 +2726,11 @@ def main():
         fig_dup=fig_dup,
         quality_length_rhos=quality_length_rhos,
         fig_decomp=fig_decomp,
+        crop_stats=crop_stats,
+        tok_lens=tok_lens,
+        fig_token_len=fig_token_len,
+        fig_crop=fig_crop,
+        fig_boundaries=fig_boundaries,
     )
     print(f"  Saved: {summary_out}")
 
