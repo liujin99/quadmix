@@ -1920,7 +1920,6 @@ def _analyze_diversity(
         theta_pred = summary.get("metrics", {}).get("best_predicted_loss")
     if theta_unique is None and selected_doc_ids is not None:
         theta_unique = int(len(np.unique(selected_doc_ids)))
-    theta_div = theta_unique / max_n_unique if (theta_unique and max_n_unique > 0) else None
 
     # ── Extract baseline θ* info ──
     baseline_info = None
@@ -1937,12 +1936,10 @@ def _analyze_diversity(
             if b_unique is None:
                 bdf = pd.read_parquet(bd_path, columns=["doc_id"])
                 b_unique = int(len(np.unique(bdf["doc_id"].to_numpy())))
-            b_div = b_unique / max_n_unique if max_n_unique > 0 else 0.0
             b_pred = bs.get("metrics", {}).get("best_predicted_loss")
-            baseline_info = {"dpw": b_dpw, "n_unique": b_unique,
-                             "div": b_div, "pred": b_pred}
+            baseline_info = {"dpw": b_dpw, "n_unique": b_unique, "pred": b_pred}
             print(f"[Diversity] Baseline θ*: λ={b_dpw}, n_unique={b_unique:,}, "
-                  f"div={b_div:.4f}, pred={b_pred}")
+                  f"pred={b_pred}")
         else:
             print(f"[Diversity] Baseline files not found in {baseline_dir}"
                   " — skipping baseline comparison")
@@ -1956,8 +1953,6 @@ def _analyze_diversity(
         lines.append(f"    num_unique_docs          = {theta_unique:,}")
     else:
         lines.append(f"    num_unique_docs          = N/A")
-    if theta_div is not None:
-        lines.append(f"    diversity_score          = {theta_div:.4f}")
     if theta_pred is not None:
         lines.append(f"    best_predicted_loss      = {theta_pred:.4f}")
     if baseline_info:
@@ -1965,23 +1960,16 @@ def _analyze_diversity(
         lines.append(f"  Baseline θ*:")
         lines.append(f"    diversity_penalty_weight = {baseline_info['dpw']}")
         lines.append(f"    num_unique_docs          = {baseline_info['n_unique']:,}")
-        lines.append(f"    diversity_score          = {baseline_info['div']:.4f}")
         if baseline_info["pred"] is not None:
             lines.append(f"    best_predicted_loss      = {baseline_info['pred']:.4f}")
-        if theta_div is not None:
-            div_gain = ((theta_div - baseline_info["div"])
-                        / baseline_info["div"] * 100
-                        if baseline_info["div"] > 0 else 0.0)
+        if theta_pred is not None and baseline_info["pred"] is not None:
+            q_change = ((theta_pred - baseline_info["pred"])
+                        / baseline_info["pred"] * 100
+                        if baseline_info["pred"] != 0 else 0.0)
             lines.append("")
             lines.append(f"  Improvement:")
-            lines.append(f"    diversity gain = {div_gain:+.1f}%  "
-                         f"({baseline_info['div']:.4f} -> {theta_div:.4f})")
-            if theta_pred is not None and baseline_info["pred"] is not None:
-                q_change = ((theta_pred - baseline_info["pred"])
-                            / baseline_info["pred"] * 100
-                            if baseline_info["pred"] != 0 else 0.0)
-                lines.append(f"    quality change = {q_change:+.2f}%  "
-                             f"({baseline_info['pred']:.4f} -> {theta_pred:.4f})")
+            lines.append(f"    quality change = {q_change:+.2f}%  "
+                         f"({baseline_info['pred']:.4f} -> {theta_pred:.4f})")
     lines.append("")
 
     lines.append("=" * 70)
@@ -2025,31 +2013,6 @@ def _analyze_diversity(
             fontsize=7, ha="left",
             arrowprops=dict(arrowstyle="->", color="green", alpha=0.6),
         )
-
-    # ── θ* star markers (actual search-selected) ──
-    if theta_pred is not None and theta_div is not None:
-        ax.scatter(
-            [theta_pred], [theta_div],
-            marker="*", s=300, c="red", edgecolors="darkred",
-            linewidths=0.5, zorder=10,
-            label=f"θ* search (λ={cur_dpw}, div={theta_div:.4f})",
-        )
-    if baseline_info and baseline_info["pred"] is not None:
-        ax.scatter(
-            [baseline_info["pred"]], [baseline_info["div"]],
-            marker="*", s=300, c="blue", edgecolors="darkblue",
-            linewidths=0.5, zorder=10,
-            label=f"θ* baseline (λ={baseline_info['dpw']}, "
-                 f"div={baseline_info['div']:.4f})",
-        )
-        if theta_pred is not None and theta_div is not None:
-            ax.annotate(
-                "",
-                xy=(theta_pred, theta_div),
-                xytext=(baseline_info["pred"], baseline_info["div"]),
-                arrowprops=dict(arrowstyle="->", color="purple", lw=2,
-                                connectionstyle="arc3,rad=0.3"),
-            )
 
     ax.set_xlabel("Proxy val_loss (lower = better quality)")
     ax.set_ylabel("Diversity score (higher = more unique docs)")
