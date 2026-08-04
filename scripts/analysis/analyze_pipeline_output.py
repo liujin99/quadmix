@@ -1934,7 +1934,7 @@ def _analyze_diversity(
             b_dpw = bs.get("config", {}).get("diversity_penalty_weight", 0.0)
             b_unique = bs.get("sampling", {}).get("num_unique_docs")
             if b_unique is None:
-                bdf = pd.read_parquet(bd_path, columns=["doc_id"])
+                bdf = pd.read_parquet(resolve_parquet_source(bd_path), columns=["doc_id"])
                 b_unique = int(len(np.unique(bdf["doc_id"].to_numpy())))
             b_pred = bs.get("metrics", {}).get("best_predicted_loss")
             baseline_info = {"dpw": b_dpw, "n_unique": b_unique, "pred": b_pred}
@@ -2082,7 +2082,7 @@ def main():
     print(f"       Normalizer: {normalizer}")
 
     print(f"[3/5] Loading sampled dataset: {sampled_path}")
-    sampled_df = pd.read_parquet(sampled_path)
+    sampled_df = pd.read_parquet(resolve_parquet_source(sampled_path))
     selected_doc_ids = sampled_df["doc_id"].to_numpy(dtype=np.int64)
     print(f"       Selected docs: {len(selected_doc_ids):,}")
     sampling_values_col = None

@@ -164,6 +164,13 @@ class QuaDMixPipeline:
         self._precomputed_mode = True
         print(f"\n[Stage 0] Loading precomputed data from: {data_path}")
 
+        if os.path.isdir(data_path):
+            raise ValueError(
+                f"data_path '{data_path}' is a directory. Single-file mode "
+                f"(load_precomputed) cannot read a sharded directory containing "
+                f"manifest.json. Pass a metadata_manager via load_kwargs to use "
+                f"load_precomputed_sharded instead, or pass a single .parquet file."
+            )
         df = pd.read_parquet(data_path)
         if doc_limit and doc_limit < len(df):
             df = df.head(doc_limit).reset_index(drop=True)
