@@ -404,20 +404,17 @@ def _scan_shard_indexed(args):
                  np.array(valid_domain_vals, dtype=np.int64)), filtered_long, filtered_repeat
 
 
-def scan_shards(data_dir, file_pattern, domain_col=None, domain_names=None,
-                char_count_col=None, text_col="text", num_workers=None, max_shards=None,
-                max_chars=1000000, max_char_repeat_ratio=0.3):
+def scan_shard_files(shard_paths, domain_col=None, domain_names=None,
+                     char_count_col=None, text_col="text", num_workers=None,
+                     max_chars=1000000, max_char_repeat_ratio=0.3):
     if num_workers is None:
         num_workers = min(mp.cpu_count(), 256) or 1
-    shard_files = sorted(Path(data_dir).glob(file_pattern))
-    if not shard_files:
-        raise FileNotFoundError(f"No {file_pattern} files found in {data_dir}")
-    if max_shards is not None and max_shards > 0:
-        shard_files = shard_files[:max_shards]
-    tasks = [(i, str(p), domain_col, domain_names, char_count_col, text_col, max_chars, max_char_repeat_ratio)
-             for i, p in enumerate(shard_files)]
+    shard_paths = [str(p) for p in shard_paths]
+    tasks = [(i, p, domain_col, domain_names, char_count_col, text_col,
+              max_chars, max_char_repeat_ratio)
+             for i, p in enumerate(shard_paths)]
     pool = _get_io_pool(num_workers)
-    results = [None] * len(shard_files)
+    results = [None] * len(shard_paths)
     total_filtered_long = 0
     total_filtered_repeat = 0
     for idx, docs, fl, fr in tqdm(
@@ -432,6 +429,22 @@ def scan_shards(data_dir, file_pattern, domain_col=None, domain_names=None,
     if total_filtered_long > 0 or total_filtered_repeat > 0:
         print(f"  Filtered {total_filtered_long:,} docs (>{max_chars:,} chars), "
               f"{total_filtered_repeat:,} docs (single char >{max_char_repeat_ratio*100:.0f}% repetition)")
+    return results
+
+
+def scan_shards(data_dir, file_pattern, domain_col=None, domain_names=None,
+                char_count_col=None, text_col="text", num_workers=None, max_shards=None,
+                max_chars=1000000, max_char_repeat_ratio=0.3):
+    shard_files = sorted(Path(data_dir).glob(file_pattern))
+    if not shard_files:
+        raise FileNotFoundError(f"No {file_pattern} files found in {data_dir}")
+    if max_shards is not None and max_shards > 0:
+        shard_files = shard_files[:max_shards]
+    results = scan_shard_files(shard_files, domain_col=domain_col,
+                              domain_names=domain_names, char_count_col=char_count_col,
+                              text_col=text_col, num_workers=num_workers,
+                              max_chars=max_chars,
+                              max_char_repeat_ratio=max_char_repeat_ratio)
     return shard_files, results
 
 
@@ -785,133 +798,87 @@ def main():
     n_empty = n_too_long = n_repeat = 0
     if not skip_quadmix:
         sources = resolve_parquet_source(args.quadmix_sampled_data)
-        qm_schema = set(pq.read_schema(sources[0]).names)
-        qm_cols = [c for c in qm_schema if c]
 
-        t_read = time.time()
-        quadmix_table = pq.read_table(sources, columns=qm_cols)
-        print(f"  Read {len(sources)} shard(s), {quadmix_table.num_rows:,} rows "
-              f"in {time.time()-t_read:.1f}s")
+        qm_metadata = scan_shard_files(
+            sources, domain_col=domain_col, domain_names=domain_names,
+            char_count_col=char_count_col, text_col=text_col,
+            num_workers=args.num_workers,
+            max_chars=args.max_chars, max_char_repeat_ratio=args.max_char_repeat_ratio)
 
-        t_conv = time.time()
-        texts = (quadmix_table[text_col].to_pylist()
-                 if text_col in quadmix_table.column_names else [])
-        qm_domains = (quadmix_table[domain_col].to_pylist()
-                      if domain_col and domain_col in quadmix_table.column_names
-                      else [None] * len(texts))
-        print(f"  to_pylist(text+domain) in {time.time()-t_conv:.1f}s")
+        all_doc_ids = np.concatenate([m[0] for m in qm_metadata])
+        all_char_counts = np.concatenate([m[1] for m in qm_metadata])
+        all_domain_vals = np.concatenate([m[2] for m in qm_metadata])
+        all_shard_ids = np.concatenate([
+            np.full(len(qm_metadata[sid][0]), sid, dtype=np.int32)
+            for sid in range(len(qm_metadata))
+        ])
+        all_est_tokens = all_char_counts // 4
+        quadmix_total_est_tokens = int(all_est_tokens.sum())
 
-        # Drop text+domain from Arrow table to save memory during filtering;
-        # keep other columns for take() after filtering.
-        exclude_cols = {c for c in (text_col, domain_col) if c}
-        other_cols = [c for c in qm_cols if c not in exclude_cols]
-        quadmix_other = quadmix_table.select(other_cols) if other_cols else None
-        del quadmix_table
-
-        if domain_names is not None and qm_domains:
-            non_none = [d for d in qm_domains if d is not None]
-            if non_none and all(isinstance(d, (int, np.integer)) and not isinstance(d, bool) for d in non_none):
-                qm_domains = [
-                    (domain_names[d] if 0 <= d < len(domain_names) else None) if d is not None else None
-                    for d in qm_domains
-                ]
-
-        if domain_col and domain_col != "domain":
-            qm_cols = ["domain" if c == domain_col else c for c in qm_cols]
-
-        max_chars = args.max_chars
-        max_char_repeat_ratio = args.max_char_repeat_ratio
-        num_workers = args.num_workers or min(mp.cpu_count(), 256) or 1
-        chunk_size = max(1, len(texts) // (num_workers * 4))
-        ranges = [(i, min(i + chunk_size, len(texts)), max_chars, max_char_repeat_ratio)
-                  for i in range(0, len(texts), chunk_size)]
-
-        global _filter_texts, _filter_domains
-        _filter_texts = texts
-        _filter_domains = qm_domains
-
-        fork_ctx = mp.get_context("fork")
-        filter_pool = fork_ctx.Pool(num_workers)
-        valid_indices_all = []
-        n_empty = n_too_long = n_repeat = 0
-        for indices, ne, tl, tr in tqdm(
-            filter_pool.imap_unordered(_filter_docs_by_range, ranges, chunksize=1),
-            total=len(ranges),
-            desc=f"  Filtering QuadMix docs ({num_workers} processes)",
-            file=sys.stdout, mininterval=1.0,
-        ):
-            valid_indices_all.extend(indices)
-            n_empty += ne
-            n_too_long += tl
-            n_repeat += tr
-        filter_pool.close()
-        filter_pool.join()
-
-        _filter_texts = None
-        _filter_domains = None
-
-        n_filtered = n_empty + n_too_long + n_repeat
-        if n_filtered > 0:
-            print(f"  Filtered {n_empty:,} docs (empty), "
-                  f"{n_too_long:,} docs (>{max_chars:,} chars), "
-                  f"{n_repeat:,} docs (single char >{max_char_repeat_ratio*100:.0f}% repetition)")
-        valid_texts = [texts[i] for i in valid_indices_all]
-        print(f"  Counting tokens for {len(valid_texts):,} docs...")
-        if enc and args.tokenizer_pkl:
-            token_counts = count_tokens_mp(valid_texts, args.tokenizer_pkl, num_workers=args.num_workers)
-        else:
-            token_counts = [estimate_tokens(t) for t in valid_texts]
-
-        # Build col_data: take() other columns for valid rows only, then
-        # reuse already-converted text/domain Python strings (no re-conversion).
-        if quadmix_other is not None:
-            final_valid = pa.array(valid_indices_all, type=pa.int64())
-            filtered = quadmix_other.take(final_valid)
-            col_data = {c: filtered[c].to_pylist() for c in other_cols}
-            del quadmix_other, filtered
-        else:
-            col_data = {}
-        col_data[text_col] = [texts[vi] for vi in valid_indices_all]
-        if domain_col:
-            col_data["domain"] = [qm_domains[vi] for vi in valid_indices_all]
-
-        quadmix_docs = []
-        for j in range(len(valid_indices_all)):
-            doc = {c: col_data[c][j] for c in qm_cols}
-            doc["token_count"] = token_counts[j]
-            if "char_count" not in doc:
-                doc["char_count"] = len(valid_texts[j])
-            quadmix_docs.append(doc)
-        quadmix_total_tokens = sum(token_counts)
-
-        del texts, valid_texts, valid_indices_all, token_counts, col_data
-        gc.collect()
-
-        print(f"  QuadMix docs: {len(quadmix_docs):,}")
-        print(f"  QuadMix total tokens ({token_method}): {quadmix_total_tokens:,}")
+        print(f"  QuadMix docs: {len(all_doc_ids):,}")
+        print(f"  QuadMix total tokens (estimated): {quadmix_total_est_tokens:,}")
 
         if args.data_ratio is not None and args.num_scaling_params is not None:
             target_tokens = int(args.data_ratio * args.num_scaling_params)
             training_budget = int(target_tokens * 1.1)
             budget_cap = int(training_budget * args.data_multiplier)
             print(f"\n  Token budget: target={target_tokens:,}, "
-                  f"quadmix_total={quadmix_total_tokens:,}, "
+                  f"quadmix_total={quadmix_total_est_tokens:,}, "
                   f"training_budget={training_budget:,}, "
                   f"budget_cap={budget_cap:,} (multiplier={args.data_multiplier})")
         else:
-            training_budget = int(quadmix_total_tokens * 1.1)
+            training_budget = int(quadmix_total_est_tokens * 1.1)
             budget_cap = int(training_budget * args.data_multiplier)
-            target_tokens = quadmix_total_tokens
-            print(f"\n  Token budget: no data-ratio specified, using quadmix_total={quadmix_total_tokens:,} "
+            target_tokens = quadmix_total_est_tokens
+            print(f"\n  Token budget: no data-ratio specified, using quadmix_total={quadmix_total_est_tokens:,} "
                   f"x 1.1 = {training_budget:,} (multiplier={args.data_multiplier} -> budget_cap={budget_cap:,})")
 
+        perm = np.random.permutation(len(all_doc_ids))
+        shuffled_est_tokens = all_est_tokens[perm]
+        cumsum = np.cumsum(shuffled_est_tokens)
+        if budget_cap <= 0 or len(cumsum) == 0:
+            cutoff = 0
+        else:
+            cutoff = min(int(np.searchsorted(cumsum, budget_cap, side='left')) + 1, len(all_doc_ids))
+        selected = list(zip(
+            all_shard_ids[perm[:cutoff]].tolist(),
+            all_doc_ids[perm[:cutoff]].tolist(),
+        ))
+        accumulated_est_tokens = int(cumsum[cutoff - 1]) if cutoff > 0 else 0
+        print(f"  Selected {len(selected):,} docs (estimated ~{accumulated_est_tokens:,} tokens)")
+
+        quadmix_docs = read_docs_from_shards(
+            sources, selected, num_workers=args.num_workers,
+            desc=f"  Reading QuadMix docs ({args.num_workers or 'auto'} processes)",
+            text_col=text_col,
+            max_char_repeat_ratio=args.max_char_repeat_ratio,
+            domain_col=domain_col,
+            quality_cols=quality_cols,
+            char_count_col=char_count_col)
+
+        if enc and args.tokenizer_pkl:
+            print(f"  Re-counting tokens for {len(quadmix_docs):,} docs (exact)...")
+            quadmix_texts = [d[text_col] for d in quadmix_docs]
+            exact_counts = count_tokens_mp(quadmix_texts, args.tokenizer_pkl, num_workers=args.num_workers)
+            for doc, tc in zip(quadmix_docs, exact_counts):
+                doc["token_count"] = tc
+            del quadmix_texts, exact_counts
+            gc.collect()
+        else:
+            for doc in quadmix_docs:
+                doc["token_count"] = estimate_tokens(doc[text_col])
+
         random.shuffle(quadmix_docs)
-        if sum(d["token_count"] for d in quadmix_docs) > budget_cap:
+        quadmix_total_tokens = sum(d["token_count"] for d in quadmix_docs)
+        if quadmix_total_tokens > budget_cap:
             quadmix_docs, quadmix_actual_tokens = trim_docs_to_target(quadmix_docs, budget_cap)
             print(f"  QuadMix capped to budget: {len(quadmix_docs):,} docs, {quadmix_actual_tokens:,} tokens")
         else:
-            quadmix_actual_tokens = sum(d["token_count"] for d in quadmix_docs)
+            quadmix_actual_tokens = quadmix_total_tokens
             print(f"  QuadMix within budget: {len(quadmix_docs):,} docs, {quadmix_actual_tokens:,} tokens")
+
+        del all_doc_ids, all_char_counts, all_domain_vals, all_shard_ids, all_est_tokens, selected
+        gc.collect()
     else:
         quadmix_docs = []
         target_tokens = int(args.data_ratio * args.num_scaling_params)
