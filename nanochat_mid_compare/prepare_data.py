@@ -63,6 +63,7 @@ _SPAWN_CTX = mp.get_context("spawn")
 
 _io_pool = None
 _token_pool = None
+_read_pool = None
 
 
 def _get_io_pool(num_workers=None):
@@ -72,6 +73,22 @@ def _get_io_pool(num_workers=None):
             num_workers = min(mp.cpu_count(), 256) or 1
         _io_pool = _SPAWN_CTX.Pool(num_workers)
     return _io_pool
+
+
+def _get_read_pool(num_workers=None):
+    global _read_pool
+    if _read_pool is None:
+        nw = min(mp.cpu_count() // 4, 48) or 1
+        _read_pool = _SPAWN_CTX.Pool(nw)
+    return _read_pool
+
+
+def _close_io_pool():
+    global _io_pool
+    if _io_pool is not None:
+        _io_pool.close()
+        _io_pool.join()
+        _io_pool = None
 
 
 def _get_token_pool(tokenizer_pkl_path, num_workers=None):
@@ -85,11 +102,15 @@ def _get_token_pool(tokenizer_pkl_path, num_workers=None):
 
 
 def _cleanup_pools():
-    global _io_pool, _token_pool
+    global _io_pool, _token_pool, _read_pool
     if _io_pool is not None:
         _io_pool.close()
         _io_pool.join()
         _io_pool = None
+    if _read_pool is not None:
+        _read_pool.close()
+        _read_pool.join()
+        _read_pool = None
     if _token_pool is not None:
         _token_pool.close()
         _token_pool.join()
@@ -249,37 +270,66 @@ def _read_docs_from_shard_tagged(args):
     want = [c for c in [text_col, domain_col, char_count_col] + (quality_cols or [])
             if c and c in shard_names]
     cols = list(dict.fromkeys(want))
-    table = pq.read_table(shard_path, columns=cols)
-    taken = table.take(pa.array(doc_indices))
-    if text_col in taken.column_names:
-        texts = taken[text_col].to_pylist()
-    else:
-        texts = ["" for _ in doc_indices]
-    if domain_col and domain_col in taken.column_names:
-        domains = taken[domain_col].to_pylist()
-    else:
-        domains = [None] * len(texts)
 
-    quality_arrays = {}
-    for qc in (quality_cols or []):
-        if qc in taken.column_names:
-            quality_arrays[qc] = taken[qc].to_pylist()
+    sort_order = sorted(range(len(doc_indices)), key=lambda i: doc_indices[i])
+    sorted_di = [doc_indices[i] for i in sort_order]
 
-    cc_arr = None
-    if char_count_col and char_count_col in taken.column_names:
-        cc_arr = taken[char_count_col].to_pylist()
+    pf = pq.ParquetFile(shard_path)
+    n_rgs = pf.metadata.num_row_groups
+    rg_offsets = [0]
+    for i in range(n_rgs):
+        rg_offsets.append(rg_offsets[-1] + pf.metadata.row_group(i).num_rows)
 
-    docs = []
-    for i, (t, dom) in enumerate(zip(texts, domains)):
+    have_cc = char_count_col and char_count_col in cols
+    sorted_texts = []
+    sorted_domains = []
+    sorted_quality = {qc: [] for qc in (quality_cols or []) if qc in cols}
+    sorted_cc = []
+
+    di_pos = 0
+    for rg_idx in range(n_rgs):
+        rg_start = rg_offsets[rg_idx]
+        rg_end = rg_offsets[rg_idx + 1]
+        local_indices = []
+        while di_pos < len(sorted_di) and sorted_di[di_pos] < rg_end:
+            local_indices.append(sorted_di[di_pos] - rg_start)
+            di_pos += 1
+        if not local_indices:
+            continue
+        rg_table = pf.read_row_group(rg_idx, columns=cols)
+        taken = rg_table.take(pa.array(local_indices))
+        n_local = len(local_indices)
+        if text_col in taken.column_names:
+            sorted_texts.extend(taken[text_col].to_pylist())
+        else:
+            sorted_texts.extend([""] * n_local)
+        if domain_col and domain_col in taken.column_names:
+            sorted_domains.extend(taken[domain_col].to_pylist())
+        else:
+            sorted_domains.extend([None] * n_local)
+        for qc in sorted_quality:
+            sorted_quality[qc].extend(taken[qc].to_pylist())
+        if have_cc:
+            sorted_cc.extend(taken[char_count_col].to_pylist())
+
+    if not have_cc:
+        sorted_cc = [len(t) for t in sorted_texts]
+
+    sorted_docs = []
+    for i, t in enumerate(sorted_texts):
         doc = {
             "text": t,
-            "char_count": cc_arr[i] if cc_arr else len(t),
+            "char_count": sorted_cc[i],
             "token_count": len(t) // 4,
-            "domain": dom,
+            "domain": sorted_domains[i],
         }
-        for qc, arr in quality_arrays.items():
+        for qc, arr in sorted_quality.items():
             doc[qc] = arr[i]
-        docs.append(doc)
+        sorted_docs.append(doc)
+
+    docs = [None] * len(doc_indices)
+    for i, si in enumerate(sort_order):
+        docs[si] = sorted_docs[i]
     return shard_id, docs
 
 
@@ -296,7 +346,7 @@ def read_docs_from_shards(shard_paths, selections, num_workers=None, desc=None, 
     tasks = [(sid, str(shard_paths[sid]), indices, text_col, domain_col,
               quality_cols, char_count_col)
              for sid, indices in shard_to_docs.items()]
-    pool = _get_io_pool(num_workers)
+    pool = _get_read_pool(num_workers)
     unordered = list(tqdm(
         pool.imap_unordered(_read_docs_from_shard_tagged, tasks, chunksize=1),
         total=len(tasks),
@@ -485,7 +535,7 @@ def select_quality_topk(prep_files, prep_metadata, quality_method, total_tokens,
     ):
         if len(doc_ids) == 0:
             continue
-        scores = pq.read_table(str(prep_files[shard_id]), columns=[quality_col]).to_pandas()[quality_col].to_numpy()
+        scores = pq.read_table(str(prep_files[shard_id]), columns=[quality_col])[quality_col].to_numpy(zero_copy_only=False)
         q_scores_list.append(scores[doc_ids])
         q_doc_ids_list.append(doc_ids)
         q_shard_ids_list.append(np.full(len(doc_ids), shard_id, dtype=np.int32))
@@ -896,6 +946,8 @@ def main():
         num_workers=args.num_workers, max_shards=args.max_shards,
         max_chars=args.max_chars, max_char_repeat_ratio=args.max_char_repeat_ratio)
 
+    _close_io_pool()
+
     print("  Building candidate index...")
     all_doc_ids = np.concatenate([m[0] for m in prep_metadata])
     all_char_counts = np.concatenate([m[1] for m in prep_metadata])
@@ -1041,17 +1093,24 @@ def main():
     for m, qt in quality_trains.items():
         print(f"  Quality ({m}) train: {len(qt):,}, val: {len(quality_vals[m]):,}")
 
+    del quadmix_docs, random_docs, manual_ratio_docs, quality_datasets
+    gc.collect()
+
     final_step = step_num + 1
     print(f"\n[{final_step}] Writing sharded parquet files...")
 
     def write_dataset(docs, data_dir, name, val_docs=None):
         n_shards = max(1, (len(docs) + args.shard_size - 1) // args.shard_size)
+        write_tasks = []
         for i in range(n_shards):
             start = i * args.shard_size
             end = min(start + args.shard_size, len(docs))
-            shard_docs = docs[start:end]
             out_path = data_dir / f"shard_{i:05d}.parquet"
-            write_shard(shard_docs, str(out_path), args.num_npu)
+            write_tasks.append((docs[start:end], str(out_path), args.num_npu))
+        with ThreadPool(8) as tp:
+            list(tqdm(tp.imap(lambda t: write_shard(*t), write_tasks, chunksize=1),
+                      total=len(write_tasks), desc=f"  Writing {name} shards",
+                      file=sys.stdout, mininterval=1.0))
         val_path = data_dir / f"shard_{n_shards:05d}.parquet"
         if val_docs and len(val_docs) > 0:
             write_shard(val_docs, str(val_path), args.num_npu)
@@ -1061,14 +1120,49 @@ def main():
         val_label = f"{len(val_docs)} val" if val_docs and len(val_docs) > 0 else "1 dummy val"
         print(f"  {name}: {n_shards} train shards + {val_label} -> {data_dir}")
 
+    # Precompute stats before freeing memory
+    precompute = {}
+    if not skip_quadmix:
+        qm_td = len(quadmix_train)
+        qm_tt = sum(d["token_count"] for d in quadmix_train)
+        qm_vd = len(quadmix_val)
+        qm_sh = max(1, (qm_td + args.shard_size - 1) // args.shard_size)
+        precompute["quadmix"] = (qm_td, qm_vd, qm_tt, qm_sh)
+    if not skip_random:
+        rd_td = len(random_train)
+        rd_tt = sum(d["token_count"] for d in random_train)
+        rd_vd = len(random_val)
+        rd_sh = max(1, (rd_td + args.shard_size - 1) // args.shard_size)
+        precompute["random"] = (rd_td, rd_vd, rd_tt, rd_sh)
+    if do_manual_ratio:
+        mr_td = len(manual_ratio_train)
+        mr_tt = sum(d["token_count"] for d in manual_ratio_train)
+        mr_vd = len(manual_ratio_val)
+        mr_sh = max(1, (mr_td + args.shard_size - 1) // args.shard_size)
+        precompute["manual_ratio"] = (mr_td, mr_vd, mr_tt, mr_sh)
+    for m, qt in quality_trains.items():
+        qt_d = len(qt)
+        qt_t = sum(d["token_count"] for d in qt)
+        qt_vd = len(quality_vals[m])
+        qt_sh = max(1, (qt_d + args.shard_size - 1) // args.shard_size)
+        precompute[f"quality_{m}"] = (qt_d, qt_vd, qt_t, qt_sh)
+
     if not skip_quadmix:
         write_dataset(quadmix_train, quadmix_dir, "QuadMix", quadmix_val)
+        del quadmix_train, quadmix_val
+        gc.collect()
     if not skip_random:
         write_dataset(random_train, random_dir, "Random", random_val)
+        del random_train, random_val
+        gc.collect()
     if do_manual_ratio:
         write_dataset(manual_ratio_train, manual_ratio_dir, manual_ratio_label, manual_ratio_val)
-    for m, qt in quality_trains.items():
-        write_dataset(qt, quality_dirs[m], f"Quality ({m})", quality_vals[m])
+        del manual_ratio_train, manual_ratio_val
+        gc.collect()
+    for m in list(quality_trains.keys()):
+        write_dataset(quality_trains[m], quality_dirs[m], f"Quality ({m})", quality_vals[m])
+        del quality_trains[m], quality_vals[m]
+        gc.collect()
 
     stats = {
         "config": {
@@ -1088,21 +1182,23 @@ def main():
         }
     }
     if not skip_quadmix:
+        qm_td, qm_vd, qm_tt, qm_sh = precompute["quadmix"]
         stats["quadmix"] = {
-            "train_docs": len(quadmix_train),
-            "val_docs": len(quadmix_val),
-            "tokens": sum(d["token_count"] for d in quadmix_train),
-            "shards": max(1, (len(quadmix_train) + args.shard_size - 1) // args.shard_size),
+            "train_docs": qm_td,
+            "val_docs": qm_vd,
+            "tokens": qm_tt,
+            "shards": qm_sh,
             "n_empty": n_empty,
             "n_too_long": n_too_long,
             "n_repeat": n_repeat,
         }
     if not skip_random:
+        rd_td, rd_vd, rd_tt, rd_sh = precompute["random"]
         stats["random"] = {
-            "train_docs": len(random_train),
-            "val_docs": len(random_val),
-            "tokens": sum(d["token_count"] for d in random_train),
-            "shards": max(1, (len(random_train) + args.shard_size - 1) // args.shard_size),
+            "train_docs": rd_td,
+            "val_docs": rd_vd,
+            "tokens": rd_tt,
+            "shards": rd_sh,
         }
     if args.data_ratio is not None:
         stats["config"]["data_ratio"] = args.data_ratio
@@ -1113,24 +1209,26 @@ def main():
         stats["config"]["data_multiplier"] = args.data_multiplier
 
     if do_manual_ratio:
+        mr_td, mr_vd, mr_tt, mr_sh = precompute["manual_ratio"]
         mr_label_parts = [f"{d}={r}" for d, r in sorted(manual_ratio_map.items())]
         stats["manual_ratio"] = {
-            "train_docs": len(manual_ratio_train),
-            "val_docs": len(manual_ratio_val),
-            "tokens": sum(d["token_count"] for d in manual_ratio_train),
-            "shards": max(1, (len(manual_ratio_train) + args.shard_size - 1) // args.shard_size),
+            "train_docs": mr_td,
+            "val_docs": mr_vd,
+            "tokens": mr_tt,
+            "shards": mr_sh,
             "label": manual_ratio_label,
             "ratio_map": manual_ratio_map,
         }
 
-    if quality_trains:
+    if quality_methods:
         stats["config"]["quality_methods"] = quality_methods
-        for m, qt in quality_trains.items():
+        for m in quality_methods:
+            qt_d, qt_vd, qt_t, qt_sh = precompute[f"quality_{m}"]
             stats[f"quality_{m}"] = {
-                "train_docs": len(qt),
-                "val_docs": len(quality_vals[m]),
-                "tokens": sum(d["token_count"] for d in qt),
-                "shards": max(1, (len(qt) + args.shard_size - 1) // args.shard_size),
+                "train_docs": qt_d,
+                "val_docs": qt_vd,
+                "tokens": qt_t,
+                "shards": qt_sh,
                 "method": m,
                 "quality_column": QUALITY_SCORE_MAP[m],
             }
@@ -1148,7 +1246,7 @@ def main():
         print(f"    Random:  {random_dir}")
     if do_manual_ratio:
         print(f"    Manual Ratio: {manual_ratio_dir}")
-    for m in quality_datasets:
+    for m in quality_methods:
         print(f"    Quality ({m}): {quality_dirs[m]}")
     print("=" * 60)
 
