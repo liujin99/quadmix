@@ -11,7 +11,7 @@
 #   bash nanochat_mid_compare/run_stem_quadmix_vs_manual.sh
 #
 # Override any config via environment variables:
-#   QUADMIX_SAMPLED_DATA=/path/to/stem_sampled_dataset.parquet \
+#   QUADMIX_SAMPLED_DATA=/path/to/stem_sampled_dataset \
 #   STEM_DATA_DIR=/path/to/100B_stem_parquet_filtered \
 #   MANUAL_RATIO="数学=60:物理=15:化学=12.5:生物学=12.5" \
 #   bash nanochat_mid_compare/run_stem_quadmix_vs_manual.sh
@@ -28,8 +28,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 QUADMIX_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
-# QuadMix output: sampled_dataset.parquet from STEM pipeline
-QUADMIX_SAMPLED_DATA="${QUADMIX_SAMPLED_DATA:-/home/ma-user/work/quadmix/result/reoptimize_20260724_095141/sampled_dataset.parquet}"
+# QuadMix output: sampled_dataset from STEM pipeline
+QUADMIX_SAMPLED_DATA="${QUADMIX_SAMPLED_DATA:-/home/ma-user/work/quadmix/result/reoptimize_20260724_095141/sampled_dataset}"
 
 # STEM data directory (raw parquets with category_name, char_count_col, etc.)
 STEM_DATA_DIR="${STEM_DATA_DIR:-/home/ma-user/work/100B_stem_parquet_filtered}"
@@ -84,11 +84,11 @@ MANUAL_RATIO_MODEL_TAG="${MANUAL_RATIO_MODEL_TAG:-}"
 
 if [ -z "$QUADMIX_SAMPLED_DATA" ]; then
     echo "ERROR: QUADMIX_SAMPLED_DATA not set"
-    echo "  Set via: QUADMIX_SAMPLED_DATA=/path/to/stem_sampled_dataset.parquet"
+    echo "  Set via: QUADMIX_SAMPLED_DATA=/path/to/stem_sampled_dataset"
     exit 1
 fi
 
-if [ ! -f "$QUADMIX_SAMPLED_DATA" ]; then
+if [ ! -f "$QUADMIX_SAMPLED_DATA" ] && [ ! -d "$QUADMIX_SAMPLED_DATA" ]; then
     echo "ERROR: QuadMix dataset not found: $QUADMIX_SAMPLED_DATA"
     exit 1
 fi

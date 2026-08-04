@@ -7,7 +7,7 @@
 #
 # Usage:
 #   bash nanochat_mid_compare/run_quadmix_only.sh \
-#     --data-dir /path/to/sampled_dataset.parquet
+#     --data-dir /path/to/sampled_dataset
 #
 # Or reuse previously prepared data:
 #   bash nanochat_mid_compare/run_quadmix_only.sh \
@@ -104,7 +104,7 @@ fi
 
 if [ -z "$DATA_DIR" ]; then
     echo "ERROR: No data source specified."
-    echo "  Usage: $0 --data-dir /path/to/sampled_dataset.parquet"
+    echo "  Usage: $0 --data-dir /path/to/sampled_dataset"
     echo "     or: $0 --data-dir /path/to/prepared/data/dir"
     exit 1
 fi

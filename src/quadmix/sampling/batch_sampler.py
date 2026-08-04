@@ -6,6 +6,8 @@ Provides:
 """
 
 from typing import Callable, Dict, List, Optional, Tuple
+import glob
+import json
 import os
 import time
 
@@ -17,6 +19,38 @@ import pyarrow.parquet as pq
 
 from quadmix.core.types import ParameterSet
 from quadmix.core.sampler import compute_sampling_values
+
+
+def resolve_parquet_source(path: str) -> List[str]:
+    """Resolve a parquet source path to a list of file paths.
+
+    Handles both sharded (directory) and legacy (single file) outputs.
+
+    Args:
+        path: Path to a directory containing ``shard_*.parquet`` files,
+            or a single ``.parquet`` file.
+
+    Returns:
+        Sorted list of parquet file paths.
+
+    Raises:
+        FileNotFoundError: If *path* does not exist.
+        ValueError: If *path* is a directory but contains no ``.parquet``
+            files.
+    """
+    if os.path.isdir(path):
+        shards = sorted(glob.glob(os.path.join(path, "*.parquet")))
+        if not shards:
+            raise ValueError(
+                f"Directory '{path}' contains no .parquet files"
+            )
+        return shards
+    elif os.path.isfile(path):
+        return [path]
+    else:
+        raise FileNotFoundError(
+            f"Parquet source not found: {path} (not a file or directory)"
+        )
 
 
 def _select_documents_vectorized(
@@ -102,6 +136,9 @@ def save_sampled_dataset(
         num_total_docs: Total number of documents in the original corpus.
         selected_indices: Indices of selected documents (may repeat).
         output_path: Where to save the sampled dataset.
+            For parquet format, this is a directory path (sharded output
+            with ``shard_NNNNN.parquet`` files and ``manifest.json``).
+            For jsonl format, this is a file path.
         domain_labels: Original domain labels (for joining).
         quality_ranks: Original quality ranks (for metadata).
         sampling_values: Sampling values at selection time.
@@ -110,10 +147,9 @@ def save_sampled_dataset(
         format: Output format ("parquet" or "jsonl").
         text_col: Column name for text.
         domain_col: Column name for domain.
-        batch_size: Reserved for future incremental-write chunking (currently
-            unused; the full frame is written in one pass).
+        batch_size: Rows per parquet shard when writing sharded parquet
+            output. Ignored for jsonl format.
     """
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
     n_selected = len(selected_indices)
 
@@ -174,15 +210,36 @@ def save_sampled_dataset(
             else:
                 arrays[name] = pa.array(val)
         table = pa.table(arrays)
-        pq.write_table(
-            table,
-            output_path,
-            row_group_size=500_000,
-            compression="zstd",
-            compression_level=3,
-            use_dictionary=True,
-        )
+
+        n_rows = table.num_rows
+        shard_size = max(1, batch_size)
+        n_shards = (n_rows + shard_size - 1) // shard_size
+        os.makedirs(output_path, exist_ok=True)
+        for i in range(n_shards):
+            start = i * shard_size
+            end = min(start + shard_size, n_rows)
+            shard = table.slice(start, end - start)
+            shard_path = os.path.join(output_path, f"shard_{i:05d}.parquet")
+            pq.write_table(
+                shard,
+                shard_path,
+                row_group_size=500_000,
+                compression="zstd",
+                compression_level=3,
+                use_dictionary=True,
+            )
+        manifest = {
+            "n_shards": n_shards,
+            "total_rows": n_rows,
+            "n_unique": n_unique,
+            "shard_size": shard_size,
+            "columns": list(records.keys()),
+        }
+        with open(os.path.join(output_path, "manifest.json"), "w") as f:
+            json.dump(manifest, f, indent=2)
+        del table
     elif format == "jsonl":
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         pd.DataFrame(records).to_json(
             output_path, orient="records", lines=True, force_ascii=False)
     else:
@@ -190,7 +247,11 @@ def save_sampled_dataset(
 
     write_elapsed = time.time() - t_write
     total_elapsed = time.time() - t0
-    print(f"[Save] Sampled dataset saved to: {output_path}")
+    if format == "parquet":
+        print(f"[Save] Sampled dataset saved to: {output_path}/ "
+              f"({n_shards} shard{'s' if n_shards != 1 else ''})")
+    else:
+        print(f"[Save] Sampled dataset saved to: {output_path}")
     print(f"[Save]   Original docs: {num_total_docs}")
     print(f"[Save]   Selected docs: {n_selected} (unique: {n_unique})")
     print(f"[Save]   Sampling ratio: {n_selected / max(1, num_total_docs):.4f}x")

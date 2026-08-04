@@ -440,7 +440,7 @@ class QuaDMixPipeline:
         print(f"  Output: {output_dir}/")
         print(f"    ├── optimal_parameters.json")
         print(f"    ├── pipeline_summary.json")
-        print(f"    ├── sampled_dataset.parquet")
+        print(f"    ├── sampled_dataset/")
         print(f"    ├── quadmix_report.md")
         print(f"    ├── fig1_domain_distribution.png")
         print(f"    └── fig2_quality_weights.png")
@@ -734,7 +734,7 @@ class QuaDMixPipeline:
 
         if text_source == "sharded":
             print(f"[Stage 8] Saving {len(selected_indices):,} sampled documents...")
-            sampled_path = os.path.join(output_dir, "sampled_dataset.parquet")
+            sampled_path = os.path.join(output_dir, "sampled_dataset")
             schema = self._schema
             save_sampled_dataset(
                 get_text_fn=self._metadata_manager.read_texts,
@@ -750,7 +750,7 @@ class QuaDMixPipeline:
                 quality_scores=quality_dict,
             )
         else:
-            sampled_path = os.path.join(output_dir, "sampled_dataset.parquet")
+            sampled_path = os.path.join(output_dir, "sampled_dataset")
             schema = self._schema
             texts_ref = texts
             save_sampled_dataset(

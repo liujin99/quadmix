@@ -2,7 +2,7 @@
 """Post-hoc quartile budget allocation — validation script.
 
 Uses existing optimal_parameters.json + the full data pool to produce a
-sampled_dataset.parquet where quality ranking (Eq.2) is computed normally
+sampled_dataset where quality ranking (Eq.2) is computed normally
 (non-stratified), but the sampling budget is redistributed equally across
 length quartiles within each domain.
 
@@ -20,7 +20,7 @@ Algorithm:
      Scale S(r) within each quartile so that Σ scaled_S(r) = N_domain/K
      (equal budget per quartile).  This preserves quality prioritisation
      within each quartile while equalising the length distribution.
-  4. Re-select with scaled S(r) → sampled_dataset.parquet.
+  4. Re-select with scaled S(r) → sampled_dataset.
 
 Standalone script: no pipeline code is modified.
 
@@ -363,7 +363,7 @@ def main():
     _t = time.time()
     print(f"\n[Stage 8] Saving outputs...")
 
-    sampled_path = os.path.join(output_dir, "sampled_dataset.parquet")
+    sampled_path = os.path.join(output_dir, "sampled_dataset")
 
     quality_dict = None
     if quality_scores is not None and quality_names:
@@ -438,7 +438,7 @@ def main():
     print(f"  Selected:  {len(selected_indices):,} docs "
           f"({total_tokens_est/1e9:.2f}B tokens)")
     print(f"  Output: {output_dir}/")
-    print(f"    ├── sampled_dataset.parquet")
+    print(f"    ├── sampled_dataset/")
     print(f"    ├── optimal_parameters.json")
     print(f"    └── stratified_summary.json")
     print("=" * 70)

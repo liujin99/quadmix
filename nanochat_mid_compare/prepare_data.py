@@ -19,7 +19,7 @@ Token budget logic:
 
 Usage (essential-web, backward compatible):
     python prepare_data.py \
-        --quadmix-sampled-data /path/to/sampled_dataset.parquet \
+        --quadmix-sampled-data /path/to/sampled_dataset \
         --preprocessed-data-dir /path/to/preprocessed \
         --output-dir /path/to/experiment/data \
         --tokenizer-pkl /path/to/nanochat/tokenizer/tokenizer.pkl \
@@ -27,7 +27,7 @@ Usage (essential-web, backward compatible):
 
 Usage (STEM):
     python prepare_data.py \
-        --quadmix-sampled-data /path/to/stem_sampled_dataset.parquet \
+        --quadmix-sampled-data /path/to/stem_sampled_dataset \
         --preprocessed-data-dir /path/to/100B_stem_parquet_filtered \
         --output-dir /path/to/experiment/data \
         --schema configs/schema_stem.yaml \
@@ -40,6 +40,7 @@ Usage (STEM):
 
 import os
 import sys
+import time
 import gc
 import argparse
 import random
@@ -54,6 +55,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from pathlib import Path
 from tqdm import tqdm
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+from quadmix.sampling.batch_sampler import resolve_parquet_source
 
 _SPAWN_CTX = mp.get_context("spawn")
 
@@ -637,7 +641,8 @@ def select_manual_ratio(prep_files, domain_candidates, manual_ratio_map, domain_
 def main():
     parser = argparse.ArgumentParser(description="Prepare comparison datasets for nanochat mid-training")
     parser.add_argument("--quadmix-sampled-data", type=str, default=None,
-                        help="Path to QuadMix sampled_dataset.parquet (optional — skip QuadMix baseline if not provided)")
+                        help="Path to QuadMix sampled_dataset directory (or legacy .parquet file). "
+                             "Optional — skip QuadMix baseline if not provided.")
     parser.add_argument("--preprocessed-data-dir", type=str, required=True,
                         help="Path to source shards directory")
     parser.add_argument("--output-dir", type=str, required=True,
@@ -779,14 +784,30 @@ def main():
     print(f"\n[1] Reading QuadMix selected dataset...")
     n_empty = n_too_long = n_repeat = 0
     if not skip_quadmix:
-        qm_schema = set(pq.read_schema(args.quadmix_sampled_data).names)
+        sources = resolve_parquet_source(args.quadmix_sampled_data)
+        qm_schema = set(pq.read_schema(sources[0]).names)
         qm_cols = [c for c in qm_schema if c]
-        quadmix_table = pq.read_table(args.quadmix_sampled_data, columns=qm_cols)
-        col_data = {c: quadmix_table[c].to_pylist() for c in qm_cols}
-        texts = col_data.get("text", [])
+
+        t_read = time.time()
+        quadmix_table = pq.read_table(sources, columns=qm_cols)
+        print(f"  Read {len(sources)} shard(s), {quadmix_table.num_rows:,} rows "
+              f"in {time.time()-t_read:.1f}s")
+
+        t_conv = time.time()
+        texts = (quadmix_table[text_col].to_pylist()
+                 if text_col in quadmix_table.column_names else [])
+        qm_domains = (quadmix_table[domain_col].to_pylist()
+                      if domain_col and domain_col in quadmix_table.column_names
+                      else [None] * len(texts))
+        print(f"  to_pylist(text+domain) in {time.time()-t_conv:.1f}s")
+
+        # Drop text+domain from Arrow table to save memory during filtering;
+        # keep other columns for take() after filtering.
+        exclude_cols = {c for c in (text_col, domain_col) if c}
+        other_cols = [c for c in qm_cols if c not in exclude_cols]
+        quadmix_other = quadmix_table.select(other_cols) if other_cols else None
         del quadmix_table
 
-        qm_domains = col_data.get(domain_col, [None] * len(texts))
         if domain_names is not None and qm_domains:
             non_none = [d for d in qm_domains if d is not None]
             if non_none and all(isinstance(d, (int, np.integer)) and not isinstance(d, bool) for d in non_none):
@@ -794,10 +815,8 @@ def main():
                     (domain_names[d] if 0 <= d < len(domain_names) else None) if d is not None else None
                     for d in qm_domains
                 ]
-                col_data[domain_col] = qm_domains
 
-        if domain_col and domain_col != "domain" and domain_col in col_data:
-            col_data["domain"] = col_data.pop(domain_col)
+        if domain_col and domain_col != "domain":
             qm_cols = ["domain" if c == domain_col else c for c in qm_cols]
 
         max_chars = args.max_chars
@@ -842,9 +861,23 @@ def main():
             token_counts = count_tokens_mp(valid_texts, args.tokenizer_pkl, num_workers=args.num_workers)
         else:
             token_counts = [estimate_tokens(t) for t in valid_texts]
+
+        # Build col_data: take() other columns for valid rows only, then
+        # reuse already-converted text/domain Python strings (no re-conversion).
+        if quadmix_other is not None:
+            final_valid = pa.array(valid_indices_all, type=pa.int64())
+            filtered = quadmix_other.take(final_valid)
+            col_data = {c: filtered[c].to_pylist() for c in other_cols}
+            del quadmix_other, filtered
+        else:
+            col_data = {}
+        col_data[text_col] = [texts[vi] for vi in valid_indices_all]
+        if domain_col:
+            col_data["domain"] = [qm_domains[vi] for vi in valid_indices_all]
+
         quadmix_docs = []
-        for j, vi in enumerate(valid_indices_all):
-            doc = {c: col_data[c][vi] for c in qm_cols}
+        for j in range(len(valid_indices_all)):
+            doc = {c: col_data[c][j] for c in qm_cols}
             doc["token_count"] = token_counts[j]
             if "char_count" not in doc:
                 doc["char_count"] = len(valid_texts[j])

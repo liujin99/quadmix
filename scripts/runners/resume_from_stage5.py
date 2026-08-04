@@ -363,7 +363,7 @@ def main():
         json.dump(summary, f, indent=2,
                   default=lambda x: float(x) if isinstance(x, (np.floating,)) else x)
 
-    sampled_path = os.path.join(output_dir, "sampled_dataset.parquet")
+    sampled_path = os.path.join(output_dir, "sampled_dataset")
     save_sampled_dataset(
         get_text_fn=mm.read_texts,
         num_total_docs=n_docs,
@@ -459,7 +459,7 @@ def main():
     print(f"  Output: {output_dir}/")
     print(f"    ├── optimal_parameters.json")
     print(f"    ├── pipeline_summary.json")
-    print(f"    ├── sampled_dataset.parquet")
+    print(f"    ├── sampled_dataset/")
     print(f"    ├── proxy_experiments/  ({n_copied} exps)")
     print(f"    ├── quadmix_report.md")
     print(f"    ├── fig1_domain_distribution.png")

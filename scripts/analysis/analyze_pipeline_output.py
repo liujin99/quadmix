@@ -65,6 +65,7 @@ from quadmix.pipeline.report import (
     _get_domain_short,
     _str_has_cjk,
 )
+from quadmix.sampling.batch_sampler import resolve_parquet_source
 
 
 # ── CLI ──────────────────────────────────────────────────────────
@@ -78,7 +79,7 @@ def parse_args():
         "--exp-dir",
         required=True,
         help="Pipeline output directory (contains optimal_parameters.json, "
-        "pipeline_summary.json, sampled_dataset.parquet)",
+        "pipeline_summary.json, sampled_dataset/)",
     )
     parser.add_argument(
         "--source-dir",
@@ -1925,7 +1926,9 @@ def _analyze_diversity(
     baseline_info = None
     if baseline_dir:
         bs_path = os.path.join(baseline_dir, "pipeline_summary.json")
-        bd_path = os.path.join(baseline_dir, "sampled_dataset.parquet")
+        bd_dir = os.path.join(baseline_dir, "sampled_dataset")
+        bd_file = os.path.join(baseline_dir, "sampled_dataset.parquet")
+        bd_path = bd_dir if os.path.isdir(bd_dir) else bd_file
         if os.path.exists(bs_path) and os.path.exists(bd_path):
             with open(bs_path) as f:
                 bs = json.load(f)
@@ -2094,7 +2097,15 @@ def main():
 
     params_path = os.path.join(args.exp_dir, "optimal_parameters.json")
     summary_path = os.path.join(args.exp_dir, "pipeline_summary.json")
-    sampled_path = os.path.join(args.exp_dir, "sampled_dataset.parquet")
+    sampled_dir = os.path.join(args.exp_dir, "sampled_dataset")
+    sampled_file = os.path.join(args.exp_dir, "sampled_dataset.parquet")
+    if os.path.isdir(sampled_dir):
+        sampled_path = sampled_dir
+    elif os.path.isfile(sampled_file):
+        sampled_path = sampled_file
+        print(f"  [info] Using legacy single-file format: {sampled_file}")
+    else:
+        sampled_path = sampled_dir
 
     print("=== QuaDMix Pipeline Output Analysis ===\n")
 

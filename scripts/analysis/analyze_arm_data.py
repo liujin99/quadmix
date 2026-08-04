@@ -36,7 +36,7 @@ Usage:
   python scripts/analysis/analyze_arm_data.py \
       --result-dir nanochat_mid_compare/results_stem/<timestamp> \
       --tokenizer /home/ma-user/work/nanochat_model_dir/tokenizer \
-      --sampled-parquet <search_output_dir>/sampled_dataset.parquet
+      --sampled-parquet <search_output_dir>/sampled_dataset
 """
 
 import argparse
@@ -64,6 +64,7 @@ except ImportError:
     )
 
 from quadmix.pipeline.report import _setup_style, _save_fig
+from quadmix.sampling.batch_sampler import resolve_parquet_source
 
 
 _COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
@@ -184,9 +185,9 @@ def _scan_shard(task):
 
 
 def _scan_sampled_arm(parquet_path, quality_cols, domain_names):
-    """Scan a QuadMix sampled_dataset.parquet as an extra 'quadmix' arm.
+    """Scan a QuadMix sampled_dataset directory (or legacy .parquet) as an extra 'quadmix' arm.
 
-    sampled_dataset.parquet (batch_sampler.save_sampled_dataset) carries
+    sampled_dataset (batch_sampler.save_sampled_dataset) carries
     char_count / quality_rank (merged, 0=best) / raw quality_cols / <domain_col>
     (int labels). prepare_data drops quality_rank when building arm parquets, so
     this is the only arm that can show rank<->length. Domain column name is the
@@ -201,7 +202,8 @@ def _scan_sampled_arm(parquet_path, quality_cols, domain_names):
     histograms simply skip this arm (they are redundant with the quadmix_train arm,
     which is the same data pre-packing).
     """
-    schema_names = set(pq.read_schema(parquet_path).names)
+    sources = resolve_parquet_source(parquet_path)
+    schema_names = set(pq.read_schema(sources[0]).names)
     print(f"    [info] sampled columns: {sorted(schema_names)}")
     domain_col = None
     for c in ("category_name", "domain"):
@@ -224,7 +226,7 @@ def _scan_sampled_arm(parquet_path, quality_cols, domain_names):
     need_text = (not has_char_count) and ("text" in schema_names)
     if need_text and "text" not in want:
         want.append("text")
-    table = pq.read_table(parquet_path, columns=want)
+    table = pq.read_table(sources, columns=want)
 
     if has_char_count:
         char_count = np.asarray(table["char_count"].to_numpy(), dtype=np.int64)
@@ -871,8 +873,8 @@ def parse_args():
     )
     p.add_argument(
         "--sampled-parquet", default=None,
-        help="path to a QuadMix sampled_dataset.parquet (search output); scanned as an "
-             "extra 'quadmix' arm. It is the only arm carrying the merged "
+        help="path to a QuadMix sampled_dataset directory (or legacy .parquet); scanned "
+             "as an extra 'quadmix' arm. It is the only arm carrying the merged "
              "quality_rank (0=best) that prepare_data drops, so it enables the "
              "quality_rank<->length Spearman in the quality-length table.",
     )
@@ -1004,7 +1006,7 @@ def main():
 
     if args.sampled_parquet:
         sp = args.sampled_parquet
-        if os.path.isfile(sp):
+        if os.path.isfile(sp) or os.path.isdir(sp):
             print(f"\n  arm 'quadmix': scanning {sp}")
             per_arm["quadmix"] = _scan_sampled_arm(sp, quality_cols, domain_names)
             print(f"    n_docs={len(per_arm['quadmix']['len']):,}  "

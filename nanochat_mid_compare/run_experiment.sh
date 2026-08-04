@@ -10,11 +10,11 @@
 # Usage (after running QuaDMix pipeline, e.g. bash scripts/demo_run_full.sh):
 #   bash nanochat_mid_compare/run_experiment.sh
 #
-# QUADMIX_SAMPLED_DATA defaults to a specific sampled_dataset.parquet path.
+# QUADMIX_SAMPLED_DATA defaults to a specific sampled_dataset path.
 # PREPROCESSED_DATA_DIR defaults to $HOME/.cache/QuaDMix/temp/preprocessed.
 #
 # Override any config via environment variables:
-#   QUADMIX_SAMPLED_DATA=/path/to/sampled_dataset.parquet \
+#   QUADMIX_SAMPLED_DATA=/path/to/sampled_dataset \
 #   PREPROCESSED_DATA_DIR=/path/to/preprocessed \
 #   NANOCHAT_MODEL_DIR=/path/to/.cache/nanochat \
 #   bash nanochat_mid_compare/run_experiment.sh
@@ -31,9 +31,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 QUADMIX_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
-# QuadMix output: sampled_dataset.parquet from QuadMix pipeline
+# QuadMix output: sampled_dataset from QuadMix pipeline
 if [ -z "${QUADMIX_SAMPLED_DATA:-}" ]; then
-    QUADMIX_SAMPLED_DATA="/home/ma-user/work/QuaDMix/result/revalidate_openhermes_20260702_193824/sampled_dataset.parquet"
+    QUADMIX_SAMPLED_DATA="/home/ma-user/work/QuaDMix/result/revalidate_openhermes_20260702_193824/sampled_dataset"
 fi
 
 # Preprocessed shards directory (preprocessed_*.parquet with quality scores)
@@ -95,13 +95,13 @@ RANDOM_MODEL_TAG="${RANDOM_MODEL_TAG:-}"
 # ══════════════════════════════════════════════════════════════
 
 if [ -z "$QUADMIX_SAMPLED_DATA" ]; then
-    echo "ERROR: QUADMIX_SAMPLED_DATA not set and no sampled_dataset.parquet found under $QUADMIX_DIR/result/"
+    echo "ERROR: QUADMIX_SAMPLED_DATA not set and no sampled_dataset found under $QUADMIX_DIR/result/"
     echo "  Run the QuaDMix pipeline first (e.g. bash scripts/demo_run_full.sh),"
-    echo "  or set via: QUADMIX_SAMPLED_DATA=/path/to/sampled_dataset.parquet"
+    echo "  or set via: QUADMIX_SAMPLED_DATA=/path/to/sampled_dataset"
     exit 1
 fi
 
-if [ ! -f "$QUADMIX_SAMPLED_DATA" ]; then
+if [ ! -f "$QUADMIX_SAMPLED_DATA" ] && [ ! -d "$QUADMIX_SAMPLED_DATA" ]; then
     echo "ERROR: QuadMix dataset not found: $QUADMIX_SAMPLED_DATA"
     exit 1
 fi

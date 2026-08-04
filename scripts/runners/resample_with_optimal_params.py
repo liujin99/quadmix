@@ -229,7 +229,7 @@ def main():
     _t = time.time()
     print(f"\n[Stage 7] Saving outputs...")
 
-    sampled_path = os.path.join(output_dir, "sampled_dataset.parquet")
+    sampled_path = os.path.join(output_dir, "sampled_dataset")
     save_sampled_dataset(
         get_text_fn=mm.read_texts,
         num_total_docs=n_docs,
@@ -288,7 +288,7 @@ def main():
     print(f"  Sampling ratio: {len(selected_indices)/n_docs:.4f}x")
     print(f"  Est. tokens:    {total_tokens_est/1e9:.2f}B")
     print(f"  Output: {output_dir}/")
-    print(f"    ├── sampled_dataset.parquet")
+    print(f"    ├── sampled_dataset/")
     print(f"    ├── optimal_parameters.json")
     print(f"    └── resample_summary.json")
     print("=" * 70)

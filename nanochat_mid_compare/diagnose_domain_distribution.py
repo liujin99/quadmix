@@ -2,7 +2,7 @@
 Diagnose domain distribution across QuadMix, Random, and Quality-top-k baselines.
 
 Reads:
-  - sampled_dataset.parquet (QuadMix, has domain column)
+  - sampled_dataset (QuadMix, has domain column)
   - preprocessed_*.parquet (upstream shards with domain + quality scores)
 
 Replicates the selection logic from prepare_data.py to determine which
@@ -10,7 +10,7 @@ documents each baseline would select, then compares domain distributions.
 
 Usage:
     python diagnose_domain_distribution.py \
-        --quadmix-sampled-data /path/to/sampled_dataset.parquet \
+        --quadmix-sampled-data /path/to/sampled_dataset \
         --preprocessed-data-dir /path/to/preprocessed \
         [--quality-methods dclm,fineweb_edu] \
         [--max-shards 500] \
@@ -30,9 +30,10 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+
 from quadmix.constants import DOMAIN_NAMES, DOMAIN_SHORT_NAMES, NUM_DOMAINS
+from quadmix.sampling.batch_sampler import resolve_parquet_source
 
 QUALITY_SCORE_MAP = {
     "dclm": "qs_dclm",
@@ -227,7 +228,7 @@ def main():
     print("=" * 60)
 
     print(f"\n[1/4] Reading QuadMix domain distribution...")
-    qm_table = pq.read_table(args.quadmix_sampled_data, columns=["domain"])
+    qm_table = pq.read_table(resolve_parquet_source(args.quadmix_sampled_data), columns=["domain"])
     qm_domains = qm_table["domain"].to_pylist()
     qm_selected = [(0, i, d) for i, d in enumerate(qm_domains)]
     print(f"  QuadMix docs: {len(qm_domains):,}")
