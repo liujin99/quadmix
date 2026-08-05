@@ -195,7 +195,69 @@ def _scan_shard(task):
     return result
 
 
-def _scan_sampled_arm(parquet_path, quality_cols, domain_names, do_tok=False):
+def _scan_sampled_batch(task):
+    """Process one Arrow RecordBatch from the sampled parquet (worker).
+
+    Each batch (~5000 rows) is streamed from a parquet file by the main
+    process via ``ParquetFile.iter_batches`` and dispatched to a Pool worker.
+    The worker extracts metadata arrays and (optionally) tokenizes text,
+    using the global ``_ENC`` / ``_TOK_THREADS`` initialized by
+    ``_init_tok_worker``.
+    """
+    idx, batch, do_tok, domain_col, quality_cols = task
+    col_names = set(batch.schema.names)
+
+    texts = None
+    if "char_count" in col_names:
+        char_count = np.asarray(
+            batch.column("char_count").to_numpy(zero_copy_only=False),
+            dtype=np.int64)
+    elif "text" in col_names:
+        texts = batch.column("text").to_pylist()
+        char_count = np.array([len(t or "") for t in texts], dtype=np.int64)
+    else:
+        char_count = np.array([], dtype=np.int64)
+
+    tok_lens = None
+    if do_tok and "text" in col_names:
+        if texts is None:
+            texts = batch.column("text").to_pylist()
+        tok_lens = _tokenize_lens(texts)
+
+    dom_labels = None
+    dom = Counter()
+    if domain_col and domain_col in col_names:
+        dom_labels = np.asarray(
+            batch.column(domain_col).to_numpy(zero_copy_only=False))
+        dom = Counter(dom_labels.tolist())
+
+    doc_ids = None
+    if "doc_id" in col_names:
+        doc_ids = np.asarray(
+            batch.column("doc_id").to_numpy(zero_copy_only=False),
+            dtype=np.int64)
+
+    result = {
+        "len": char_count,
+        "tok_lens": tok_lens,
+        "dom_labels": dom_labels,
+        "dom": dom,
+        "doc_ids": doc_ids,
+    }
+    if "quality_rank" in col_names:
+        result["quality_rank"] = np.asarray(
+            batch.column("quality_rank").to_numpy(zero_copy_only=False),
+            dtype=np.float64)
+    for c in (quality_cols or []):
+        if c in col_names:
+            result[c] = np.asarray(
+                batch.column(c).to_numpy(zero_copy_only=False),
+                dtype=np.float64)
+    return result
+
+
+def _scan_sampled_arm(parquet_path, quality_cols, domain_names, do_tok=False,
+                     num_workers=32, tokenizer_path=None, tok_threads=1):
     """Scan a QuadMix sampled_dataset directory (or legacy .parquet) as an extra 'quadmix' arm.
 
     sampled_dataset (batch_sampler.save_sampled_dataset) carries
@@ -204,14 +266,16 @@ def _scan_sampled_arm(parquet_path, quality_cols, domain_names, do_tok=False):
     this is the only arm that can show rank<->length. Domain column name is the
     schema's domain_col (category_name for STEM); falls back to 'domain'.
 
-    Text-free when possible: reads only the needed columns (no tokenizer, no
-    packing sim) -> fast & low-memory. Length is taken from char_count (==
-    len(text) as written by save_sampled_dataset). Older search outputs predate
-    the char_count column (added in 0e7bd0c); for those, fall back to reading
-    the 'text' column and computing len(text) per doc so the rank<->length
-    Spearman still works. ent/rep/div are left empty so the text-only
-    histograms simply skip this arm (they are redundant with the quadmix_train arm,
-    which is the same data pre-packing).
+    Parallelized: streams the parquet files in ~5000-row batches via
+    ``ParquetFile.iter_batches`` and dispatches each batch to a Pool worker
+    (``_scan_sampled_batch``) for metadata extraction + tokenization.  This
+    replaces the old single-threaded ``pq.read_table`` + ``to_pylist`` +
+    ``_tokenize_lens`` pipeline that bottlenecked on 1 core regardless of
+    ``--num-workers``.
+
+    ent/rep/div are left empty so the text-only histograms simply skip this arm
+    (they are redundant with the quadmix_train arm, which is the same data
+    pre-packing).
     """
     sources = resolve_parquet_source(parquet_path)
     schema_names = set(pq.read_schema(sources[0]).names)
@@ -239,51 +303,74 @@ def _scan_sampled_arm(parquet_path, quality_cols, domain_names, do_tok=False):
         want.append("text")
     if do_tok and "text" in schema_names and "text" not in want:
         want.append("text")
-    table = pq.read_table(sources, columns=want)
 
-    texts = None
-    if has_char_count:
-        char_count = np.asarray(table["char_count"].to_numpy(), dtype=np.int64)
-    elif need_text:
-        texts = table["text"].to_pylist()
-        char_count = np.array([len(t or "") for t in texts], dtype=np.int64)
-        print(f"    [info] no 'char_count' column (pre-0e7bd0c search output); "
-              f"computed char length from {len(texts):,} texts")
-    else:
-        char_count = np.array([], dtype=np.int64)
+    if not has_char_count and not need_text:
         print(f"    [warn] no 'char_count' and no 'text' column; length unavailable")
+    if need_text:
+        print(f"    [info] no 'char_count' column (pre-0e7bd0c search output); "
+              f"will compute char length from text in workers")
 
-    tok_lens = None
-    if do_tok and "text" in table.column_names:
-        if texts is None:
-            texts = table["text"].to_pylist()
-        tok_lens = _tokenize_lens(texts)
-        if tok_lens is not None:
-            print(f"    [info] tokenized {len(tok_lens):,} sampled docs for tok_len")
+    # ── stream batches and process in parallel ──
+    from multiprocessing import Pool
+    from tqdm import tqdm
 
-    dom_labels = None
-    dom = Counter()
-    if domain_col and domain_col in table.column_names:
-        dom_labels = np.asarray(table[domain_col].to_numpy())
-        dom = Counter(dom_labels.tolist())
-        if domain_names:
-            dom = _normalize_domain(dom, domain_names)
-            _map = {i: n for i, n in enumerate(domain_names)}
-            dom_labels = np.array([
-                _map.get(int(d), str(d)) if isinstance(d, (int, np.integer)) and not isinstance(d, bool) else d
-                for d in dom_labels
-            ])
+    tasks = []
+    for path in sources:
+        pf = pq.ParquetFile(path)
+        for batch in pf.iter_batches(batch_size=5000, columns=want):
+            tasks.append((len(tasks), batch, do_tok, domain_col, quality_cols))
 
-    doc_ids = None
-    if "doc_id" in table.column_names:
-        doc_ids = np.asarray(table["doc_id"].to_numpy(), dtype=np.int64)
+    n_docs = sum(t[1].num_rows for t in tasks)
+    print(f"    [info] {len(tasks)} batches from {len(sources)} files "
+          f"({n_docs:,} rows, batch_size=5000)")
+
+    L, TOK, DOM = [], [], Counter()
+    dom_labels_all, doc_ids_all, extra_arrays = [], [], {}
+
+    with Pool(num_workers, initializer=_init_tok_worker,
+              initargs=(tokenizer_path, tok_threads)) as pool:
+        for result in tqdm(
+            pool.imap_unordered(_scan_sampled_batch, tasks, chunksize=1),
+            total=len(tasks), desc="  quadmix", leave=False,
+        ):
+            L.append(result["len"])
+            if result.get("tok_lens") is not None:
+                TOK.append(result["tok_lens"])
+            if result["dom"]:
+                DOM.update(result["dom"])
+            if result.get("dom_labels") is not None:
+                dom_labels_all.extend(result["dom_labels"])
+            if result.get("doc_ids") is not None:
+                doc_ids_all.append(result["doc_ids"])
+            for key, val in result.items():
+                if key in ("len", "tok_lens", "dom_labels", "dom", "doc_ids"):
+                    continue
+                if isinstance(val, np.ndarray):
+                    extra_arrays.setdefault(key, []).append(val)
+
+    char_count = np.concatenate(L) if L else np.array([], dtype=np.int64)
+    tok_lens = np.concatenate(TOK) if TOK else None
+    if tok_lens is not None:
+        print(f"    [info] tokenized {len(tok_lens):,} sampled docs for tok_len")
+
+    if domain_names:
+        DOM = _normalize_domain(DOM, domain_names)
+        _dmap = {i: n for i, n in enumerate(domain_names)}
+        dom_labels_all = [
+            _dmap.get(int(d), str(d))
+            if isinstance(d, (int, np.integer)) and not isinstance(d, bool)
+            else d
+            for d in dom_labels_all
+        ]
+    dom_labels = np.array(dom_labels_all) if dom_labels_all else None
+    doc_ids = np.concatenate(doc_ids_all) if doc_ids_all else None
 
     pa = {
         "len": char_count,
         "ent": np.array([], dtype=np.float32),
         "rep": np.array([], dtype=np.float32),
         "div": np.array([], dtype=np.float32),
-        "domain": dom,
+        "domain": DOM,
         "has_domain": domain_col is not None,
         "dom_labels": dom_labels,
         "text_hashes": [],
@@ -292,11 +379,9 @@ def _scan_sampled_arm(parquet_path, quality_cols, domain_names, do_tok=False):
         "boundaries": None,
         "char_count": char_count,
     }
-    if "quality_rank" in table.column_names:
-        pa["quality_rank"] = np.asarray(table["quality_rank"].to_numpy(), dtype=np.float64)
-    for c in (quality_cols or []):
-        if c in table.column_names:
-            pa[c] = np.asarray(table[c].to_numpy(), dtype=np.float64)
+    for key, arrs in extra_arrays.items():
+        if arrs:
+            pa[key] = np.concatenate(arrs)
     return pa
 
 
@@ -1151,9 +1236,10 @@ def main():
         sp = args.sampled_parquet
         if os.path.isfile(sp) or os.path.isdir(sp):
             print(f"\n  arm 'quadmix': scanning {sp}")
-            if do_tok:
-                _init_tok_worker(tokenizer_path, args.tokenizer_threads)
-            per_arm["quadmix"] = _scan_sampled_arm(sp, quality_cols, domain_names, do_tok=do_tok)
+            per_arm["quadmix"] = _scan_sampled_arm(
+                sp, quality_cols, domain_names, do_tok=do_tok,
+                num_workers=num_workers, tokenizer_path=tokenizer_path,
+                tok_threads=args.tokenizer_threads)
             print(f"    n_docs={len(per_arm['quadmix']['len']):,}  "
                   f"has quality_rank={'quality_rank' in per_arm['quadmix']}")
         else:
