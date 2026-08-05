@@ -503,6 +503,7 @@ run_mid_training() {
         --core-metric-every="$CORE_METRIC_EVERY" \
         --eval-every="$EVAL_EVERY" \
         --eval-benchmarks="$EVAL_BENCHMARKS" \
+        --sample-every=-1 \
         --data-dir="$DATA_PATH" \
         2>&1 | tee "$LOG_FILE"
     popd > /dev/null
