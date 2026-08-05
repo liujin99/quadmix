@@ -64,6 +64,7 @@ exec > >(tee "$RESULT_DIR/experiment.log") 2>&1
 # ── Mid-training hyperparameters ──
 TARGET_PARAM_DATA_RATIO="${TARGET_PARAM_DATA_RATIO:-0.5}"
 DATA_MULTIPLIER="${DATA_MULTIPLIER:-2.5}"
+LOADER="${LOADER:-flat}"
 DEVICE_BATCH_SIZE="${DEVICE_BATCH_SIZE:-1}"
 NUM_NPU="${NUM_NPU:-8}"
 CORE_METRIC_EVERY="${CORE_METRIC_EVERY:--1}"
@@ -505,6 +506,7 @@ run_mid_training() {
         --eval-benchmarks="$EVAL_BENCHMARKS" \
         --sample-every=-1 \
         --data-dir="$DATA_PATH" \
+        --loader="$LOADER" \
         2>&1 | tee "$LOG_FILE"
     popd > /dev/null
 }
