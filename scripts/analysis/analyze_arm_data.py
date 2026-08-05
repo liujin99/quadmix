@@ -17,8 +17,18 @@ Outputs (into --output-dir, default = --result-dir):
   fig_arm_boundaries.png    — doc-boundaries per 2k packed row histograms
                               (needs --tokenizer; skipped otherwise)
   fig_arm_domain.png        — domain distribution grouped bars (needs domain col)
+  fig_length_by_domain.png  — per-arm × per-domain length boxplots
+  fig_entropy_by_domain.png — per-arm × per-domain entropy boxplots
+  fig_repetition_by_domain.png — per-arm × per-domain repetition boxplots
+  fig_diversity_by_domain.png  — per-arm × per-domain diversity boxplots
+  fig_loss_curves.png       — overlaid training-loss step curves from
+                              mid_train_*.log (needs --log-dir or logs in
+                              --result-dir; skipped if no logs found)
   arm_data_comparison.txt   — per-arm doc/token counts + metric percentiles +
-                              domain mix + token-length & boundary stats
+                              domain mix + per-domain length/entropy/repetition/
+                              diversity stats + token-length & boundary stats
+  loss_curve_summary.txt    — initial loss, convergence step, final loss per arm
+                              (only when training logs are found)
   quality_length_corr.txt   — Spearman(quality_signal, char_count) per arm.
                               Signals: raw quality_cols for every arm that
                               preserves them + the merged quality_rank (0=best)
@@ -44,6 +54,7 @@ import hashlib
 import json
 import os
 import pickle
+import re
 import sys
 from collections import Counter
 from pathlib import Path
@@ -467,7 +478,8 @@ def _fig_domain(per_arm, out_dir):
 
 def _fig_length_by_domain(per_arm, domain_names, out_dir,
                           field="len", y_label="log10(char length)",
-                          filename="fig_length_by_domain.png", ref_line=None):
+                          filename="fig_length_by_domain.png", ref_line=None,
+                          log_scale=True):
     arms_with = {l: a for l, a in per_arm.items()
                  if a.get("dom_labels") is not None and len(a["dom_labels"])
                  and a.get(field) is not None and len(a[field])}
@@ -488,17 +500,22 @@ def _fig_length_by_domain(per_arm, domain_names, out_dir,
             mask = arm["dom_labels"] == d
             vals = arm[field][mask]
             if len(vals):
-                data.append(np.log10(np.maximum(vals, 1)))
+                if log_scale:
+                    data.append(np.log10(np.maximum(vals, 1)))
+                else:
+                    data.append(vals)
                 labels.append(str(d))
         if data:
             ax.boxplot(data, showfliers=False)
             ax.set_xticklabels(labels)
         if ref_line is not None:
-            ax.axhline(np.log10(ref_line), color="0.5", ls="--", lw=0.8, zorder=0)
+            ax.axhline(np.log10(ref_line) if log_scale else ref_line,
+                       color="0.5", ls="--", lw=0.8, zorder=0)
         ax.set_title(f"{label}")
         ax.set_ylabel(y_label)
         ax.tick_params(axis='x', rotation=30)
-    fig.suptitle("Document length by domain", fontsize=13)
+    fig.suptitle(f"{field} by domain" if field != "len" else "Document length by domain",
+                fontsize=13)
     _save_fig(fig, out_dir, filename)
 
 
@@ -791,6 +808,99 @@ def _detect_duplicates(per_arm, domain_names, out_dir):
     _fig_duplicates(per_arm, out_dir)
 
 
+# ── training loss curves ─────────────────────────────────────────
+
+_STEP_RE = re.compile(
+    r"step\s+(\d+)/(\d+)\s+\(.*?\)\s+\|\s+loss:\s+([\d.]+)"
+)
+
+_LOG_LABEL_MAP = {
+    "quadmix": "QuadMix",
+    "random": "Random",
+    "manual_ratio": "Manual Ratio",
+}
+
+
+def _parse_loss_curve(log_path):
+    """Parse a mid_train log and return (steps, losses) arrays."""
+    if not log_path or not os.path.isfile(log_path):
+        return None
+    steps, losses = [], []
+    with open(log_path, errors="replace") as f:
+        for line in f:
+            m = _STEP_RE.search(line)
+            if m:
+                steps.append(int(m.group(1)))
+                losses.append(float(m.group(3)))
+    if not steps:
+        return None
+    return np.array(steps), np.array(losses)
+
+
+def _find_train_logs(log_dir):
+    """Find mid_train_*.log files and map arm key → path."""
+    if not log_dir or not os.path.isdir(log_dir):
+        return {}
+    out = {}
+    for name in os.listdir(log_dir):
+        if not name.startswith("mid_train_") or not name.endswith(".log"):
+            continue
+        arm = name[len("mid_train_"):-len(".log")]
+        out[arm] = os.path.join(log_dir, name)
+    return out
+
+
+def _fig_loss_curves(log_dir, out_dir):
+    """Plot overlaid training-loss curves for all arms that have logs."""
+    log_map = _find_train_logs(log_dir)
+    if not log_map:
+        print("  [skip] fig_loss_curves: no mid_train_*.log files found")
+        return
+    curves = {}
+    for arm, path in sorted(log_map.items()):
+        c = _parse_loss_curve(path)
+        if c is not None:
+            curves[arm] = c
+    if not curves:
+        print("  [skip] fig_loss_curves: no step/loss data parsed from logs")
+        return
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for i, (arm, (steps, losses)) in enumerate(sorted(curves.items())):
+        label = _LOG_LABEL_MAP.get(arm, arm)
+        ax.plot(steps, losses, label=label, color=_COLORS[i % len(_COLORS)],
+                linewidth=1.5)
+    ax.set_xlabel("Training step")
+    ax.set_ylabel("Training loss")
+    ax.set_title("Training loss curves by arm")
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
+    _save_fig(fig, out_dir, "fig_loss_curves.png")
+    return curves
+
+
+def _write_loss_summary(curves, out_dir):
+    """Write loss-curve summary: initial loss, convergence step, final loss."""
+    lines = ["=== Training Loss Curve Summary ===", ""]
+    for arm, (steps, losses) in sorted(curves.items()):
+        label = _LOG_LABEL_MAP.get(arm, arm)
+        lines.append(f"[{label}]")
+        lines.append(f"  total_steps  : {len(steps)}")
+        n_init = min(3, len(losses))
+        init_loss = float(losses[:n_init].mean())
+        lines.append(f"  initial_loss : {init_loss:.4f}  (avg of first {n_init} steps)")
+        conv_idx = np.argmax(losses < 1.0) if np.any(losses < 1.0) else -1
+        if conv_idx >= 0:
+            lines.append(f"  conv_step    : {int(steps[conv_idx])}  (first step loss<1.0)")
+        else:
+            lines.append(f"  conv_step    : N/A  (loss never dropped below 1.0)")
+        lines.append(f"  final_loss   : {float(losses[-1]):.4f}")
+        lines.append("")
+    path = os.path.join(out_dir, "loss_curve_summary.txt")
+    with open(path, "w") as f:
+        f.write("\n".join(lines))
+    print(f"  [Text] Saved: {path}")
+
+
 # ── text summary ─────────────────────────────────────────────────
 
 
@@ -847,16 +957,27 @@ def _write_txt(per_arm, stats, seq_len, out_dir):
         dom_labels = a.get("dom_labels")
         if dom_labels is not None and len(dom_labels) and len(a["len"]):
             all_doms = sorted(set(str(d) for d in dom_labels))
-            lines.append("  per-domain length (chars):")
-            for d in all_doms:
-                mask = np.array([str(dl) == d for dl in dom_labels])
-                dv = a["len"][mask]
-                if len(dv):
-                    lines.append(
-                        f"    {d:>12s}  n={len(dv):>8,}  mean={dv.mean():>8.0f}  "
-                        f"median={np.median(dv):>8.0f}  p25={np.percentile(dv, 25):>8.0f}  "
-                        f"p75={np.percentile(dv, 75):>8.0f}"
-                    )
+            for key, name, fmt in [
+                ("len", "length(chars)", "0f"),
+                ("ent", "entropy(bits)", ".4f"),
+                ("rep", "repetition", ".4f"),
+                ("div", "diversity", ".4f"),
+            ]:
+                vals = a.get(key)
+                if vals is None or not len(vals):
+                    continue
+                lines.append(f"  per-domain {name}:")
+                for d in all_doms:
+                    mask = np.array([str(dl) == d for dl in dom_labels])
+                    dv = vals[mask]
+                    if len(dv):
+                        lines.append(
+                            f"    {d:>12s}  n={len(dv):>8,}  "
+                            f"mean={dv.mean():>8{fmt}}  "
+                            f"median={np.median(dv):>8{fmt}}  "
+                            f"p25={np.percentile(dv, 25):>8{fmt}}  "
+                            f"p75={np.percentile(dv, 75):>8{fmt}}"
+                        )
         for qk in ("char_count", "token_count"):
             qv = a.get(qk)
             if qv is not None and len(qv):
@@ -890,6 +1011,12 @@ def parse_args():
              "quality_rank<->length Spearman in the quality-length table.",
     )
     p.add_argument("--output-dir", default=None, help="Where to write outputs (default: --result-dir)")
+    p.add_argument(
+        "--log-dir", default=None,
+        help="dir containing mid_train_*.log files (default: --result-dir). "
+             "When present, parses step-by-step loss and generates fig_loss_curves.png "
+             "+ loss_curve_summary.txt",
+    )
     p.add_argument("--num-workers", type=int, default=None, help="multiprocessing workers")
     p.add_argument(
         "--tokenizer", default=None,
@@ -1057,10 +1184,23 @@ def main():
               "fig_token_length_by_domain: pass --tokenizer to enable")
     _fig_domain(per_arm, out_dir)
     _fig_length_by_domain(per_arm, domain_names, out_dir)
+    _fig_length_by_domain(per_arm, domain_names, out_dir, field="ent",
+                          y_label="entropy (bits)",
+                          filename="fig_entropy_by_domain.png", log_scale=False)
+    _fig_length_by_domain(per_arm, domain_names, out_dir, field="rep",
+                          y_label="repetition fraction",
+                          filename="fig_repetition_by_domain.png", log_scale=False)
+    _fig_length_by_domain(per_arm, domain_names, out_dir, field="div",
+                          y_label="lexical diversity (type/token)",
+                          filename="fig_diversity_by_domain.png", log_scale=False)
     _quality_length_correlation(per_arm, quality_cols, out_dir)
     _fig_quality_hist(per_arm, quality_cols, out_dir)
     _detect_duplicates(per_arm, domain_names, out_dir)
     _write_txt(per_arm, stats, args.seq_len, out_dir)
+    log_dir = args.log_dir or str(result_dir)
+    curves = _fig_loss_curves(log_dir, out_dir)
+    if curves:
+        _write_loss_summary(curves, out_dir)
     print("\nDone.")
 
 
