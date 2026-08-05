@@ -150,12 +150,15 @@ def _worker_encode_batch(texts):
 
 def load_tokenizer(tokenizer_pkl_path):
     if not tokenizer_pkl_path or not os.path.exists(tokenizer_pkl_path):
+        if tokenizer_pkl_path:
+            print(f"  WARNING: tokenizer not found at {tokenizer_pkl_path}")
         return None
     try:
         with open(tokenizer_pkl_path, "rb") as f:
             enc = pickle.load(f)
         if hasattr(enc, "encode_ordinary"):
             return enc
+        print("  WARNING: tokenizer loaded but missing encode_ordinary method")
         return None
     except Exception as e:
         print(f"  WARNING: Failed to load tokenizer: {e}")
@@ -610,6 +613,79 @@ def parse_manual_ratio(manual_ratio_str, domain_names):
     return ratio_map
 
 
+def calibrate_tokens_per_char(prep_files, domain_candidates, domain_names,
+                               tokenizer_pkl, num_workers, enc, text_col,
+                               sample_per_domain=2000, seed=42):
+    """Sample docs per domain, tokenize, compute per-domain tokens/char ratio.
+
+    Returns {domain_id: ratio} dict, or None if tokenizer unavailable.
+    The ratio replaces the default 0.25 (char_count // 4) heuristic to
+    correct cross-domain token/char variance (Chinese vs ASCII content).
+    """
+    if not tokenizer_pkl or enc is None:
+        print("  WARNING: tokenizer unavailable, skipping tokens/char calibration "
+              "(falling back to char_count // 4)")
+        return None
+
+    rng = np.random.RandomState(seed)
+    cal_selections = []
+    domain_ranges = {}
+
+    for domain_id, (shard_ids, doc_ids, _) in domain_candidates.items():
+        n = len(doc_ids)
+        if n == 0:
+            continue
+        k = min(sample_per_domain, n)
+        sample_idx = rng.choice(n, size=k, replace=False)
+        start = len(cal_selections)
+        for i in sample_idx:
+            cal_selections.append((int(shard_ids[i]), int(doc_ids[i])))
+        domain_ranges[domain_id] = (start, len(cal_selections))
+
+    if not cal_selections:
+        return None
+
+    print(f"  Calibrating tokens/char ratio (sampling {len(cal_selections):,} docs)...")
+    cal_docs = read_docs_from_shards(
+        prep_files, cal_selections, num_workers=num_workers,
+        desc="  Reading calibration samples", text_col=text_col,
+        max_char_repeat_ratio=0,
+    )
+    if not cal_docs:
+        print("  WARNING: calibration sampling returned 0 docs, falling back to 0.25")
+        return None
+
+    cal_texts = [d["text"] for d in cal_docs if d.get("text")]
+    if not cal_texts:
+        print("  WARNING: no text in calibration samples, falling back to 0.25")
+        return None
+
+    cal_token_counts = count_tokens_mp(cal_texts, tokenizer_pkl, num_workers=num_workers)
+
+    doc_idx = 0
+    domain_ratios = {}
+    for domain_id, (start, end) in domain_ranges.items():
+        domain_chars = 0
+        domain_tokens = 0
+        for i in range(start, end):
+            if i >= len(cal_docs) or not cal_docs[i].get("text"):
+                continue
+            domain_chars += len(cal_docs[i]["text"])
+            if doc_idx < len(cal_token_counts):
+                domain_tokens += cal_token_counts[doc_idx]
+            doc_idx += 1
+        if domain_chars > 0:
+            ratio = domain_tokens / domain_chars
+        else:
+            ratio = 0.25
+        domain_ratios[domain_id] = ratio
+        name = domain_names[domain_id] if domain_id < len(domain_names) else f"domain_{domain_id}"
+        delta = (ratio - 0.25) / 0.25 * 100
+        print(f"    {name}: tokens/char={ratio:.4f} (vs 0.25 default, {'+'if delta>=0 else ''}{delta:.1f}%)")
+
+    return domain_ratios
+
+
 def select_manual_ratio(prep_files, domain_candidates, manual_ratio_map, domain_names,
                         total_tokens, tokenizer_pkl=None, num_workers=None, enc=None, text_col="text",
                         max_char_repeat_ratio=0, domain_col=None,
@@ -628,6 +704,21 @@ def select_manual_ratio(prep_files, domain_candidates, manual_ratio_map, domain_
         domain_id = name_to_id[domain_name]
         pct = ratio / total_ratio * 100
         print(f"    {domain_name} (id={domain_id}): {pct:.1f}% -> ~{int(domain_budgets[domain_id]):,} est tokens")
+
+    if enc and tokenizer_pkl:
+        domain_ratios = calibrate_tokens_per_char(
+            prep_files, domain_candidates, domain_names,
+            tokenizer_pkl, num_workers, enc, text_col,
+        )
+        if domain_ratios:
+            for did in list(domain_candidates.keys()):
+                shard_ids, doc_ids, old_est = domain_candidates[did]
+                ratio = domain_ratios.get(did, 0.25)
+                corrected = (old_est.astype(np.float64) * (ratio / 0.25)).astype(np.int64)
+                domain_candidates[did] = (shard_ids, doc_ids, corrected)
+    else:
+        print("  WARNING: tokenizer unavailable, skipping tokens/char calibration "
+              "(domain ratios may deviate from target due to char_count // 4 heuristic)")
 
     mr_selected = []
     mr_est_tokens = 0
@@ -710,8 +801,13 @@ def main():
                         help="Path to source shards directory")
     parser.add_argument("--output-dir", type=str, required=True,
                         help="Output directory for the datasets")
-    parser.add_argument("--tokenizer-pkl", type=str, default=None,
-                        help="Path to nanochat tokenizer.pkl for accurate token counting")
+    parser.add_argument("--tokenizer-pkl", type=str,
+                        default=os.path.join(
+                            os.environ.get("NANOCHAT_MODEL_DIR",
+                                           "/home/ma-user/work/nanochat_model_dir"),
+                            "tokenizer", "tokenizer.pkl"),
+                        help="Path to nanochat tokenizer.pkl for accurate token counting "
+                             "(default: $NANOCHAT_MODEL_DIR/tokenizer/tokenizer.pkl)")
     parser.add_argument("--schema", type=str, default=None,
                         help="YAML schema config file. If not specified, uses essential-web defaults.")
     parser.add_argument("--file-pattern", type=str, default=None,
