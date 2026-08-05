@@ -184,7 +184,7 @@ def _scan_shard(task):
     return result
 
 
-def _scan_sampled_arm(parquet_path, quality_cols, domain_names):
+def _scan_sampled_arm(parquet_path, quality_cols, domain_names, do_tok=False):
     """Scan a QuadMix sampled_dataset directory (or legacy .parquet) as an extra 'quadmix' arm.
 
     sampled_dataset (batch_sampler.save_sampled_dataset) carries
@@ -226,8 +226,11 @@ def _scan_sampled_arm(parquet_path, quality_cols, domain_names):
     need_text = (not has_char_count) and ("text" in schema_names)
     if need_text and "text" not in want:
         want.append("text")
+    if do_tok and "text" in schema_names and "text" not in want:
+        want.append("text")
     table = pq.read_table(sources, columns=want)
 
+    texts = None
     if has_char_count:
         char_count = np.asarray(table["char_count"].to_numpy(), dtype=np.int64)
     elif need_text:
@@ -238,6 +241,14 @@ def _scan_sampled_arm(parquet_path, quality_cols, domain_names):
     else:
         char_count = np.array([], dtype=np.int64)
         print(f"    [warn] no 'char_count' and no 'text' column; length unavailable")
+
+    tok_lens = None
+    if do_tok and "text" in table.column_names:
+        if texts is None:
+            texts = table["text"].to_pylist()
+        tok_lens = _tokenize_lens(texts)
+        if tok_lens is not None:
+            print(f"    [info] tokenized {len(tok_lens):,} sampled docs for tok_len")
 
     dom_labels = None
     dom = Counter()
@@ -266,7 +277,7 @@ def _scan_sampled_arm(parquet_path, quality_cols, domain_names):
         "dom_labels": dom_labels,
         "text_hashes": [],
         "doc_ids": doc_ids,
-        "tok_len": None,
+        "tok_len": tok_lens,
         "boundaries": None,
         "char_count": char_count,
     }
@@ -976,6 +987,11 @@ def main():
                         extra_arrays.setdefault(key, []).append(val)
         if domain_names:
             dom = _normalize_domain(dom, domain_names)
+            _dmap = {i: n for i, n in enumerate(domain_names)}
+            dom_labels_all = [
+                _dmap.get(int(d), str(d)) if isinstance(d, (int, np.integer)) and not isinstance(d, bool) else d
+                for d in dom_labels_all
+            ]
         pa = {
             "len": np.concatenate(L) if L else np.array([], dtype=np.int64),
             "ent": np.concatenate(E) if E else np.array([], dtype=np.float32),
@@ -1008,7 +1024,9 @@ def main():
         sp = args.sampled_parquet
         if os.path.isfile(sp) or os.path.isdir(sp):
             print(f"\n  arm 'quadmix': scanning {sp}")
-            per_arm["quadmix"] = _scan_sampled_arm(sp, quality_cols, domain_names)
+            if do_tok:
+                _init_tok_worker(tokenizer_path, args.tokenizer_threads)
+            per_arm["quadmix"] = _scan_sampled_arm(sp, quality_cols, domain_names, do_tok=do_tok)
             print(f"    n_docs={len(per_arm['quadmix']['len']):,}  "
                   f"has quality_rank={'quality_rank' in per_arm['quadmix']}")
         else:
