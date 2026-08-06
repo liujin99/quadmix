@@ -52,6 +52,7 @@ BASE_MODEL_TAG="${BASE_MODEL_TAG:-d28}"
 
 # Nanochat repo root
 NANOCHAT_REPO="${NANOCHAT_REPO:-/home/ma-user/work/nanochat-npu}"
+export NANOCHAT_REPO
 
 # Mid-training checkpoint output directory
 MID_CHECKPOINTS_OUTPUT_DIR="${MID_CHECKPOINTS_OUTPUT_DIR:-$SCRIPT_DIR/checkpoints}"
@@ -70,6 +71,14 @@ NUM_NPU="${NUM_NPU:-8}"
 CORE_METRIC_EVERY="${CORE_METRIC_EVERY:--1}"
 EVAL_EVERY="${EVAL_EVERY:--1}"
 EVAL_BENCHMARKS="${EVAL_BENCHMARKS:-stem}"
+
+# ── Anti-forgetting data mixing ──
+# Mix STEM data with ClimbMix general data to prevent catastrophic forgetting.
+# References: MAI-Thinking-1 (10% General), Apple Intelligence ("some fraction of bulk pre-train data")
+MIX_GENERAL_DATA="${MIX_GENERAL_DATA:-1}"
+STEM_RATIO="${STEM_RATIO:-0.7}"
+KEEP_MIXED_DATA="${KEEP_MIXED_DATA:-0}"
+export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 
 # Data preparation
 SHARD_SIZE="${SHARD_SIZE:-10000}"
@@ -358,6 +367,117 @@ echo "╚═══════════════════════�
 echo ""
 
 # ══════════════════════════════════════════════════════════════
+#  PRE-FLIGHT: DISK SPACE CHECK (before mixing + checkpoint writing)
+# ══════════════════════════════════════════════════════════════
+
+echo ""
+echo "╔══ Pre-flight: Disk space check ══╗"
+echo ""
+
+CKPT_DIR="${MID_CHECKPOINTS_OUTPUT_DIR}"
+mkdir -p "$CKPT_DIR"
+
+CKPT_NEEDED_GB=60
+DATA_SIZE_KB=$(du -sk "$DATA_DIR" 2>/dev/null | awk '{print $1}')
+DATA_SIZE_GB=$((DATA_SIZE_KB / 1024 / 1024))
+
+if [ "$MIX_GENERAL_DATA" = "1" ]; then
+    MIXED_GB=$DATA_SIZE_GB
+    CLIMBMIX_GB=8
+else
+    MIXED_GB=0
+    CLIMBMIX_GB=0
+fi
+BUFFER_GB=10
+MIN_REQUIRED_GB=$((CKPT_NEEDED_GB + MIXED_GB + CLIMBMIX_GB + BUFFER_GB))
+
+AVAILABLE_KB=$(df -P "$CKPT_DIR" | awk 'NR==2{print $4}')
+AVAILABLE_GB=$((AVAILABLE_KB / 1024 / 1024))
+
+echo "  Available space:   ${AVAILABLE_GB}GB"
+echo "  Minimum needed:    ${MIN_REQUIRED_GB}GB"
+echo "    Checkpoints:     ${CKPT_NEEDED_GB}GB (3 × ~20GB)"
+echo "    STEM data:       ${DATA_SIZE_GB}GB (already on disk)"
+if [ "$MIX_GENERAL_DATA" = "1" ]; then
+    echo "    Mixed data:      ${MIXED_GB}GB (= STEM data size)"
+    echo "    ClimbMix dl:     ${CLIMBMIX_GB}GB (adaptive download)"
+fi
+echo "    Buffer:          ${BUFFER_GB}GB"
+
+if [ "$AVAILABLE_GB" -lt "$MIN_REQUIRED_GB" ]; then
+    echo ""
+    echo "  ERROR: Insufficient disk space!"
+    echo "  Available: ${AVAILABLE_GB}GB < Required: ${MIN_REQUIRED_GB}GB"
+    echo ""
+    echo "  Options:"
+    echo "    1. Set MID_CHECKPOINTS_OUTPUT_DIR to a partition with more space"
+    echo "    2. Free up space on the current partition"
+    echo "    3. Set MIX_GENERAL_DATA=0 to skip data mixing"
+    echo ""
+    echo "╚══════════════════════════════════════════════════════════╝"
+    exit 1
+fi
+
+echo "  ✓ Disk space sufficient"
+echo ""
+echo "╚══════════════════════════════════════════════════════════╝"
+echo ""
+
+# ══════════════════════════════════════════════════════════════
+#  STEP 1.5: MIX STEM WITH CLIMBMIX (anti-forgetting)
+# ══════════════════════════════════════════════════════════════
+
+QUADMIX_DATA="$DATA_DIR/quadmix_data"
+RANDOM_DATA="$DATA_DIR/random_data"
+MANUAL_RATIO_DATA="$DATA_DIR/manual_ratio_data"
+CLIMBMIX_DIR="$DATA_DIR/climbmix_shards"
+
+if [ "$MIX_GENERAL_DATA" = "1" ]; then
+    echo ""
+    echo "╔══ Step 1.5: Mix STEM + ClimbMix (anti-forgetting) ══╗"
+    echo ""
+    echo "  STEM ratio: $STEM_RATIO (general data: $(python3 -c "print(1-$STEM_RATIO)"))"
+    echo "  ClimbMix: adaptive shard count (from end, no overlap with pretrain 0-999)"
+    echo ""
+
+    MIX_SCRIPT="$SCRIPT_DIR/mix_general_data.py"
+
+    mix_one() {
+        local STEM_DIR="$1"
+        local MIXED_DIR="$2"
+        local LABEL="$3"
+
+        if [ ! -d "$STEM_DIR" ]; then
+            echo "  Skipping $LABEL: $STEM_DIR not found"
+            return 0
+        fi
+
+        echo "  Mixing $LABEL..."
+        python3 "$MIX_SCRIPT" \
+            --stem-dir "$STEM_DIR" \
+            --output-dir "$MIXED_DIR" \
+            --climbmix-dir "$CLIMBMIX_DIR" \
+            --stem-ratio "$STEM_RATIO" \
+            --num-workers "$NUM_NPU" \
+            || { echo "  ERROR: mixing failed for $LABEL"; return 1; }
+    }
+
+    mix_one "$QUADMIX_DATA" "$DATA_DIR/quadmix_mixed" "QuadMix"
+    mix_one "$RANDOM_DATA" "$DATA_DIR/random_mixed" "Random"
+    if [ -d "$MANUAL_RATIO_DATA" ]; then
+        mix_one "$MANUAL_RATIO_DATA" "$DATA_DIR/manual_ratio_mixed" "Manual Ratio"
+    fi
+
+    QUADMIX_DATA="$DATA_DIR/quadmix_mixed"
+    RANDOM_DATA="$DATA_DIR/random_mixed"
+    MANUAL_RATIO_DATA="$DATA_DIR/manual_ratio_mixed"
+
+    echo ""
+    echo "╚════════════════════════════════════════════════════════════╝"
+    echo ""
+fi
+
+# ══════════════════════════════════════════════════════════════
 #  STEP 2: SETUP MID_CHECKPOINTS DIRECTORY
 # ══════════════════════════════════════════════════════════════
 
@@ -398,51 +518,12 @@ if [ -n "$MID_CHECKPOINTS_OUTPUT_DIR" ]; then
 fi
 
 # ══════════════════════════════════════════════════════════════
-#  PRE-FLIGHT: DISK SPACE CHECK
-# ══════════════════════════════════════════════════════════════
-
-echo ""
-echo "╔══ Pre-flight: Disk space check ══╗"
-echo ""
-
-CKPT_DIR="${MID_CHECKPOINTS_OUTPUT_DIR}"
-mkdir -p "$CKPT_DIR"
-
-AVAILABLE_KB=$(df -P "$CKPT_DIR" | awk 'NR==2{print $4}')
-AVAILABLE_GB=$((AVAILABLE_KB / 1024 / 1024))
-MIN_REQUIRED_GB=60
-
-echo "  Checkpoint dir:  $CKPT_DIR"
-echo "  Available space: ${AVAILABLE_GB}GB"
-echo "  Minimum needed:  ${MIN_REQUIRED_GB}GB (3 trainings × ~20GB/ckpt)"
-
-if [ "$AVAILABLE_GB" -lt "$MIN_REQUIRED_GB" ]; then
-    echo ""
-    echo "  ERROR: Insufficient disk space!"
-    echo "  Available: ${AVAILABLE_GB}GB < Required: ${MIN_REQUIRED_GB}GB"
-    echo ""
-    echo "  Options:"
-    echo "    1. Set MID_CHECKPOINTS_OUTPUT_DIR to a partition with more space:"
-    echo "       MID_CHECKPOINTS_OUTPUT_DIR=/path/to/larger/disk bash nanochat_mid_compare/run_stem_experiment.sh"
-    echo "    2. Free up space on the current partition"
-    echo ""
-    echo "╚══════════════════════════════════════════════════════════╝"
-    exit 1
-fi
-
-echo "  ✓ Disk space sufficient"
-echo ""
-echo "╚══════════════════════════════════════════════════════════╝"
-echo ""
-
-# ══════════════════════════════════════════════════════════════
 #  PRE-FLIGHT: DOWNLOAD EVAL DATA
 # ══════════════════════════════════════════════════════════════
 
 echo ""
 echo "╔══ Pre-flight: Download eval data ══╗"
 echo ""
-export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 pushd "$NANOCHAT_REPO" > /dev/null
 python3 -c "from scripts.base_eval import prepare_eval_data; prepare_eval_data('${EVAL_BENCHMARKS:-all}')" || {
     echo "  ERROR: eval data download failed"
@@ -455,10 +536,6 @@ echo ""
 # ══════════════════════════════════════════════════════════════
 #  STEP 3: MID-TRAINING
 # ══════════════════════════════════════════════════════════════
-
-QUADMIX_DATA="$DATA_DIR/quadmix_data"
-RANDOM_DATA="$DATA_DIR/random_data"
-MANUAL_RATIO_DATA="$DATA_DIR/manual_ratio_data"
 
 run_mid_training() {
     local DATA_PATH="$1"
@@ -636,6 +713,31 @@ echo "╚═══════════════════════�
 echo ""
 
 # ══════════════════════════════════════════════════════════════
+#  CLEANUP: Remove temporary mixed data directories
+# ══════════════════════════════════════════════════════════════
+
+if [ "$MIX_GENERAL_DATA" = "1" ] && [ "$KEEP_MIXED_DATA" != "1" ]; then
+    echo ""
+    echo "╔══ Cleanup: Remove mixed data ══╗"
+    echo ""
+    MIXED_FREED=0
+    for d in "$DATA_DIR"/*_mixed; do
+        if [ -d "$d" ]; then
+            SIZE_KB=$(du -sk "$d" 2>/dev/null | awk '{print $1}')
+            MIXED_FREED=$((MIXED_FREED + SIZE_KB))
+            rm -rf "$d"
+            echo "  Removed: $(basename "$d")"
+        fi
+    done
+    MIXED_FREED_GB=$((MIXED_FREED / 1024 / 1024))
+    echo "  Freed: ${MIXED_FREED_GB}GB"
+    echo "  Kept: climbmix_shards/ (reusable for future runs)"
+    echo ""
+    echo "╚══════════════════════════════════════════════════════════╝"
+    echo ""
+fi
+
+# ══════════════════════════════════════════════════════════════
 #  SUMMARY
 # ══════════════════════════════════════════════════════════════
 
@@ -648,9 +750,15 @@ echo "  Output directory: $RESULT_DIR"
 echo ""
 echo "  Files:"
 echo "    ├── data/                        # Training datasets"
-echo "    │   ├── quadmix_data/            # QuadMix shards"
+echo "    │   ├── quadmix_data/            # QuadMix shards (original STEM)"
 echo "    │   ├── random_data/             # Random baseline shards"
 echo "    │   ├── manual_ratio_data/       # Manual Ratio shards"
+if [ "$MIX_GENERAL_DATA" = "1" ] && [ "$KEEP_MIXED_DATA" = "1" ]; then
+echo "    │   ├── *_mixed/                 # Mixed data (kept: KEEP_MIXED_DATA=1)"
+fi
+if [ "$MIX_GENERAL_DATA" = "1" ]; then
+echo "    │   ├── climbmix_shards/         # ClimbMix (reusable)"
+fi
 echo "    │   └── dataset_stats.json       # Statistics"
 echo "    ├── experiment.log                # Full experiment log (all output)"
 echo "    ├── mid_train_quadmix.log"
