@@ -36,6 +36,14 @@ Outputs (into --output-dir, default = --result-dir):
                               drops quality_rank from the regular quadmix_train arm;
                               pass --sampled-parquet to recover it).
   fig_quality_length_corr.png — heatmap of the above Spearman matrix
+  within_stratum_rho.txt     — within-stratum quality-length ρ: splits each
+                              arm into K=4 length quartiles and computes ρ
+                              within each stratum.  If global ρ drops to ≈0
+                              within strata → bias is between-stratum only →
+                              length-residual normalization will be effective.
+                              Also computes per-domain within-stratum ρ when
+                              domain labels are available.
+  fig_within_stratum_rho.png — grouped bar: global vs within-stratum avg ρ
   fig_arm_<quality>.png       — per-arm quality-signal histograms
 
 Text-based slices run on existing text-only parquets now; the token slices need
@@ -693,6 +701,191 @@ def _quality_length_correlation(per_arm, quality_cols, out_dir):
         _save_fig(fig, out_dir, "fig_quality_length_corr.png")
 
 
+# ── within-stratum quality-length correlation ────────────────────
+
+
+def _within_stratum_quality_length_correlation(per_arm, quality_cols, out_dir, n_strata=4):
+    """Compute within-stratum quality-length Spearman ρ per arm.
+
+    Splits each arm's documents into K length strata (by char_count quantiles)
+    and computes ρ(quality, length) within each stratum.  If global ρ drops to
+    near-zero within strata, the bias is purely between-stratum → length-residual
+    normalization will be effective.  Also computes per-domain results when
+    domain labels are available.
+    """
+    length_key = "char_count"
+    if not any(length_key in per_arm[a] for a in per_arm):
+        length_key = "len"
+    signal_keys = list(quality_cols or [])
+    for a in per_arm:
+        if "quality_rank" in per_arm[a] and "quality_rank" not in signal_keys:
+            signal_keys.append("quality_rank")
+            break
+    if not signal_keys:
+        print("  [skip] within_stratum_rho: no quality signal columns")
+        return
+    arms = [a for a in per_arm if length_key in per_arm[a] and len(per_arm[a][length_key])]
+    if not arms:
+        print("  [skip] within_stratum_rho: no length data")
+        return
+
+    lines = ["=== Within-Stratum Quality-Length ρ ===", ""]
+    K = n_strata
+    quantiles = np.linspace(0, 1, K + 1)
+    fig_data = {}
+
+    for arm_label in arms:
+        a = per_arm[arm_label]
+        length = a[length_key]
+        n_docs = len(length)
+        if n_docs < K * 10:
+            continue
+
+        lines.append(f"[{arm_label}]  docs={n_docs:,}")
+
+        boundaries = np.quantile(length.astype(np.float64), quantiles)
+        strata_masks = []
+        lines.append(f"  Strata ({K} quantiles by {length_key}):")
+        for k in range(K):
+            lo, hi = boundaries[k], boundaries[k + 1]
+            if k == 0:
+                mask = length <= hi
+            elif k == K - 1:
+                mask = length > lo
+            else:
+                mask = (length > lo) & (length <= hi)
+            strata_masks.append(mask)
+            n = int(mask.sum())
+            lines.append(f"    Q{k+1}: [{int(lo)}, {int(hi)}] — {n:,} docs ({n / n_docs * 100:.1f}%)")
+        lines.append("")
+
+        avail = [sk for sk in signal_keys if sk in a and len(a[sk]) == n_docs]
+        if not avail:
+            lines.append("  (no quality signals available for this arm)\n")
+            continue
+
+        lines.append("  Global ρ:")
+        global_rhos = {}
+        for sk in avail:
+            g = _spearman(a[sk], length)
+            global_rhos[sk] = g
+            lines.append(f"    {sk:20s}: {g:+.4f}")
+        lines.append("")
+
+        within_rhos = {sk: [] for sk in global_rhos}
+        lines.append("  Within-stratum ρ:")
+        for k in range(K):
+            mask = strata_masks[k]
+            row = f"    Q{k+1} ({int(mask.sum()):>8,}):"
+            for sk in global_rhos:
+                w = _spearman(a[sk][mask], length[mask])
+                within_rhos[sk].append(w)
+                row += f"  {sk[:8]}={w:+.3f}"
+            lines.append(row)
+        lines.append("")
+
+        lines.append("  Reduction:")
+        arm_fig = {}
+        for sk in global_rhos:
+            g = global_rhos[sk]
+            w_avg = float(np.mean(within_rhos[sk])) if within_rhos[sk] else 0.0
+            r = (1 - abs(w_avg) / abs(g)) * 100 if abs(g) > 1e-8 else 0.0
+            verdict = "EFFECTIVE" if r > 60 else ("PARTIAL" if r > 30 else "INEFFECTIVE")
+            lines.append(f"    {sk:20s}: global={g:+.4f} within_avg={w_avg:+.4f} reduction={r:.1f}% → {verdict}")
+            arm_fig[sk] = {"global": g, "within_avg": w_avg,
+                           "within_per_stratum": within_rhos[sk], "reduction": r}
+        fig_data[arm_label] = arm_fig
+        lines.append("")
+
+        dom_labels = a.get("dom_labels")
+        if dom_labels is not None and len(dom_labels) == n_docs:
+            all_doms = sorted(set(str(d) for d in dom_labels))
+            lines.append("  Per-domain reduction:")
+            for d in all_doms:
+                dmask = np.array([str(dl) == d for dl in dom_labels])
+                d_length = length[dmask]
+                d_n = int(dmask.sum())
+                if d_n < K * 10:
+                    lines.append(f"    {d:>12s}: n={d_n:,} (too few)")
+                    continue
+                d_boundaries = np.quantile(d_length.astype(np.float64), quantiles)
+                d_strata = []
+                for k in range(K):
+                    lo, hi = d_boundaries[k], d_boundaries[k + 1]
+                    if k == 0:
+                        m = d_length <= hi
+                    elif k == K - 1:
+                        m = d_length > lo
+                    else:
+                        m = (d_length > lo) & (d_length <= hi)
+                    d_strata.append(m)
+                d_row = f"    {d:>12s} (n={d_n:,}):"
+                for sk in global_rhos:
+                    d_q = a[sk][dmask]
+                    d_g = _spearman(d_q, d_length)
+                    d_w = []
+                    for k in range(K):
+                        m = d_strata[k]
+                        if m.sum() > 5:
+                            d_w.append(_spearman(d_q[m], d_length[m]))
+                    d_w_avg = float(np.mean(d_w)) if d_w else 0.0
+                    d_r = (1 - abs(d_w_avg) / abs(d_g)) * 100 if abs(d_g) > 1e-8 else 0.0
+                    d_row += f"  {sk[:8]}: g={d_g:+.3f} w={d_w_avg:+.3f} r={d_r:.0f}%"
+                lines.append(d_row)
+            lines.append("")
+
+    path = os.path.join(out_dir, "within_stratum_rho.txt")
+    with open(path, "w") as f:
+        f.write("\n".join(lines))
+    print(f"  [Text] Saved: {path}")
+
+    if fig_data:
+        _fig_within_stratum_rho(fig_data, out_dir)
+
+
+def _fig_within_stratum_rho(fig_data, out_dir):
+    """Grouped bar: global ρ vs within-stratum avg ρ, per arm."""
+    arm_list = list(fig_data.keys())
+    n_arms = len(arm_list)
+    all_signals = set()
+    for arm in arm_list:
+        all_signals.update(fig_data[arm].keys())
+    signals = sorted(all_signals)
+    n_sigs = len(signals)
+    if n_sigs == 0:
+        return
+
+    fig, axes = plt.subplots(1, n_arms, figsize=(5 * n_arms, 5), sharey=True,
+                             squeeze=False)
+    axes = axes.ravel()
+    x = np.arange(n_sigs)
+    width = 0.35
+    for ax, arm in zip(axes, arm_list):
+        g_vals = [fig_data[arm].get(s, {}).get("global", 0) for s in signals]
+        w_vals = [fig_data[arm].get(s, {}).get("within_avg", 0) for s in signals]
+        ax.bar(x - width / 2, g_vals, width, label="Global ρ",
+               color="#4472C4", edgecolor="white", linewidth=0.5)
+        ax.bar(x + width / 2, w_vals, width, label="Within-stratum ρ",
+               color="#ED7D31", edgecolor="white", linewidth=0.5)
+        ax.axhline(y=0, color="gray", linewidth=0.8)
+        ax.set_xticks(x)
+        ax.set_xticklabels([s[:12] for s in signals], rotation=30, ha="right", fontsize=8)
+        ax.set_title(arm, fontsize=10)
+        ax.legend(fontsize=8)
+        for i, s in enumerate(signals):
+            r = fig_data[arm].get(s, {}).get("reduction", 0)
+            color = "green" if r > 0 else "red"
+            ax.text(i, max(g_vals[i], w_vals[i]) + 0.02, f"{r:.0f}%",
+                    ha="center", fontsize=7, color=color, fontweight="bold")
+    for j in range(len(arm_list), len(axes)):
+        axes[j].set_visible(False)
+
+    fig.suptitle("Global vs Within-Stratum ρ (quality vs length)",
+                 fontsize=12, fontweight="bold", y=1.02)
+    fig.tight_layout()
+    _save_fig(fig, out_dir, "fig_within_stratum_rho.png")
+
+
 # ── quality signal histograms ────────────────────────────────────
 
 
@@ -1280,6 +1473,7 @@ def main():
                           y_label="lexical diversity (type/token)",
                           filename="fig_diversity_by_domain.png", log_scale=False)
     _quality_length_correlation(per_arm, quality_cols, out_dir)
+    _within_stratum_quality_length_correlation(per_arm, quality_cols, out_dir)
     _fig_quality_hist(per_arm, quality_cols, out_dir)
     _detect_duplicates(per_arm, domain_names, out_dir)
     _write_txt(per_arm, stats, args.seq_len, out_dir)
