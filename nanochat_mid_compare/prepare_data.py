@@ -75,11 +75,21 @@ def _get_io_pool(num_workers=None):
     return _io_pool
 
 
+def _calc_workers(per_worker_mem_gb=5):
+    by_cpu = min(mp.cpu_count() // 4, 48) or 1
+    try:
+        avail = os.sysconf('SC_AVPHYS_PAGES') * os.sysconf('SC_PAGE_SIZE')
+        by_mem = max(1, int(avail * 0.4 / (per_worker_mem_gb * 1024**3)))
+    except (ValueError, OSError):
+        by_mem = by_cpu
+    return min(by_cpu, by_mem)
+
+
 def _get_read_pool(num_workers=None):
     global _read_pool
     if _read_pool is None:
-        nw = min(mp.cpu_count() // 4, 48) or 1
-        _read_pool = _SPAWN_CTX.Pool(nw)
+        nw = _calc_workers(per_worker_mem_gb=5)
+        _read_pool = _SPAWN_CTX.Pool(nw, maxtasksperchild=10)
     return _read_pool
 
 
@@ -95,9 +105,10 @@ def _get_token_pool(tokenizer_pkl_path, num_workers=None):
     global _token_pool
     if _token_pool is None:
         if num_workers is None:
-            num_workers = min(mp.cpu_count() // 4, 48) or 1
+            num_workers = _calc_workers(per_worker_mem_gb=5)
         _token_pool = _SPAWN_CTX.Pool(
-            num_workers, initializer=_init_worker, initargs=(tokenizer_pkl_path,))
+            num_workers, initializer=_init_worker, initargs=(tokenizer_pkl_path,),
+            maxtasksperchild=20)
     return _token_pool
 
 
