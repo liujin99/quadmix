@@ -116,6 +116,9 @@ def parse_args():
     p.add_argument("--tokenizer-path", default=None,
                    help="nanochat tokenizer.pkl or its dir "
                         "(default: $NANOCHAT_MODEL_DIR/tokenizer)")
+    p.add_argument("--tokenize-workers", type=int, default=None,
+                   help="Tokenization worker processes (default: min(128, cpu//2); "
+                        "only used with --match-benchmark-lengths)")
     return p.parse_args()
 
 
@@ -156,6 +159,51 @@ def _load_tokenizer(tokenizer_path):
     except Exception as e:
         print(f"  WARNING: failed to load tokenizer: {e}")
         return None
+
+
+def _resolve_pkl_path(tokenizer_path):
+    """Resolve to the .pkl file path from a directory or file path."""
+    if os.path.isfile(tokenizer_path):
+        return tokenizer_path
+    pkl = os.path.join(tokenizer_path, "tokenizer.pkl")
+    if os.path.isfile(pkl):
+        return pkl
+    return None
+
+
+# ── multiprocessing tokenizer workers ──────────────────────────
+
+_TOK_ENC = None
+
+
+def _init_tokenizer_worker(pkl_path):
+    global _TOK_ENC
+    with open(pkl_path, "rb") as f:
+        _TOK_ENC = pickle.load(f)
+
+
+def _tokenize_shard_batch(task):
+    """Worker: read and tokenize all texts from one parquet shard.
+
+    task = (shard_path, text_col, start_idx)
+    Returns (start_idx, np.array[int64] of token counts).
+    """
+    shard_path, text_col, start_idx = task
+    import pyarrow.parquet as pq
+
+    table = pq.read_table(shard_path, columns=[text_col], use_threads=False)
+    texts = table.column(text_col).to_pylist()
+    n = len(texts)
+    counts = np.empty(n, dtype=np.int64)
+
+    sub = 5000
+    for s in range(0, n, sub):
+        chunk = [str(t) if t is not None else "" for t in texts[s:s + sub]]
+        ids_batch = _TOK_ENC.encode_ordinary_batch(chunk, num_threads=1)
+        for j, ids in enumerate(ids_batch):
+            counts[s + j] = len(ids)
+
+    return (start_idx, counts)
 
 
 _MMLU_STEM_SUBJECTS = [
@@ -278,27 +326,67 @@ def _load_benchmark_token_lengths(enc):
     return results
 
 
-def _tokenize_corpus(mm, enc, chunk_size=50000):
-    """Read all STEM doc texts and tokenize to get accurate token counts."""
+def _tokenize_corpus(mm, pkl_path, n_workers=96):
+    """Read all STEM doc texts and tokenize to get accurate token counts.
+
+    Uses multiprocessing: each worker loads its own tokenizer copy from
+    pkl_path, reads one shard's text column, and tokenizes with 1 thread.
+    Falls back to single-process if n_workers <= 1.
+    """
     n_docs = mm.num_docs
     token_counts = np.zeros(n_docs, dtype=np.int64)
-    all_indices = np.arange(n_docs, dtype=np.int64)
+
+    shard_info = mm.shard_info
+    text_col = mm.schema.text_col
+    tasks = [
+        (s["path"], text_col, s["start_idx"])
+        for s in shard_info
+        if s and s.get("path")
+    ]
+    n_shards = len(tasks)
 
     t0 = time.time()
-    for start in range(0, n_docs, chunk_size):
-        end = min(start + chunk_size, n_docs)
-        chunk_indices = all_indices[start:end]
-        texts = mm.read_texts(chunk_indices, verbose=False)
-        ids_batch = enc.encode_ordinary_batch(texts, num_threads=8)
-        for i, ids in enumerate(ids_batch):
-            token_counts[start + i] = len(ids)
-        if start % (chunk_size * 5) == 0 or end == n_docs:
-            elapsed = time.time() - t0
-            pct = end / n_docs * 100
-            eta = elapsed / end * (n_docs - end) if end > 0 else 0
-            print(f"  Tokenized {end:,}/{n_docs:,} ({pct:.0f}%) — {elapsed:.0f}s elapsed, ETA {eta:.0f}s")
 
-    print(f"  Tokenization complete: {n_docs:,} docs in {time.time()-t0:.1f}s")
+    if n_workers <= 1:
+        enc = _load_tokenizer(pkl_path)
+        if enc is None:
+            return None
+        chunk_size = 50000
+        all_indices = np.arange(n_docs, dtype=np.int64)
+        for start in range(0, n_docs, chunk_size):
+            end = min(start + chunk_size, n_docs)
+            texts = mm.read_texts(all_indices[start:end], verbose=False)
+            ids_batch = enc.encode_ordinary_batch(texts, num_threads=8)
+            for i, ids in enumerate(ids_batch):
+                token_counts[start + i] = len(ids)
+            if start % (chunk_size * 5) == 0 or end == n_docs:
+                elapsed = time.time() - t0
+                pct = end / n_docs * 100
+                eta = elapsed / end * (n_docs - end) if end > 0 else 0
+                print(f"  Tokenized {end:,}/{n_docs:,} ({pct:.0f}%) "
+                      f"— {elapsed:.0f}s, ETA {eta:.0f}s")
+    else:
+        from multiprocessing import Pool
+
+        print(f"  {n_shards} shards, {n_workers} workers")
+        done = 0
+        with Pool(n_workers, initializer=_init_tokenizer_worker,
+                  initargs=(pkl_path,)) as pool:
+            for start_idx, counts in pool.imap_unordered(
+                _tokenize_shard_batch, tasks, chunksize=1,
+            ):
+                end_idx = start_idx + len(counts)
+                token_counts[start_idx:end_idx] = counts
+                done += 1
+                if done % 50 == 0 or done == n_shards:
+                    elapsed = time.time() - t0
+                    pct = done / n_shards * 100
+                    eta = elapsed / done * (n_shards - done)
+                    print(f"  Tokenized {done}/{n_shards} shards "
+                          f"({pct:.0f}%) — {elapsed:.0f}s, ETA {eta:.0f}s")
+
+    print(f"  Tokenization complete: {n_docs:,} docs in {time.time()-t0:.1f}s "
+          f"({n_docs / (time.time()-t0) / 1e6:.1f}M docs/s)")
     return token_counts
 
 
@@ -387,32 +475,38 @@ def main():
         _t = time.time()
         print(f"\n[Stage 1b] Benchmark length matching...")
         tokenizer_path = _resolve_tokenizer_path(args)
-        enc = _load_tokenizer(tokenizer_path)
-        if enc is not None:
-            print(f"  Tokenizing {n_docs:,} STEM docs for accurate token counts...")
-            stem_token_counts = _tokenize_corpus(mm, enc)
-            token_counts = stem_token_counts
-            length_values = stem_token_counts
+        pkl_path = _resolve_pkl_path(tokenizer_path)
+        if pkl_path is not None:
+            n_workers = args.tokenize_workers or min(
+                128, (os.cpu_count() or 2) // 2)
+            print(f"  Tokenizing {n_docs:,} STEM docs with {n_workers} workers...")
+            stem_token_counts = _tokenize_corpus(mm, pkl_path, n_workers)
+            if stem_token_counts is not None:
+                token_counts = stem_token_counts
+                length_values = stem_token_counts
 
-            print(f"  Loading benchmark questions from HuggingFace...")
-            benchmark_token_counts = _load_benchmark_token_lengths(enc)
-            if benchmark_token_counts:
-                print(f"  Computing target distribution (K={K}, equal-weight per benchmark)...")
-                target_dist, global_boundaries = _compute_target_dist(
-                    benchmark_token_counts, stem_token_counts, K,
-                )
-                print(f"  Target distribution: {[round(x, 4) for x in target_dist]}")
-                print(f"  Global token quartile boundaries: {[int(b) for b in global_boundaries]}")
-                benchmark_stats = {
-                    name: {"count": len(counts),
-                           "mean": round(float(np.mean(counts)), 1),
-                           "median": round(float(np.median(counts)), 1),
-                           "min": int(min(counts)), "max": int(max(counts))}
-                    for name, counts in benchmark_token_counts.items()
-                }
+                print(f"  Loading benchmark questions from HuggingFace...")
+                enc = _load_tokenizer(pkl_path)
+                benchmark_token_counts = _load_benchmark_token_lengths(enc)
+                if benchmark_token_counts:
+                    print(f"  Computing target distribution (K={K}, equal-weight per benchmark)...")
+                    target_dist, global_boundaries = _compute_target_dist(
+                        benchmark_token_counts, stem_token_counts, K,
+                    )
+                    print(f"  Target distribution: {[round(x, 4) for x in target_dist]}")
+                    print(f"  Global token quartile boundaries: {[int(b) for b in global_boundaries]}")
+                    benchmark_stats = {
+                        name: {"count": len(counts),
+                               "mean": round(float(np.mean(counts)), 1),
+                               "median": round(float(np.median(counts)), 1),
+                               "min": int(min(counts)), "max": int(max(counts))}
+                        for name, counts in benchmark_token_counts.items()
+                    }
+                else:
+                    print(f"  WARNING: no benchmarks loaded, falling back to uniform distribution")
+                print(f"  Stage 1b: {time.time()-_t:.1f}s")
             else:
-                print(f"  WARNING: no benchmarks loaded, falling back to uniform distribution")
-            print(f"  Stage 1b: {time.time()-_t:.1f}s")
+                print(f"  WARNING: tokenization failed, falling back to char_count + uniform")
         else:
             print(f"  WARNING: tokenizer unavailable, falling back to char_count + uniform")
 
