@@ -114,7 +114,8 @@ def parse_args():
     p.add_argument("--match-benchmark-lengths", action="store_true",
                    help="Shape length distribution to match STEM benchmark question token lengths")
     p.add_argument("--tokenizer-path", default=None,
-                   help="Path to tokenizer.pkl (default: auto-detect from NANOCHAT_BASE_DIR)")
+                   help="nanochat tokenizer.pkl or its dir "
+                        "(default: $NANOCHAT_MODEL_DIR/tokenizer)")
     return p.parse_args()
 
 
@@ -131,20 +132,26 @@ def _compute_quartile_ids(values, K):
 def _resolve_tokenizer_path(args):
     if args.tokenizer_path:
         return args.tokenizer_path
-    base_dir = os.environ.get("NANOCHAT_BASE_DIR", "")
-    if base_dir:
-        return os.path.join(base_dir, "tokenizer", "tokenizer.pkl")
-    return os.path.join(os.path.expanduser("~"), ".cache", "nanochat", "tokenizer", "tokenizer.pkl")
+    model_dir = os.environ.get(
+        "NANOCHAT_MODEL_DIR", "/home/ma-user/work/nanochat_model_dir")
+    default_tok = os.path.join(model_dir, "tokenizer")
+    default_pkl = os.path.join(default_tok, "tokenizer.pkl")
+    if os.path.isfile(default_pkl):
+        print(f"  [info] tokenizer auto-detected: {default_pkl}")
+        return default_tok
+    return default_tok
 
 
 def _load_tokenizer(tokenizer_path):
-    if not os.path.exists(tokenizer_path):
-        print(f"  WARNING: tokenizer not found at {tokenizer_path}")
+    pkl = tokenizer_path if os.path.isfile(tokenizer_path) \
+        else os.path.join(tokenizer_path, "tokenizer.pkl")
+    if not os.path.isfile(pkl):
+        print(f"  WARNING: tokenizer not found at {pkl}")
         return None
     try:
-        with open(tokenizer_path, "rb") as f:
+        with open(pkl, "rb") as f:
             enc = pickle.load(f)
-        print(f"  Tokenizer loaded from {tokenizer_path}")
+        print(f"  Tokenizer loaded from {pkl}")
         return enc
     except Exception as e:
         print(f"  WARNING: failed to load tokenizer: {e}")
