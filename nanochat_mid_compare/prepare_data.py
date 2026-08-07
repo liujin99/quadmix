@@ -70,12 +70,12 @@ def _get_io_pool(num_workers=None):
     global _io_pool
     if _io_pool is None:
         if num_workers is None:
-            num_workers = min(mp.cpu_count(), 256) or 1
-        _io_pool = _SPAWN_CTX.Pool(num_workers)
+            num_workers = _calc_workers(per_worker_mem_gb=3)
+        _io_pool = _SPAWN_CTX.Pool(num_workers, maxtasksperchild=5)
     return _io_pool
 
 
-def _calc_workers(per_worker_mem_gb=5):
+def _calc_workers(per_worker_mem_gb=8):
     by_cpu = min(mp.cpu_count() // 4, 48) or 1
     try:
         avail = os.sysconf('SC_AVPHYS_PAGES') * os.sysconf('SC_PAGE_SIZE')
@@ -88,8 +88,8 @@ def _calc_workers(per_worker_mem_gb=5):
 def _get_read_pool(num_workers=None):
     global _read_pool
     if _read_pool is None:
-        nw = _calc_workers(per_worker_mem_gb=5)
-        _read_pool = _SPAWN_CTX.Pool(nw, maxtasksperchild=10)
+        nw = _calc_workers(per_worker_mem_gb=8)
+        _read_pool = _SPAWN_CTX.Pool(nw, maxtasksperchild=5)
     return _read_pool
 
 
@@ -105,10 +105,10 @@ def _get_token_pool(tokenizer_pkl_path, num_workers=None):
     global _token_pool
     if _token_pool is None:
         if num_workers is None:
-            num_workers = _calc_workers(per_worker_mem_gb=5)
+            num_workers = _calc_workers(per_worker_mem_gb=8)
         _token_pool = _SPAWN_CTX.Pool(
             num_workers, initializer=_init_worker, initargs=(tokenizer_pkl_path,),
-            maxtasksperchild=20)
+            maxtasksperchild=10)
     return _token_pool
 
 
