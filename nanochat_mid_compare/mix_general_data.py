@@ -52,6 +52,16 @@ def count_stem_docs(stem_train_files):
     return total
 
 
+def detect_shard_size(stem_train_files):
+    """Read the actual docs-per-shard from the first STEM parquet (metadata only)."""
+    if not stem_train_files:
+        return BATCH_PER_FILE
+    try:
+        return pq.ParquetFile(stem_train_files[0]).num_rows
+    except Exception:
+        return BATCH_PER_FILE
+
+
 def calc_climbmix_count(stem_docs, stem_ratio):
     """Calculate how many ClimbMix shards are needed for the given STEM doc count."""
     needed_climb = stem_docs * (1 - stem_ratio) / stem_ratio
@@ -97,7 +107,7 @@ def endless_generator(gen_func, files):
         yield from gen
 
 
-def mix_data(stem_dir, climb_files, output_dir, num_output_files):
+def mix_data(stem_dir, climb_files, output_dir, num_output_files, batch_per_file=BATCH_PER_FILE):
     """Mix 70% STEM + 30% ClimbMix at document level."""
     if not climb_files:
         raise ValueError("No ClimbMix files available. Download failed?")
@@ -116,7 +126,7 @@ def mix_data(stem_dir, climb_files, output_dir, num_output_files):
 
     print(f"  STEM: {len(stem_files)} train shards from {stem_dir}")
     print(f"  ClimbMix: {len(climb_files)} shards")
-    print(f"  Output: {num_output_files} files x {BATCH_PER_FILE} docs each")
+    print(f"  Output: {num_output_files} files x {batch_per_file} docs each")
     print(f"  Ratio: {STEM_RATIO*100:.0f}% STEM + {(1-STEM_RATIO)*100:.0f}% ClimbMix")
 
     stem_gen = endless_generator(stream_texts_uniform, stem_files)
@@ -125,7 +135,7 @@ def mix_data(stem_dir, climb_files, output_dir, num_output_files):
     random.seed(42)
     current = []
     file_idx = 0
-    total = num_output_files * BATCH_PER_FILE
+    total = num_output_files * batch_per_file
     pbar = tqdm(desc=f"  Mixing {Path(stem_dir).name}", total=total)
 
     try:
@@ -138,7 +148,7 @@ def mix_data(stem_dir, climb_files, output_dir, num_output_files):
             current.append(txt)
             pbar.update(1)
 
-            if len(current) >= BATCH_PER_FILE:
+            if len(current) >= batch_per_file:
                 out_path = os.path.join(output_dir, f"shard_{file_idx:05d}.parquet")
                 pq.write_table(pa.table({"text": current}), out_path, row_group_size=1024)
                 current = []
@@ -190,12 +200,14 @@ def main():
 
     stem_train_count = len(stem_train_files)
     num_output_files = args.num_output_files or stem_train_count
+    batch_per_file = detect_shard_size(stem_train_files)
 
     stem_docs = count_stem_docs(stem_train_files)
     needed_shards = calc_climbmix_count(stem_docs, STEM_RATIO)
     needed_climb_docs = int(stem_docs * (1 - STEM_RATIO) / STEM_RATIO)
 
-    print(f"  STEM: {stem_train_count} train shards, {stem_docs:,} docs")
+    print(f"  STEM: {stem_train_count} train shards, {stem_docs:,} docs "
+          f"({batch_per_file} docs/shard)")
     print(f"  Need ~{needed_climb_docs:,} ClimbMix docs -> {needed_shards} shards "
           f"(capped at {MIN_CLIMBMIX_SHARDS}-{MAX_CLIMBMIX_SHARDS})")
 
@@ -214,7 +226,7 @@ def main():
         climb_files = existing_climb
         print(f"  ClimbMix already downloaded: {len(climb_files)} files")
 
-    mix_data(args.stem_dir, climb_files, args.output_dir, num_output_files)
+    mix_data(args.stem_dir, climb_files, args.output_dir, num_output_files, batch_per_file)
 
 
 if __name__ == "__main__":
