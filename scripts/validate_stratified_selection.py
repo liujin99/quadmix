@@ -3,12 +3,15 @@
 
 Uses existing optimal_parameters.json + the full data pool to produce a
 sampled_dataset where quality ranking (Eq.2) is computed normally
-(non-stratified), but the sampling budget is redistributed equally across
+(non-stratified), but the sampling budget is redistributed across
 length quartiles within each domain.
 
-This isolates the length-distribution variable: domain proportions and
-quality ranking are identical to the baseline QuadMix run, only the
-allocation of selections across length quartiles changes.
+Default mode: equal allocation (N_domain/K per quartile), char-based.
+
+With --match-benchmark-lengths: the allocation across quartiles is shaped
+to match the token-length distribution of STEM benchmark questions
+(arc, gsm8k, mmlu, gpqa, math). The full STEM corpus is tokenized with
+the nanochat tokenizer for accurate token-based quartile boundaries.
 
 Algorithm:
   1. Eq.1 (merge) + Eq.2 (compute_quality_ranks, non-stratified) + Eq.3
@@ -16,25 +19,37 @@ Algorithm:
   2. Run baseline selection (_select_documents_vectorized) → record
      N_domain (selected count per domain).  Domain proportions are
      therefore identical to the QuadMix baseline.
-  3. For each domain, split pool into K=4 quartiles by char_count.
-     Scale S(r) within each quartile so that Σ scaled_S(r) = N_domain/K
-     (equal budget per quartile).  This preserves quality prioritisation
-     within each quartile while equalising the length distribution.
+  3. For each domain, split pool into K=4 quartiles by length
+     (char_count by default, token_count with --match-benchmark-lengths).
+     Scale S(r) within each quartile so that Σ scaled_S(r) = budget_per_q.
+     Uniform mode: budget_per_q = N_domain/K.
+     Benchmark mode: budget_per_q = N_domain * target_dist[k].
   4. Re-select with scaled S(r) → sampled_dataset.
 
 Standalone script: no pipeline code is modified.
 
 Usage:
+  # Uniform allocation (char-based, default)
   python scripts/validate_stratified_selection.py \
       --preprocessed-dir /path/to/stem/parquets \
       --params-file result/quadmix_20260728_201517/optimal_parameters.json \
       --schema configs/schema_stem.yaml \
       --output result/stratified_validation
+
+  # Benchmark-matched allocation (token-based, matches STEM eval question lengths)
+  python scripts/validate_stratified_selection.py \
+      --preprocessed-dir /path/to/stem/parquets \
+      --params-file result/quadmix_20260728_201517/optimal_parameters.json \
+      --schema configs/schema_stem.yaml \
+      --output result/stratified_benchmark_matched \
+      --match-benchmark-lengths \
+      --tokenizer-path /path/to/tokenizer.pkl
 """
 
 import argparse
 import json
 import os
+import pickle
 import shutil
 import sys
 import time
@@ -96,17 +111,217 @@ def parse_args():
                    help="Target tokens in billions (0 = no limit)")
     p.add_argument("--seed", type=int, default=42,
                    help="Random seed")
+    p.add_argument("--match-benchmark-lengths", action="store_true",
+                   help="Shape length distribution to match STEM benchmark question token lengths")
+    p.add_argument("--tokenizer-path", default=None,
+                   help="Path to tokenizer.pkl (default: auto-detect from NANOCHAT_BASE_DIR)")
     return p.parse_args()
 
 
-def _compute_quartile_ids(char_counts, K):
-    """Assign quartile IDs (0..K-1) based on char_count quantiles."""
+def _compute_quartile_ids(values, K):
+    """Assign quartile IDs (0..K-1) based on value quantiles."""
     quantiles = np.linspace(0, 1, K + 1)
-    boundaries = np.quantile(char_counts, quantiles)
-    stratum_ids = np.zeros(len(char_counts), dtype=np.int64)
+    boundaries = np.quantile(values, quantiles)
+    stratum_ids = np.zeros(len(values), dtype=np.int64)
     for k in range(1, K):
-        stratum_ids[char_counts > boundaries[k]] = k
+        stratum_ids[values > boundaries[k]] = k
     return stratum_ids, boundaries
+
+
+def _resolve_tokenizer_path(args):
+    if args.tokenizer_path:
+        return args.tokenizer_path
+    base_dir = os.environ.get("NANOCHAT_BASE_DIR", "")
+    if base_dir:
+        return os.path.join(base_dir, "tokenizer", "tokenizer.pkl")
+    return os.path.join(os.path.expanduser("~"), ".cache", "nanochat", "tokenizer", "tokenizer.pkl")
+
+
+def _load_tokenizer(tokenizer_path):
+    if not os.path.exists(tokenizer_path):
+        print(f"  WARNING: tokenizer not found at {tokenizer_path}")
+        return None
+    try:
+        with open(tokenizer_path, "rb") as f:
+            enc = pickle.load(f)
+        print(f"  Tokenizer loaded from {tokenizer_path}")
+        return enc
+    except Exception as e:
+        print(f"  WARNING: failed to load tokenizer: {e}")
+        return None
+
+
+_MMLU_STEM_SUBJECTS = [
+    "abstract_algebra", "anatomy", "astronomy",
+    "college_biology", "college_chemistry", "college_computer_science",
+    "college_mathematics", "college_physics", "computer_security",
+    "conceptual_physics", "electrical_engineering", "elementary_mathematics",
+    "formal_logic", "high_school_biology", "high_school_chemistry",
+    "high_school_computer_science", "high_school_mathematics",
+    "high_school_physics", "high_school_statistics", "machine_learning",
+    "medical_genetics", "virology",
+]
+
+_MATH_SUBJECTS = [
+    "algebra", "counting_and_probability", "geometry",
+    "intermediate_algebra", "number_theory", "prealgebra", "precalculus",
+]
+
+
+def _load_benchmark_token_lengths(enc):
+    """Load 6 STEM benchmarks from HuggingFace, tokenize questions, return per-benchmark token counts."""
+    from datasets import load_dataset
+    import random as _rng
+
+    results = {}
+
+    def _tok_batch(texts):
+        if not texts:
+            return []
+        ids_batch = enc.encode_ordinary_batch(texts, num_threads=8)
+        return [len(ids) for ids in ids_batch]
+
+    try:
+        ds = load_dataset("openai/gsm8k", "main", split="test")
+        texts = [f"Question: {s['question']}\nAnswer: {s['answer']}" for s in ds]
+        results["gsm8k_cot"] = _tok_batch(texts)
+        print(f"    gsm8k_cot: {len(results['gsm8k_cot'])} questions")
+    except Exception as e:
+        print(f"    WARNING: failed to load gsm8k: {e}")
+
+    try:
+        all_texts = []
+        for subject in _MMLU_STEM_SUBJECTS:
+            ds = load_dataset("cais/mmlu", subject, split="test")
+            for s in ds:
+                question = s.get("question", "")
+                choices = s.get("choices", [])
+                answer = s.get("answer", -1)
+                if isinstance(answer, str):
+                    answer = {"A": 0, "B": 1, "C": 2, "D": 3}.get(answer.upper(), -1)
+                if answer < 0 or answer >= len(choices):
+                    continue
+                choice_str = "\n".join(f"  {chr(65+i)}. {c}" for i, c in enumerate(choices))
+                text = f"Question: {question}\nChoices:\n{choice_str}\nAnswer: {chr(65+answer)}"
+                all_texts.append(text)
+        results["mmlu_stem"] = _tok_batch(all_texts)
+        print(f"    mmlu_stem: {len(results['mmlu_stem'])} questions")
+    except Exception as e:
+        print(f"    WARNING: failed to load mmlu: {e}")
+
+    for arc_name, arc_config in [("arc_easy", "ARC-Easy"), ("arc_challenge", "ARC-Challenge")]:
+        try:
+            ds = load_dataset("allenai/ai2_arc", arc_config, split="test")
+            all_texts = []
+            for s in ds:
+                question = s.get("question", "")
+                choices = s.get("choices", {})
+                answer_key = s.get("answerKey", "")
+                choice_texts = choices.get("text", [])
+                choice_labels = choices.get("label", [])
+                if not all([question, choice_texts, choice_labels, answer_key]):
+                    continue
+                choice_str = "\n".join(f"  {lbl}. {t}" for lbl, t in zip(choice_labels, choice_texts))
+                text = f"Question: {question}\nChoices:\n{choice_str}\nAnswer: {answer_key}"
+                all_texts.append(text)
+            results[arc_name] = _tok_batch(all_texts)
+            print(f"    {arc_name}: {len(results[arc_name])} questions")
+        except Exception as e:
+            print(f"    WARNING: failed to load {arc_name}: {e}")
+
+    try:
+        ds = load_dataset("Idavidrein/gpqa", "gpqa_main", split="train")
+        rng = _rng.Random(42)
+        all_texts = []
+        for s in ds:
+            question = s.get("Question", "")
+            correct = s.get("Correct Answer", "")
+            incorrect = [s.get("Incorrect Answer 1", ""), s.get("Incorrect Answer 2", ""), s.get("Incorrect Answer 3", "")]
+            if not all([question, correct] + incorrect):
+                continue
+            choices = [correct, incorrect[0], incorrect[1], incorrect[2]]
+            indices = list(range(4))
+            rng.shuffle(indices)
+            shuffled = [choices[i] for i in indices]
+            correct_idx = indices.index(0)
+            choice_str = "\n".join(f"  {chr(65+i)}. {c}" for i, c in enumerate(shuffled))
+            text = f"Question: {question}\nChoices:\n{choice_str}\nAnswer: {chr(65+correct_idx)}"
+            all_texts.append(text)
+        results["gpqa_diamond"] = _tok_batch(all_texts)
+        print(f"    gpqa_diamond: {len(results['gpqa_diamond'])} questions")
+    except Exception as e:
+        print(f"    WARNING: failed to load gpqa: {e}")
+
+    try:
+        all_texts = []
+        for subject in _MATH_SUBJECTS:
+            ds = load_dataset("EleutherAI/hendrycks_math", subject, split="test")
+            for s in ds:
+                problem = s.get("problem", "")
+                solution = s.get("solution", "")
+                if not problem or not solution:
+                    continue
+                text = f"Question: {problem}\nSolution: {solution}"
+                all_texts.append(text)
+        results["math_cot_500"] = _tok_batch(all_texts)
+        print(f"    math_cot_500: {len(results['math_cot_500'])} questions")
+    except Exception as e:
+        print(f"    WARNING: failed to load math: {e}")
+
+    return results
+
+
+def _tokenize_corpus(mm, enc, chunk_size=50000):
+    """Read all STEM doc texts and tokenize to get accurate token counts."""
+    n_docs = mm.num_docs
+    token_counts = np.zeros(n_docs, dtype=np.int64)
+    all_indices = np.arange(n_docs, dtype=np.int64)
+
+    t0 = time.time()
+    for start in range(0, n_docs, chunk_size):
+        end = min(start + chunk_size, n_docs)
+        chunk_indices = all_indices[start:end]
+        texts = mm.read_texts(chunk_indices, verbose=False)
+        ids_batch = enc.encode_ordinary_batch(texts, num_threads=8)
+        for i, ids in enumerate(ids_batch):
+            token_counts[start + i] = len(ids)
+        if start % (chunk_size * 5) == 0 or end == n_docs:
+            elapsed = time.time() - t0
+            pct = end / n_docs * 100
+            eta = elapsed / end * (n_docs - end) if end > 0 else 0
+            print(f"  Tokenized {end:,}/{n_docs:,} ({pct:.0f}%) — {elapsed:.0f}s elapsed, ETA {eta:.0f}s")
+
+    print(f"  Tokenization complete: {n_docs:,} docs in {time.time()-t0:.1f}s")
+    return token_counts
+
+
+def _compute_target_dist(benchmark_token_counts, stem_token_counts, K):
+    """Compute target distribution from benchmark token lengths mapped to global STEM quartiles.
+
+    Each benchmark contributes equally (per-benchmark distribution averaged).
+    Returns (target_dist, global_boundaries).
+    """
+    quantiles = np.linspace(0, 1, K + 1)
+    global_boundaries = np.quantile(stem_token_counts, quantiles)
+
+    per_benchmark_dists = []
+    for name, counts in benchmark_token_counts.items():
+        counts_arr = np.array(counts, dtype=np.float64)
+        stratum_ids = np.zeros(len(counts_arr), dtype=np.int64)
+        for k in range(1, K):
+            stratum_ids[counts_arr > global_boundaries[k]] = k
+        dist = np.zeros(K)
+        for k in range(K):
+            dist[k] = float(np.sum(stratum_ids == k))
+        if dist.sum() > 0:
+            dist = dist / dist.sum()
+        per_benchmark_dists.append(dist)
+        print(f"    {name}: {dist.tolist()}")
+
+    target_dist = np.mean(per_benchmark_dists, axis=0)
+    target_dist = target_dist / target_dist.sum()
+
+    return target_dist, global_boundaries
 
 
 def main():
@@ -127,6 +342,10 @@ def main():
     print(f"  Output:  {output_dir}")
     print(f"  Quartiles: {K}")
     print(f"  Seed:    {args.seed}")
+    if args.match_benchmark_lengths:
+        print(f"  Mode:    benchmark-length-matched (token-based)")
+    else:
+        print(f"  Mode:    uniform (char-based)")
     print("=" * 70)
 
     t_start = time.time()
@@ -151,6 +370,44 @@ def main():
     print(f"  {n_docs:,} docs across {mm.num_shards} shards")
     print(f"  {mm.num_domains} domains, {mm.num_quality_criteria} quality criteria")
     print(f"  Stage 1: {time.time()-_t:.1f}s")
+
+    # ── Stage 1b: Benchmark length matching (optional) ─────
+    target_dist = None
+    length_values = char_counts
+    benchmark_stats = None
+
+    if args.match_benchmark_lengths:
+        _t = time.time()
+        print(f"\n[Stage 1b] Benchmark length matching...")
+        tokenizer_path = _resolve_tokenizer_path(args)
+        enc = _load_tokenizer(tokenizer_path)
+        if enc is not None:
+            print(f"  Tokenizing {n_docs:,} STEM docs for accurate token counts...")
+            stem_token_counts = _tokenize_corpus(mm, enc)
+            token_counts = stem_token_counts
+            length_values = stem_token_counts
+
+            print(f"  Loading benchmark questions from HuggingFace...")
+            benchmark_token_counts = _load_benchmark_token_lengths(enc)
+            if benchmark_token_counts:
+                print(f"  Computing target distribution (K={K}, equal-weight per benchmark)...")
+                target_dist, global_boundaries = _compute_target_dist(
+                    benchmark_token_counts, stem_token_counts, K,
+                )
+                print(f"  Target distribution: {[round(x, 4) for x in target_dist]}")
+                print(f"  Global token quartile boundaries: {[int(b) for b in global_boundaries]}")
+                benchmark_stats = {
+                    name: {"count": len(counts),
+                           "mean": round(float(np.mean(counts)), 1),
+                           "median": round(float(np.median(counts)), 1),
+                           "min": int(min(counts)), "max": int(max(counts))}
+                    for name, counts in benchmark_token_counts.items()
+                }
+            else:
+                print(f"  WARNING: no benchmarks loaded, falling back to uniform distribution")
+            print(f"  Stage 1b: {time.time()-_t:.1f}s")
+        else:
+            print(f"  WARNING: tokenizer unavailable, falling back to char_count + uniform")
 
     # ── Stage 2: Load optimal parameters ────────────────────
     _t = time.time()
@@ -206,8 +463,12 @@ def main():
     # ── Stage 6: Post-hoc quartile budget allocation ────────
     _t = time.time()
     print(f"\n[Stage 6] Post-hoc quartile budget allocation ({K} quartiles/domain)...")
-    print(f"  Scaling S(r) within each (domain x quartile) so that")
-    print(f"  each quartile gets N_domain/{K} budget (equal allocation).")
+    if target_dist is not None:
+        print(f"  Scaling S(r) within each (domain x quartile) to match")
+        print(f"  benchmark-derived target distribution: {[round(x, 4) for x in target_dist]}")
+    else:
+        print(f"  Scaling S(r) within each (domain x quartile) so that")
+        print(f"  each quartile gets N_domain/{K} budget (equal allocation).")
 
     # Collect per-quartile stats for reporting
     per_quartile_stats = {}
@@ -217,20 +478,23 @@ def main():
             continue
         name = domain_names[m] if m < len(domain_names) else f"D{m}"
         N_domain = int(baseline_domain_counts[m])
-        budget_per_q = N_domain / K
 
         domain_mask = domain_labels == m
         domain_indices = np.where(domain_mask)[0]
-        domain_chars = char_counts[domain_mask].astype(np.float64)
+        domain_lengths = length_values[domain_mask].astype(np.float64)
         domain_sv = sampling_values[domain_mask]
 
-        stratum_ids, boundaries = _compute_quartile_ids(domain_chars, K)
+        stratum_ids, boundaries = _compute_quartile_ids(domain_lengths, K)
 
         q_stats = []
         for k in range(K):
             s_mask = stratum_ids == k
             if not s_mask.any():
                 continue
+            if target_dist is not None:
+                budget_per_q = N_domain * target_dist[k]
+            else:
+                budget_per_q = N_domain / K
             original_sum = float(domain_sv[s_mask].sum())
             if original_sum < 1e-10:
                 continue
@@ -242,7 +506,7 @@ def main():
             sampling_values[domain_indices[s_mask]] = scaled
             clipped_sum = float(scaled.sum())
             q_stats.append({
-                "char_range": [int(boundaries[k]), int(boundaries[k + 1])],
+                "length_range": [int(boundaries[k]), int(boundaries[k + 1])],
                 "pool_docs": int(s_mask.sum()),
                 "original_S_sum": round(original_sum, 1),
                 "budget": round(budget_per_q, 1),
@@ -254,8 +518,12 @@ def main():
         per_quartile_stats[name] = q_stats
         n_clipped = sum(1 for q in q_stats if q["clipped"])
         clip_msg = f"  ({n_clipped}/{len(q_stats)} quartiles clipped to 2x cap)" if n_clipped else ""
-        print(f"  [{m}] {name:>10s}: N_domain={N_domain:,}, "
-              f"budget/quartile={budget_per_q:.0f}{clip_msg}")
+        if target_dist is not None:
+            print(f"  [{m}] {name:>10s}: N_domain={N_domain:,}, "
+                  f"target_dist={[round(x,3) for x in target_dist]}{clip_msg}")
+        else:
+            print(f"  [{m}] {name:>10s}: N_domain={N_domain:,}, "
+                  f"budget/quartile={N_domain/K:.0f}{clip_msg}")
 
     # Re-select with scaled S(r)
     rng_alloc = np.random.default_rng(args.seed + 1000)
@@ -316,12 +584,12 @@ def main():
             continue
         name = domain_names[m] if m < len(domain_names) else f"D{m}"
         domain_indices = np.where(domain_labels == m)[0]
-        domain_chars = char_counts[domain_indices].astype(np.float64)
-        stratum_ids, boundaries = _compute_quartile_ids(domain_chars, K)
+        domain_lengths = length_values[domain_indices].astype(np.float64)
+        stratum_ids, boundaries = _compute_quartile_ids(domain_lengths, K)
         domain_selected = np.isin(domain_indices, selected_indices)
 
         print(f"\n    domain={name}:")
-        print(f"      {'quartile':>8s}  {'char_range':>22s}  "
+        print(f"      {'quartile':>8s}  {'length_range':>22s}  "
               f"{'pool':>10s}  {'selected':>10s}  {'pct':>6s}")
         strata = []
         for k in range(K):
@@ -335,24 +603,25 @@ def main():
             print(f"      {'Q' + str(k):>8s}  {rng_str:>22s}  "
                   f"{pool_n:>10,}  {sel_n:>10,}  {pct:>5.1f}%")
             strata.append({
-                "char_range": [lo, hi],
+                "length_range": [lo, hi],
                 "pool": pool_n,
                 "selected": sel_n,
                 "pct": round(pct, 2),
             })
         per_stratum[name] = strata
 
-    sel_chars = char_counts[selected_indices]
+    sel_lengths = length_values[selected_indices]
     total_tokens_est = float(np.sum(token_counts[selected_indices]))
     unique_indices = np.unique(selected_indices)
 
-    print(f"\n  Length distribution (selected docs):")
-    print(f"    char_count  mean={sel_chars.mean():.0f}  "
-          f"median={np.median(sel_chars):.0f}")
-    print(f"                p25={np.percentile(sel_chars, 25):.0f}  "
-          f"p75={np.percentile(sel_chars, 75):.0f}  "
-          f"p90={np.percentile(sel_chars, 90):.0f}")
-    print(f"                min={sel_chars.min()}  max={sel_chars.max()}")
+    length_metric = "tokens" if target_dist is not None else "chars"
+    print(f"\n  Length distribution (selected docs, unit={length_metric}):")
+    print(f"    {length_metric:>10s}  mean={sel_lengths.mean():.0f}  "
+          f"median={np.median(sel_lengths):.0f}")
+    print(f"                p25={np.percentile(sel_lengths, 25):.0f}  "
+          f"p75={np.percentile(sel_lengths, 75):.0f}  "
+          f"p90={np.percentile(sel_lengths, 90):.0f}")
+    print(f"                min={sel_lengths.min()}  max={sel_lengths.max()}")
     print(f"    Total tokens:  {total_tokens_est/1e9:.2f}B")
     print(f"    Total docs:    {len(selected_indices):,}")
     print(f"    Unique docs:   {len(unique_indices):,}")
@@ -395,6 +664,10 @@ def main():
         "preprocessed_dir": args.preprocessed_dir,
         "n_strata": K,
         "seed": args.seed,
+        "match_benchmark_lengths": args.match_benchmark_lengths,
+        "length_metric": "tokens" if target_dist is not None else "chars",
+        "target_distribution": [round(float(x), 6) for x in target_dist] if target_dist is not None else None,
+        "benchmark_length_stats": benchmark_stats,
         "num_original_docs": n_docs,
         "num_baseline_selected": len(baseline_indices),
         "num_selected_docs": len(selected_indices),
@@ -402,12 +675,13 @@ def main():
         "sampling_ratio": len(selected_indices) / n_docs,
         "estimated_tokens": total_tokens_est,
         "estimated_tokens_billions": round(total_tokens_est / 1e9, 3),
-        "char_count_stats": {
-            "mean": float(sel_chars.mean()),
-            "median": float(np.median(sel_chars)),
-            "p25": float(np.percentile(sel_chars, 25)),
-            "p75": float(np.percentile(sel_chars, 75)),
-            "p90": float(np.percentile(sel_chars, 90)),
+        "length_stats": {
+            "metric": "tokens" if target_dist is not None else "chars",
+            "mean": float(sel_lengths.mean()),
+            "median": float(np.median(sel_lengths)),
+            "p25": float(np.percentile(sel_lengths, 25)),
+            "p75": float(np.percentile(sel_lengths, 75)),
+            "p90": float(np.percentile(sel_lengths, 90)),
         },
         "baseline_domain_counts": {
             domain_names[m] if m < len(domain_names) else f"D{m}": int(baseline_domain_counts[m])
