@@ -132,9 +132,9 @@ def parse_args():
         "--baseline-dir",
         default=None,
         help="Baseline pipeline output directory for comparison. "
-        "When provided, the diversity tradeoff figure will include "
-        "the baseline theta* as a blue star marker with an arrow "
-        "showing the improvement direction.",
+        "Used for: (1) diversity tradeoff figure (baseline theta* marker), "
+        "(2) token length distribution figure (baseline histogram overlay). "
+        "Must contain sampled_dataset/ or sampled_dataset.parquet.",
     )
     parser.add_argument(
         "--tokenizer",
@@ -284,7 +284,7 @@ def _packing_crop_analysis(tok_lens, seq_len=2048, buffer_size=2000, max_docs=20
     trained_tokens = 0
     cropped_tokens = 0
     docs_over_T = int(np.sum(a > row_capacity))
-    tokens_over_T = int(a[a > row_capacity].sum()) if docs_over_T > 0 else 0
+    tokens_over_T = int(np.maximum(a - row_capacity, 0).sum())
     i = 0
     N = len(a)
     while i < N or buf:
@@ -735,8 +735,13 @@ def plot_quality_length_decomposition(
 
 
 def plot_token_length_dist(tok_lens, seq_len, domain_labels,
-                           domain_names, num_domains, output_dir):
-    """Histogram of token lengths with T=seq_len vertical marker."""
+                           domain_names, num_domains, output_dir,
+                           baseline_tok_lens=None):
+    """Histogram of token lengths with T=seq_len vertical marker.
+
+    If baseline_tok_lens is provided, plots it as a dashed reference line
+    for before-vs-after comparison.
+    """
     if tok_lens is None or len(tok_lens) == 0:
         print("  [skip] fig_token_length_dist: no token length data")
         return None
@@ -749,8 +754,13 @@ def plot_token_length_dist(tok_lens, seq_len, domain_labels,
     lo = max(1.0, lo)
     bins = np.logspace(np.log10(lo), np.log10(hi), 50)
 
+    if baseline_tok_lens is not None and len(baseline_tok_lens) > 0:
+        ax.hist(baseline_tok_lens, bins=bins, density=True, histtype="step",
+                lw=2, ls="--", color="gray", alpha=0.8,
+                label=f"Baseline (n={len(baseline_tok_lens):,})")
+
     ax.hist(tok_lens, bins=bins, density=True, histtype="step", lw=2,
-            label=f"All (n={len(tok_lens):,})", color="black")
+            label=f"This run (n={len(tok_lens):,})", color="black")
 
     if domain_labels is not None:
         unique_doms = np.unique(domain_labels)
@@ -770,7 +780,9 @@ def plot_token_length_dist(tok_lens, seq_len, domain_labels,
     ax.set_xscale("log")
     ax.set_xlabel("Document length (tokens, incl. BOS)")
     ax.set_ylabel("density")
-    ax.set_title("Token Length Distribution (sampled dataset)")
+    has_baseline = baseline_tok_lens is not None and len(baseline_tok_lens) > 0
+    ax.set_title("Token Length Distribution"
+                 + (" (this run vs baseline)" if has_baseline else " (sampled dataset)"))
     ax.legend(fontsize=8)
     ax.grid(alpha=0.3, linestyle="--")
     ax.set_axisbelow(True)
@@ -2617,6 +2629,7 @@ def main():
     # ── Token length & crop analysis (optional, needs tokenizer) ──
     crop_stats = None
     tok_lens = None
+    baseline_tok_lens = None
     tokenizer_path = _resolve_tokenizer_path(args)
     if tokenizer_path:
         num_workers = args.num_workers or min(32, os.cpu_count() or 1)
@@ -2641,6 +2654,37 @@ def main():
                 print(f"  Crop rate: {crop_stats['crop_rate'] * 100:.1f}% "
                       f"(theoretical min: {crop_stats['theoretical_min_waste'] * 100:.1f}%, "
                       f"additional: {crop_stats['additional_waste'] * 100:.1f}%)")
+
+        # ── Tokenize baseline for comparison (if --baseline-dir has sampled_dataset) ──
+        baseline_tok_lens = None
+        if args.baseline_dir:
+            bl_dir = os.path.join(args.baseline_dir, "sampled_dataset")
+            bl_file = os.path.join(args.baseline_dir, "sampled_dataset.parquet")
+            if os.path.isdir(bl_dir):
+                bl_path = bl_dir
+            elif os.path.isfile(bl_file):
+                bl_path = bl_file
+            else:
+                bl_path = None
+            if bl_path:
+                print(f"\n  Tokenizing baseline docs from: {bl_path}")
+                bl_df = pd.read_parquet(resolve_parquet_source(bl_path))
+                baseline_tok_lens, _ = _tokenize_sampled_docs(
+                    bl_df, tokenizer_path, args.tokenize_sample,
+                    num_workers, args.tokenizer_threads, domain_col, domain_names,
+                )
+                if baseline_tok_lens is not None and len(baseline_tok_lens) > 0:
+                    print(f"  Baseline: {len(baseline_tok_lens):,} docs, "
+                          f"mean={baseline_tok_lens.mean():.1f} tokens/doc")
+                    if tok_lens is not None and len(tok_lens) > 0:
+                        delta = (tok_lens.mean() - baseline_tok_lens.mean()) \
+                                / baseline_tok_lens.mean() * 100
+                        print(f"  Mean length delta: {delta:+.1f}% "
+                              f"(this run {tok_lens.mean():.0f} vs "
+                              f"baseline {baseline_tok_lens.mean():.0f})")
+            else:
+                print(f"\n  [info] --baseline-dir has no sampled_dataset/, "
+                      f"skipping baseline tokenization")
     else:
         print("\n  [skip] No tokenizer found — token-length & crop analysis skipped "
               "(pass --tokenizer or set $NANOCHAT_MODEL_DIR)")
@@ -2688,6 +2732,7 @@ def main():
         fig_token_len = plot_token_length_dist(
             tok_lens, args.seq_len, tok_dom_labels,
             domain_names, num_domains, args.exp_dir,
+            baseline_tok_lens=baseline_tok_lens,
         )
         if crop_stats:
             print("  Generating crop analysis figure...")
