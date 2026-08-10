@@ -989,6 +989,7 @@ def write_analysis_summary(
     fig_decomp=None,
     crop_stats=None,
     tok_lens=None,
+    baseline_tok_lens=None,
     fig_token_len=None,
     fig_crop=None,
     fig_boundaries=None,
@@ -1430,6 +1431,64 @@ def write_analysis_summary(
                 f"(theoretical minimum waste)"
             )
             lines.append("")
+
+            # ── Baseline comparison ──
+            if baseline_tok_lens is not None and len(baseline_tok_lens) > 0:
+                bl_over_doc = float(np.mean(baseline_tok_lens > row_cap) * 100)
+                bl_over_tok = float(
+                    np.maximum(baseline_tok_lens - row_cap, 0).sum()
+                    / baseline_tok_lens.sum() * 100
+                )
+                delta_mean_pct = (
+                    (tok_lens.mean() - baseline_tok_lens.mean())
+                    / baseline_tok_lens.mean() * 100
+                )
+                delta_median_pct = (
+                    (np.median(tok_lens) - np.median(baseline_tok_lens))
+                    / np.median(baseline_tok_lens) * 100
+                )
+                lines.append("Baseline Comparison (this run vs --baseline-dir):")
+                lines.append(
+                    f"  This run  : mean={tok_lens.mean():.1f}  "
+                    f"median={np.median(tok_lens):.1f}  "
+                    f"%docs>T+1={over_doc_pct:.1f}%  "
+                    f"%toks>T+1={over_tok_pct:.1f}%"
+                )
+                lines.append(
+                    f"  Baseline  : mean={baseline_tok_lens.mean():.1f}  "
+                    f"median={np.median(baseline_tok_lens):.1f}  "
+                    f"%docs>T+1={bl_over_doc:.1f}%  "
+                    f"%toks>T+1={bl_over_tok:.1f}%"
+                )
+                lines.append(
+                    f"  Δ mean    : {delta_mean_pct:+.1f}% "
+                    f"({tok_lens.mean():.0f} vs {baseline_tok_lens.mean():.0f})"
+                )
+                lines.append(
+                    f"  Δ median  : {delta_median_pct:+.1f}% "
+                    f"({np.median(tok_lens):.0f} vs "
+                    f"{np.median(baseline_tok_lens):.0f})"
+                )
+                lines.append(
+                    f"  Δ %toks>T+1: {over_tok_pct - bl_over_tok:+.1f}pp "
+                    f"({over_tok_pct:.1f}% vs {bl_over_tok:.1f}%)"
+                )
+                if delta_mean_pct < -5:
+                    lines.append(
+                        "  → Shorter docs than baseline "
+                        "(length-shaping strategy appears effective)"
+                    )
+                elif delta_mean_pct > 5:
+                    lines.append(
+                        "  → Longer docs than baseline "
+                        "(length-shaping did NOT shorten distribution)"
+                    )
+                else:
+                    lines.append(
+                        "  → Similar length to baseline "
+                        "(no meaningful length shift)"
+                    )
+                lines.append("")
 
         lines.append(
             f"Packing Simulation (BOS-bestfit, buffer={crop_stats['buffer_size']}, "
@@ -2883,6 +2942,7 @@ def main():
         fig_decomp=fig_decomp,
         crop_stats=crop_stats,
         tok_lens=tok_lens,
+        baseline_tok_lens=baseline_tok_lens,
         fig_token_len=fig_token_len,
         fig_crop=fig_crop,
         fig_boundaries=fig_boundaries,
