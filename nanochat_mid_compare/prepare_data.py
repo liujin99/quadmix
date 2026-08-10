@@ -351,7 +351,7 @@ def read_docs_from_shards(shard_paths, selections, num_workers=None, desc=None, 
                          max_char_repeat_ratio=0, domain_col=None,
                          quality_cols=None, char_count_col=None):
     if num_workers is None:
-        num_workers = min(mp.cpu_count(), 256) or 1
+        num_workers = _calc_workers(per_worker_mem_gb=3)
     shard_to_docs = {}
     for shard_id, doc_id in selections:
         if shard_id not in shard_to_docs:
@@ -380,7 +380,7 @@ def read_docs_from_shards(shard_paths, selections, num_workers=None, desc=None, 
         _filter_texts = [d["text"] for d in result]
         fork_ctx = mp.get_context("fork")
         nw = min(num_workers, len(result)) or 1
-        filter_pool = fork_ctx.Pool(nw)
+        filter_pool = fork_ctx.Pool(nw, maxtasksperchild=5)
         chunk_size = max(1, len(_filter_texts) // (nw * 4))
         ranges = [(i, min(i + chunk_size, len(_filter_texts)), 10**18, max_char_repeat_ratio)
                   for i in range(0, len(_filter_texts), chunk_size)]
@@ -472,7 +472,7 @@ def scan_shard_files(shard_paths, domain_col=None, domain_names=None,
                      char_count_col=None, text_col="text", num_workers=None,
                      max_chars=1000000, max_char_repeat_ratio=0.3):
     if num_workers is None:
-        num_workers = min(mp.cpu_count(), 256) or 1
+        num_workers = _calc_workers(per_worker_mem_gb=3)
     shard_paths = [str(p) for p in shard_paths]
     tasks = [(i, p, domain_col, domain_names, char_count_col, text_col,
               max_chars, max_char_repeat_ratio)
