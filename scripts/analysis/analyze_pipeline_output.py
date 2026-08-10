@@ -396,6 +396,112 @@ def _tokenize_sampled_docs(sampled_df, tokenizer_path, sample_size,
     return tok_lens, domain_labels
 
 
+def _tokenize_from_parquet_shards(parquet_path, tokenizer_path, sample_size,
+                                   num_workers, tok_threads, domain_col,
+                                   domain_names):
+    """Tokenize a sample of docs from parquet shards without loading all into memory.
+
+    Reads one shard at a time (only text/domain columns), collects the sampled
+    texts, then tokenizes them via multiprocessing.  Produces the same result
+    as ``_tokenize_sampled_docs`` but with O(1) memory instead of O(N) —
+    peak usage is one shard (~5 GB) + collected sample (~2 GB) rather than
+    the full DataFrame (hundreds of GB).
+    """
+    shards = resolve_parquet_source(parquet_path)
+
+    import pyarrow.parquet as pq
+    from tqdm import tqdm as tqdm
+
+    # Get row counts per shard (metadata only, no data loaded)
+    shard_counts = [pq.read_metadata(p).num_rows for p in shards]
+    total_rows = sum(shard_counts)
+
+    if total_rows == 0:
+        return None, None
+
+    # Check schema for text column
+    schema_names = set(pq.read_schema(shards[0]).names)
+    if "text" not in schema_names:
+        print("  [warn] sampled_dataset has no 'text' column — skipping token analysis")
+        return None, None
+
+    # Sample indices (same RNG as _tokenize_sampled_docs for reproducibility)
+    if sample_size > 0 and sample_size < total_rows:
+        rng = np.random.default_rng(42)
+        indices = rng.choice(total_rows, size=sample_size, replace=False)
+        indices.sort()
+    else:
+        indices = np.arange(total_rows)
+
+    # Collect texts and domain labels shard by shard
+    texts = []
+    domain_labels = []
+    offset = 0
+    cols = ["text"]
+    if domain_col and domain_col in schema_names:
+        cols.append(domain_col)
+
+    for p, sc in zip(tqdm(shards, desc="  read shards", leave=False),
+                     shard_counts):
+        mask = (indices >= offset) & (indices < offset + sc)
+        if not mask.any():
+            offset += sc
+            continue
+        shard_indices = indices[mask] - offset
+        shard_df = pd.read_parquet(p, columns=cols)
+        shard_texts = shard_df["text"].to_numpy()[shard_indices]
+        texts.extend(shard_texts.tolist())
+        if domain_col and domain_col in shard_df.columns:
+            raw = shard_df[domain_col].to_numpy()[shard_indices]
+            domain_labels.extend(raw.tolist())
+        del shard_df
+        offset += sc
+
+    texts_arr = np.array(texts, dtype=object)
+
+    # Domain labels
+    dom_arr = None
+    if domain_labels:
+        raw = np.array(domain_labels)
+        if raw.dtype.kind in ("i", "u"):
+            dom_arr = raw.astype(np.int64)
+        elif raw.dtype.kind in ("U", "S", "O"):
+            label_map = {}
+            if domain_names:
+                for i, name in enumerate(domain_names):
+                    label_map[str(name)] = i
+                    label_map[i] = i
+            dom_arr = np.array(
+                [label_map.get(str(d), label_map.get(int(d), -1)
+                                if isinstance(d, (int, np.integer)) and not isinstance(d, bool)
+                                else -1)
+                 for d in raw],
+                dtype=np.int64,
+            )
+
+    # Tokenize collected texts (same multiprocessing logic as _tokenize_sampled_docs)
+    from multiprocessing import Pool
+
+    batch_size = max(256, len(texts_arr) // (num_workers * 4))
+    tasks = [
+        (i, texts_arr[i:i + batch_size].tolist())
+        for i in range(0, len(texts_arr), batch_size)
+    ]
+    parts = []
+    with Pool(num_workers, initializer=_init_tok_worker,
+              initargs=(tokenizer_path, tok_threads)) as pool:
+        for idx, lens in tqdm(
+            pool.imap_unordered(_tokenize_batch, tasks, chunksize=1),
+            total=len(tasks), desc="  tokenize", leave=False,
+        ):
+            parts.append((idx, lens))
+    parts.sort(key=lambda x: x[0])
+    tok_lens = np.concatenate(
+        [lens for _, lens in parts]
+    ) if parts else np.array([], dtype=np.int64)
+    return tok_lens, dom_arr
+
+
 # ── Plot helpers ─────────────────────────────────────────────────
 
 
@@ -2655,6 +2761,11 @@ def main():
                       f"(theoretical min: {crop_stats['theoretical_min_waste'] * 100:.1f}%, "
                       f"additional: {crop_stats['additional_waste'] * 100:.1f}%)")
 
+        # Free text column — no longer needed (tok_lens already extracted).
+        # This releases ~hundreds of GB before loading baseline.
+        if "text" in sampled_df.columns:
+            del sampled_df["text"]
+
         # ── Tokenize baseline for comparison (if --baseline-dir has sampled_dataset) ──
         baseline_tok_lens = None
         if args.baseline_dir:
@@ -2667,10 +2778,9 @@ def main():
             else:
                 bl_path = None
             if bl_path:
-                print(f"\n  Tokenizing baseline docs from: {bl_path}")
-                bl_df = pd.read_parquet(resolve_parquet_source(bl_path))
-                baseline_tok_lens, _ = _tokenize_sampled_docs(
-                    bl_df, tokenizer_path, args.tokenize_sample,
+                print(f"\n  Tokenizing baseline docs (streaming) from: {bl_path}")
+                baseline_tok_lens, _ = _tokenize_from_parquet_shards(
+                    bl_path, tokenizer_path, args.tokenize_sample,
                     num_workers, args.tokenizer_threads, domain_col, domain_names,
                 )
                 if baseline_tok_lens is not None and len(baseline_tok_lens) > 0:
