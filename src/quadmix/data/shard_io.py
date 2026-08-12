@@ -242,11 +242,12 @@ def read_one_shard_texts(
                 result.append("")
         return result
 
-    texts, _ = read_one_shard_texts_with_rows(
+    texts, parsed_rows = read_one_shard_texts_with_rows(
         shard_path, text_col, row_col, row_col_values,
         True, is_row_col_sequential, shard_total_rows,
     )
-    return texts
+    text_map = dict(zip(parsed_rows.tolist(), texts))
+    return [text_map.get(int(rv), "") for rv in row_col_values]
 
 
 def assemble_texts_array(

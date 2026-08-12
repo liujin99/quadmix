@@ -10,15 +10,12 @@ Based on Sections 3.2 and 3.3 of the paper.
 """
 
 from typing import List, Optional, Dict, Any, Tuple
-import warnings
-import os
 import numpy as np
 import numpy.typing as npt
 from quadmix.core.types import ParameterSet, QuaDMixConfig, ProxyResult
 from quadmix.pipeline.param_sampler import ParameterSampler
 from quadmix.pipeline.regression_model import RegressionModel
 from quadmix.pipeline.per_task_training import (
-    train_single_task_cv_fold,
     train_single_task,
     bootstrap_one,
 )

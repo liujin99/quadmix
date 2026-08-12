@@ -40,10 +40,8 @@ import numpy.typing as npt
 
 from quadmix.data.dataset_schema import DatasetSchema
 from quadmix.data.shard_io import (
-    _parse_shard_idx,
     _read_shard_metadata_pyarrow,
     read_one_shard_texts,
-    read_one_shard_texts_with_rows,
     assemble_texts_array,
 )
 from quadmix.utils.json_utils import sanitize_for_json

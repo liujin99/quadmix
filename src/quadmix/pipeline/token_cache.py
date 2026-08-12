@@ -7,7 +7,7 @@ Extracted from EssentialWebProxyRunner to isolate the caching concern.
 import os
 import time
 import threading
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import numpy as np
 import torch
@@ -101,31 +101,6 @@ class TokenCache:
                 if victim_sid in self._memory_cache:
                     victim = self._memory_cache.pop(victim_sid)
                     self._memory_cache_bytes -= (victim["rows"].nbytes + victim["tokens"].nbytes)
-
-    def query(self, sid: int, requested_rows: List[int]) -> Tuple[np.ndarray, List[int], List[int]]:
-        """Query memory cache for requested rows."""
-        with self._memory_cache_lock:
-            if sid not in self._memory_cache:
-                return np.zeros((0, self.block_size), dtype=np.int32), [], requested_rows
-            cache_data = self._memory_cache[sid]
-            cache_rows_set = set(int(r) for r in cache_data["rows"])
-            hit_rows_set = [r for r in requested_rows if int(r) in cache_rows_set]
-            miss_rows = [r for r in requested_rows if int(r) not in cache_rows_set]
-
-            if not hit_rows_set:
-                return np.zeros((0, self.block_size), dtype=np.int32), [], miss_rows
-
-            cache_rows_arr = cache_data["rows"]
-            cache_tokens = cache_data["tokens"]
-
-            sorted_hit_rows = sorted(hit_rows_set)
-            positions = np.searchsorted(cache_rows_arr, sorted_hit_rows)
-
-            valid_mask = positions < len(cache_rows_arr)
-            assert valid_mask.all(), f"Some hit rows not in cache: {sorted_hit_rows}"
-
-            tokens = cache_tokens[positions].copy()
-            return tokens, sorted_hit_rows, miss_rows
 
     def get_shard_tokens(self, sid: int, row_col_vals: np.ndarray) -> np.ndarray:
         """Look up tokens for row_col_vals from memory cache (no miss handling).

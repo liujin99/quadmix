@@ -42,6 +42,7 @@ import matplotlib.pyplot as plt
 from quadmix.data.dataset_schema import DatasetSchema
 from quadmix.data.metadata_manager import ShardMetadataManager
 from quadmix.pipeline.report import setup_style, save_fig
+from _common.stats_helpers import spearman_rho_vs_fixed
 
 
 # ── CLI ──────────────────────────────────────────────────────────
@@ -88,46 +89,6 @@ def resolve_schema_path(schema_arg):
         os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     )
     return os.path.join(project_root, schema_arg)
-
-
-# ── Spearman ρ (self-contained copy from analyze_pipeline_output.py) ──
-
-
-def _spearman_rho_vs_fixed(quality_scores, y, n_criteria, n_jobs):
-    """Spearman ρ of each quality criterion vs a FIXED y (e.g. char_counts).
-
-    Optimized: rank of y computed once, each x ranked with single argsort,
-    N_criteria columns ranked in parallel via threads.
-    """
-    y = np.asarray(y, dtype=np.float64)
-    n = len(y)
-    if n < 2:
-        return np.zeros(n_criteria, dtype=np.float64)
-    order_y = np.argsort(y, kind="quicksort")
-    ry = np.empty(n, dtype=np.float64)
-    ry[order_y] = np.arange(n, dtype=np.float64)
-    ry_m = ry - ry.mean()
-    ry_ss = float(np.sum(ry_m ** 2))
-
-    def _rho_col(k):
-        x = np.asarray(quality_scores[:, k], dtype=np.float64)
-        if len(x) < 2:
-            return 0.0
-        order_x = np.argsort(x, kind="quicksort")
-        rx = np.empty(n, dtype=np.float64)
-        rx[order_x] = np.arange(n, dtype=np.float64)
-        rx_m = rx - rx.mean()
-        den = (float(np.sum(rx_m ** 2)) * ry_ss) ** 0.5
-        return float(np.sum(rx_m * ry_m) / den) if den > 0 else 0.0
-
-    effective = n_jobs if n_jobs != -1 else (os.cpu_count() or 1)
-    if effective > 1 and n_criteria > 1:
-        from joblib import Parallel, delayed
-        results = Parallel(n_jobs=min(effective, n_criteria), prefer="threads")(
-            delayed(_rho_col)(k) for k in range(n_criteria)
-        )
-        return np.array(results, dtype=np.float64)
-    return np.array([_rho_col(k) for k in range(n_criteria)], dtype=np.float64)
 
 
 # ── Plot ─────────────────────────────────────────────────────────
@@ -267,7 +228,7 @@ def main():
 
     # ── Global ρ ──
     print(f"\nComputing global ρ...", flush=True)
-    global_rhos = _spearman_rho_vs_fixed(
+    global_rhos = spearman_rho_vs_fixed(
         quality_scores, char_counts, n_criteria, args.n_jobs
     )
     print(f"  Global ρ: {global_rhos}")
@@ -304,7 +265,7 @@ def main():
         mask = strata_masks[k]
         qs_k = quality_scores[mask]
         cc_k = char_counts[mask]
-        within_rhos[k] = _spearman_rho_vs_fixed(
+        within_rhos[k] = spearman_rho_vs_fixed(
             qs_k, cc_k, n_criteria, args.n_jobs
         )
         print(f"  Q{k + 1} ρ: {within_rhos[k]}")

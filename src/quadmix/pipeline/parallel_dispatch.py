@@ -253,7 +253,7 @@ def _worker_dynamic_loop(
                 except Exception as e:
                     print(f"[Worker {worker_id}] SharedMemory cleanup failed for exp {exp_id}: {e}")
             else:
-                exp_token_path = runner._get_exp_token_path(exp_id)
+                exp_token_path = runner._token_cache.get_exp_token_path(exp_id)
                 if os.path.exists(exp_token_path):
                     os.remove(exp_token_path)
                     print(f"[Worker {worker_id}] Cleaned temp file for exp {exp_id}")
