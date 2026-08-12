@@ -26,7 +26,7 @@ Usage:
     mgr.detected_quality_names       # ["category_score", "stem_relevance", ...]
 """
 
-import json, os, glob, time, re
+import json, os, glob, time
 
 import multiprocessing as mp
 
@@ -38,340 +38,15 @@ from quadmix.utils.concurrency import ConcurrencyConfig
 import numpy as np
 import numpy.typing as npt
 
-from quadmix.data.dataset_schema import DatasetSchema, _parse_quality_cols
+from quadmix.data.dataset_schema import DatasetSchema
+from quadmix.data.shard_io import (
+    _parse_shard_idx,
+    _read_shard_metadata_pyarrow,
+    read_one_shard_texts,
+    read_one_shard_texts_with_rows,
+    assemble_texts_array,
+)
 from quadmix.utils.json_utils import sanitize_for_json
-
-
-def _parse_shard_idx(basename: str) -> Optional[int]:
-    m = re.search(r'(\d+)', basename)
-    if m:
-        return int(m.group(1))
-    return None
-
-
-def _read_shard_metadata_pyarrow(shard_path: str, schema: DatasetSchema) -> dict:
-    import pyarrow.parquet as pq
-    basename = os.path.basename(shard_path)
-    parsed_idx = _parse_shard_idx(basename)
-
-    read_cols = schema.metadata_read_columns()
-    pf = pq.ParquetFile(shard_path)
-    table = pf.read(columns=read_cols, use_threads=False)
-    n = len(table)
-
-    domain_col_data = table.column(schema.domain_col).to_numpy(zero_copy_only=False)
-    if hasattr(domain_col_data.dtype, 'categories') or domain_col_data.dtype == object:
-        import pandas as pd
-        series = pd.Series(domain_col_data)
-        if schema.domain_names is not None:
-            all_cats = pd.CategoricalDtype(categories=schema.domain_names, ordered=False)
-            cat_series = series.astype(all_cats)
-            unseen = set(series.unique()) - set(schema.domain_names)
-            if unseen:
-                num_missing = int(sum(series.isin(unseen)))
-                import warnings
-                warnings.warn(
-                    f"domain_col '{schema.domain_col}' 有 {num_missing} 条数据的值 "
-                    f"不在 schema.domain_names 中 ({unseen})。"
-                    f"这些值会被映射为 -1，在采样时被忽略。"
-                    f"请在 domain_names 中补充这些值。"
-                )
-        else:
-            raise ValueError(
-                f"domain_col '{schema.domain_col}' is string/object type but "
-                f"schema.domain_names is not provided. String domain columns "
-                f"require domain_names in schema.yaml to ensure consistent "
-                f"cross-shard categorical encoding. "
-                f"Add domain_names to your schema config."
-            )
-        domain_arr = cat_series.cat.codes.to_numpy(dtype=np.int64)
-        cat_map = dict(zip(
-            cat_series.cat.categories,
-            range(len(cat_series.cat.categories)),
-        ))
-    elif domain_col_data.dtype.kind in ('i', 'u'):
-        domain_arr = domain_col_data.astype(np.int64)
-        unique_vals = np.unique(domain_arr)
-        if len(unique_vals) > 0 and (unique_vals.min() != 0 or
-            unique_vals.max() != len(unique_vals) - 1 or
-            not np.all(unique_vals == np.arange(len(unique_vals)))):
-            sort_idx = np.argsort(unique_vals)
-            sorted_vals = unique_vals[sort_idx]
-            positions = np.searchsorted(sorted_vals, domain_arr)
-            inv_order = np.empty_like(sort_idx)
-            inv_order[sort_idx] = np.arange(len(sort_idx))
-            domain_arr = inv_order[positions].astype(np.int64)
-            cat_map = {str(v): i for i, v in enumerate(unique_vals)}
-        else:
-            cat_map = None
-    else:
-        raise ValueError(
-            f"domain_col '{schema.domain_col}' has unsupported dtype "
-            f"'{domain_col_data.dtype}'. Expected string/object or integer."
-        )
-
-    quality_arr = np.column_stack([
-        table.column(c).to_numpy(zero_copy_only=False).astype(np.float64)
-        for c in schema.quality_cols
-    ])
-    nan_count = np.isnan(quality_arr).sum()
-    if nan_count > 0:
-        pct = nan_count / quality_arr.size * 100
-        print(f"[ShardMetadataManager] WARNING: quality scores have {nan_count} "
-              f"NaN values ({pct:.1f}%), filling with 0.0. "
-              f"建议在预处理时处理缺失值。")
-        quality_arr = np.nan_to_num(quality_arr, nan=0.0)
-
-    if schema.char_count_col is not None:
-        char_count_arr = table.column(schema.char_count_col).to_numpy(
-            zero_copy_only=False).astype(np.int64)
-    elif schema.needs_text_for_char_count():
-        import pandas as pd
-        text_series = pd.Series(table.column(schema.text_col).to_numpy(zero_copy_only=False))
-        char_count_arr = text_series.apply(
-            lambda t: len(str(t)) if t is not None else 0
-        ).to_numpy(dtype=np.int64)
-    else:
-        char_count_arr = np.zeros(n, dtype=np.int64)
-
-    if schema.row_in_shard_col is not None and schema.row_in_shard_col in table.column_names:
-        row_in_shard_arr = table.column(schema.row_in_shard_col).to_numpy(
-            zero_copy_only=False).astype(np.int64)
-    else:
-        row_in_shard_arr = np.arange(n, dtype=np.int64)
-
-    return {
-        "shard_idx": parsed_idx,
-        "path": shard_path,
-        "num_docs": n,
-        "domain": domain_arr,
-        "quality": quality_arr,
-        "char_count": char_count_arr,
-        "row_in_shard_col": row_in_shard_arr,
-        "domain_cat_map": cat_map,
-        "computed_char_count": schema.needs_text_for_char_count(),
-    }
-
-
-def _read_one_shard_texts(
-    shard_path: str,
-    text_col: str,
-    row_col: Optional[str],
-    row_col_values: Optional[np.ndarray],
-    local_rows: np.ndarray,
-    shard_total_rows: int,
-    is_row_col_sequential: bool,
-) -> List[str]:
-    """
-    Read texts from a single shard using pyarrow directly.
-
-    Returns texts in local_rows order, matching the caller's position mapping.
-
-    Three strategies based on select ratio and row_col characteristics:
-      1. No row_col or sequential row_col: read text column directly, numpy index
-      2. High select ratio (>0.3): read full shard, filter in memory
-      3. Low select ratio (≤0.3): pyarrow filter pushdown
-    """
-    import pyarrow.parquet as pq
-
-    n_requested = len(local_rows)
-    select_ratio = n_requested / max(shard_total_rows, 1)
-
-    if row_col is None or is_row_col_sequential:
-        if row_col is None and n_requested < shard_total_rows * 0.05 and shard_total_rows > 1000:
-            import logging
-            logging.getLogger(__name__).warning(
-                f"Reading {shard_total_rows} rows from shard for only {n_requested} "
-                f"requested rows (ratio {n_requested/max(shard_total_rows,1):.2%}). "
-                f"Consider adding row_in_shard_col to schema for efficient filtering."
-            )
-        table = pq.read_table(
-            shard_path, columns=[text_col], use_threads=False
-        )
-        text_arr = table.column(text_col).to_numpy(zero_copy_only=False)
-        result = []
-        for i in local_rows:
-            if 0 <= int(i) < len(text_arr):
-                val = text_arr[int(i)]
-                result.append(str(val) if val is not None else "")
-            else:
-                result.append("")
-        return result
-
-    if select_ratio > 0.3:
-        table = pq.read_table(
-            shard_path, columns=[row_col, text_col], use_threads=False
-        )
-        row_arr = table.column(row_col).to_numpy(zero_copy_only=False)
-        text_arr = table.column(text_col).to_numpy(zero_copy_only=False)
-        chunk_map: Dict = {}
-        for k, v in zip(row_arr, text_arr):
-            chunk_map[int(k)] = str(v) if v is not None else ""
-        return [chunk_map.get(int(rv), "") for rv in row_col_values]
-
-    table = pq.read_table(
-        shard_path,
-        columns=[row_col, text_col],
-        filters=[(row_col, "in", row_col_values.tolist())],
-        use_threads=False,
-    )
-    row_arr = table.column(row_col).to_numpy(zero_copy_only=False)
-    text_arr = table.column(text_col).to_numpy(zero_copy_only=False)
-    chunk_map: Dict = {}
-    for k, v in zip(row_arr, text_arr):
-        chunk_map[int(k)] = str(v) if v is not None else ""
-    return [chunk_map.get(int(rv), "") for rv in row_col_values]
-
-
-def read_one_shard_texts_with_rows(
-    shard_path: str,
-    text_col: str,
-    row_col: Optional[str],
-    row_col_values: Optional[np.ndarray],
-    has_row_in_shard: bool,
-    is_row_col_sequential: bool,
-    shard_total_rows: int,
-) -> Tuple[List[str], np.ndarray]:
-    """Read texts from a single shard using pyarrow, returning (texts, parsed_rows).
-
-    texts[i] corresponds to parsed_rows[i].  parsed_rows is sorted ascending
-    (matching the current df.sort_values(row_col) convention used by tokenize
-    pipeline).  The caller maps parsed_rows to token array positions.
-
-    Same adaptive strategy as _read_one_shard_texts:
-      1. No row_col or sequential: read text column directly, numpy index
-      2. High select ratio (>0.3): read full shard, filter in memory
-      3. Low select ratio (≤0.3): pyarrow filter pushdown
-    """
-    import pyarrow.parquet as pq
-
-    if not has_row_in_shard or row_col is None:
-        table = pq.read_table(
-            shard_path, columns=[text_col], use_threads=False
-        )
-        text_arr = table.column(text_col).to_numpy(zero_copy_only=False)
-        texts = [str(v) if v is not None else "" for v in text_arr]
-        parsed_rows = np.arange(len(texts), dtype=np.int64)
-        return texts, parsed_rows
-
-    n_requested = len(row_col_values)
-    select_ratio = n_requested / max(shard_total_rows, 1)
-
-    if is_row_col_sequential:
-        table = pq.read_table(
-            shard_path, columns=[text_col], use_threads=False
-        )
-        text_arr = table.column(text_col).to_numpy(zero_copy_only=False)
-        texts = []
-        for rv in row_col_values:
-            idx = int(rv)
-            if 0 <= idx < len(text_arr):
-                val = text_arr[idx]
-                texts.append(str(val) if val is not None else "")
-            else:
-                texts.append("")
-        parsed_rows = row_col_values.astype(np.int64)
-        return texts, parsed_rows
-
-    if select_ratio > 0.3:
-        table = pq.read_table(
-            shard_path, columns=[row_col, text_col], use_threads=False
-        )
-        row_arr = table.column(row_col).to_numpy(zero_copy_only=False)
-        text_arr = table.column(text_col).to_numpy(zero_copy_only=False)
-        chunk_map: Dict = {}
-        for k, v in zip(row_arr, text_arr):
-            chunk_map[int(k)] = str(v) if v is not None else ""
-        texts = [chunk_map.get(int(rv), "") for rv in row_col_values]
-        parsed_rows = row_col_values.astype(np.int64)
-        return texts, parsed_rows
-
-    table = pq.read_table(
-        shard_path,
-        columns=[row_col, text_col],
-        filters=[(row_col, "in", row_col_values.tolist())],
-        use_threads=False,
-    )
-    row_arr = table.column(row_col).to_numpy(zero_copy_only=False)
-    text_arr = table.column(text_col).to_numpy(zero_copy_only=False)
-    sort_idx = np.argsort(row_arr)
-    texts = [str(text_arr[i]) if text_arr[i] is not None else "" for i in sort_idx]
-    parsed_rows = row_arr[sort_idx].astype(np.int64)
-    return texts, parsed_rows
-
-
-def _assemble_texts_dict(
-    global_indices: npt.NDArray[np.int64],
-    shard_groups: Dict[int, Tuple[str, npt.NDArray[np.int64]]],
-    shard_results: Dict[int, List[str]],
-    shard_starts: npt.NDArray[np.int64],
-) -> List[str]:
-    """Reference dict-based text assembly.
-
-    Kept for differential testing against the vectorized path. Builds a
-    position map ``{global_idx: [positions]}`` then scatters each shard's
-    texts to all matching positions. O(n) Python-level dict work.
-    """
-    pos_map: Dict[int, List[int]] = {}
-    for p, idx in enumerate(global_indices):
-        pos_map.setdefault(int(idx), []).append(p)
-    result = [""] * len(global_indices)
-    for sid, (_shard_path, local_rows) in shard_groups.items():
-        texts = shard_results[sid]
-        base = int(shard_starts[sid])
-        for i, local_row in enumerate(local_rows):
-            global_idx = base + int(local_row)
-            for pos in pos_map.get(int(global_idx), []):
-                result[pos] = texts[i]
-    return result
-
-
-def _assemble_texts_array(
-    global_indices: npt.NDArray[np.int64],
-    shard_groups: Dict[int, Tuple[str, npt.NDArray[np.int64]]],
-    shard_results: Dict[int, List[str]],
-    shard_starts: npt.NDArray[np.int64],
-) -> List[str]:
-    """Vectorized text assembly via argsort + searchsorted (Plan A2).
-
-    Correct for both unique and duplicate ``global_indices``; auto-branches
-    to a per-text loop only when duplicates exist in a shard. No caller
-    contract: any unassigned position stays as ``""`` (visible failure
-    mode, never silent string corruption).
-
-    Math:
-      ``order = argsort(global_indices, stable)`` makes ``sorted_gids``
-      sorted ascending. For a gid ``g``, ``searchsorted(sorted_gids, g,
-      'left'..'right')`` brackets the slice where ``sorted_gids == g``;
-      ``order[left:right]`` enumerates every original position whose
-      value is ``g``. Assigning the text to those positions is therefore
-      identical to the dict scatter.
-    """
-    n = len(global_indices)
-    if n == 0:
-        return []
-    gids = np.asarray(global_indices, dtype=np.int64)
-    order = np.argsort(gids, kind="stable")
-    sorted_gids = gids[order]
-    result = np.full(n, "", dtype=object)
-    for sid, (_shard_path, local_rows) in shard_groups.items():
-        texts = shard_results[sid]
-        shard_gids = shard_starts[sid] + np.asarray(local_rows, dtype=np.int64)
-        left = np.searchsorted(sorted_gids, shard_gids, side="left")
-        right = np.searchsorted(sorted_gids, shard_gids, side="right")
-        if np.array_equal(left + 1, right):
-            # All gids in this shard are unique across the request →
-            # one position per gid, vectorized scatter.
-            result[order[left]] = texts
-        else:
-            # Duplicate gids present → assign text to every matching
-            # position via the bracketed slice.
-            for i in range(len(texts)):
-                lo = int(left[i])
-                hi = int(right[i])
-                for pos in order[lo:hi]:
-                    result[pos] = texts[i]
-    return result.tolist()
 
 
 _CACHE_FILENAME = "metadata_cache.npz"
@@ -401,18 +76,30 @@ class ShardMetadataManager:
     ):
         self._dir = preprocessed_dir
         self._schema = schema
+        self._max_workers = max_workers
 
+        self._init_paths_and_index(index_file)
+        self._validate_first_shard()
+
+        if not self._try_load_cache():
+            self._load_from_shards()
+            self._write_cache()
+
+    # ── Init helpers (split from god constructor) ──
+
+    def _init_paths_and_index(self, index_file: Optional[str]) -> None:
+        """Discover shard files and load shard_index.json."""
         self._shard_files: List[str] = sorted(
-            glob.glob(os.path.join(preprocessed_dir, "*.parquet"))
+            glob.glob(os.path.join(self._dir, "*.parquet"))
         )
         if not self._shard_files:
             raise FileNotFoundError(
-                f"No .parquet files found in {preprocessed_dir}"
+                f"No .parquet files found in {self._dir}"
             )
 
         self._shard_index: Optional[dict] = None
         if index_file is None:
-            index_candidate = os.path.join(preprocessed_dir, "shard_index.json")
+            index_candidate = os.path.join(self._dir, "shard_index.json")
             if os.path.exists(index_candidate):
                 index_file = index_candidate
         if index_file:
@@ -427,19 +114,22 @@ class ShardMetadataManager:
                       f"but found {actual_shards} files. "
                       f"May need to re-run preprocessing.")
 
-        self._validate_first_shard()
-
+    def _try_load_cache(self) -> bool:
+        """Check cache validity and load if valid. Returns True if loaded."""
         total_shards = len(self._shard_files)
-        load_t0 = time.time()
+        cache_path = os.path.join(self._dir, _CACHE_FILENAME)
+        shard_info_path = os.path.join(self._dir, "metadata_shard_info.json")
 
-        cache_path = os.path.join(preprocessed_dir, _CACHE_FILENAME)
-        shard_info_path = os.path.join(preprocessed_dir, "metadata_shard_info.json")
+        self._cache_path = cache_path
+        self._shard_info_path = shard_info_path
 
         current_shard_stats = {
             os.path.basename(f): {"size": os.path.getsize(f), "mtime": os.path.getmtime(f)}
             for f in self._shard_files
         }
         current_basenames = sorted(current_shard_stats.keys())
+        self._cache_shard_stats = current_shard_stats
+        self._cache_basenames = current_basenames
 
         cache_valid = False
         if os.path.exists(cache_path) and os.path.exists(shard_info_path):
@@ -476,59 +166,65 @@ class ShardMetadataManager:
             except Exception as e:
                 print(f"[ShardMetadataManager] Cache read error: {e}")
 
-        if cache_valid:
-            print(f"[ShardMetadataManager] Cache valid, loading from: {cache_path}")
-            cached = np.load(cache_path, allow_pickle=False)
-            self._domain_labels = cached["domain_labels"]
-            self._quality_scores = cached["quality_scores"]
-            self._doc_char_counts = cached["doc_char_counts"]
-            self._num_docs = len(self._domain_labels)
-            self._num_shards = total_shards
+        if not cache_valid:
+            return False
 
-            self._per_shard_info = cached_info["per_shard_info"]
-            self._shard_starts = np.array(
-                [s["start_idx"] for s in self._per_shard_info], dtype=np.int64
-            )
+        print(f"[ShardMetadataManager] Cache valid, loading from: {cache_path}")
+        cached = np.load(cache_path, allow_pickle=False)
+        self._domain_labels = cached["domain_labels"]
+        self._quality_scores = cached["quality_scores"]
+        self._doc_char_counts = cached["doc_char_counts"]
+        self._num_docs = len(self._domain_labels)
+        self._num_shards = total_shards
 
-            if "row_in_shard_cols_concat" in cached:
-                concat = cached["row_in_shard_cols_concat"]
-                boundaries = cached["row_in_shard_boundaries"]
-                self._row_in_shard_cols = {}
-                for i in range(len(self._per_shard_info)):
-                    start = int(boundaries[i])
-                    end = int(boundaries[i + 1]) if i + 1 < len(boundaries) else len(concat)
-                    self._row_in_shard_cols[i] = concat[start:end]
-            else:
-                self._row_in_shard_cols = {}
+        self._per_shard_info = cached_info["per_shard_info"]
+        self._shard_starts = np.array(
+            [s["start_idx"] for s in self._per_shard_info], dtype=np.int64
+        )
 
-            self._is_row_col_sequential = self._check_row_col_sequential()
-            self._row_in_shard_col_sorted_cache = {}
-            self._row_in_shard_reverse_map_cache: Dict[int, dict] = {}
+        if "row_in_shard_cols_concat" in cached:
+            concat = cached["row_in_shard_cols_concat"]
+            boundaries = cached["row_in_shard_boundaries"]
+            self._row_in_shard_cols = {}
+            for i in range(len(self._per_shard_info)):
+                start = int(boundaries[i])
+                end = int(boundaries[i + 1]) if i + 1 < len(boundaries) else len(concat)
+                self._row_in_shard_cols[i] = concat[start:end]
+        else:
+            self._row_in_shard_cols = {}
 
-            unique_domains = np.unique(self._domain_labels)
-            if self._schema.domain_names is not None:
-                self._num_domains = len(self._schema.domain_names)
-            else:
-                self._num_domains = len(unique_domains)
-            self._num_quality_criteria = len(self._schema.quality_cols)
-            self._domain_cat_map = cached_info.get("domain_label_map")
-            self._detected_domain_names = self._build_domain_names(unique_domains)
-            self._detected_quality_names = (
-                self._schema.quality_names
-                if self._schema.quality_names is not None
-                else list(self._schema.quality_cols)
-            )
-            valid_labels = self._domain_labels[self._domain_labels >= 0]
-            self._domain_counts = np.bincount(valid_labels, minlength=self._num_domains)
+        self._is_row_col_sequential = self._check_row_col_sequential()
+        self._row_in_shard_col_sorted_cache = {}
+        self._row_in_shard_reverse_map_cache: Dict[int, dict] = {}
 
-            total_time = time.time() - load_t0
-            print(f"[ShardMetadataManager] Loaded {self._num_docs:,} docs "
-                  f"({self._num_shards} shards) from cache in {total_time:.1f}s")
-            print(f"[ShardMetadataManager] Quality scores: {self._quality_scores.shape}")
-            return
+        unique_domains = np.unique(self._domain_labels)
+        if self._schema.domain_names is not None:
+            self._num_domains = len(self._schema.domain_names)
+        else:
+            self._num_domains = len(unique_domains)
+        self._num_quality_criteria = len(self._schema.quality_cols)
+        self._domain_cat_map = cached_info.get("domain_label_map")
+        self._detected_domain_names = self._build_domain_names(unique_domains)
+        self._detected_quality_names = (
+            self._schema.quality_names
+            if self._schema.quality_names is not None
+            else list(self._schema.quality_cols)
+        )
+        valid_labels = self._domain_labels[self._domain_labels >= 0]
+        self._domain_counts = np.bincount(valid_labels, minlength=self._num_domains)
+
+        print(f"[ShardMetadataManager] Loaded {self._num_docs:,} docs "
+              f"({self._num_shards} shards) from cache")
+        print(f"[ShardMetadataManager] Quality scores: {self._quality_scores.shape}")
+        return True
+
+    def _load_from_shards(self) -> None:
+        """Load metadata from all shards in parallel."""
+        total_shards = len(self._shard_files)
+        load_t0 = time.time()
 
         cfg = ConcurrencyConfig()
-        n_workers = max_workers if max_workers is not None else min(cfg.max_io_workers, total_shards)
+        n_workers = self._max_workers if self._max_workers is not None else min(cfg.max_io_workers, total_shards)
         print(f"[ShardMetadataManager] Discovered {total_shards} shards, "
               f"loading metadata with {n_workers} workers "
               f"(schema: domain_col='{self._schema.domain_col}', "
@@ -652,17 +348,26 @@ class ShardMetadataManager:
         print(f"[ShardMetadataManager] Domain labels: {self._domain_labels.shape}, "
               f"Quality scores: {self._quality_scores.shape}")
 
+    def _write_cache(self) -> None:
+        """Save metadata cache to disk."""
         try:
+            row_col_list = [
+                self._row_in_shard_cols[i] for i in range(len(self._per_shard_info))
+            ]
+            row_in_shard_boundaries = [0]
+            for arr in row_col_list:
+                row_in_shard_boundaries.append(row_in_shard_boundaries[-1] + len(arr))
+
             row_in_shard_cols_concat = np.concatenate(row_col_list)
-            row_in_shard_boundaries = np.array(row_col_boundaries, dtype=np.int64)
-            tmp_npz = cache_path + ".tmp"
+            row_in_shard_boundaries = np.array(row_in_shard_boundaries, dtype=np.int64)
+            tmp_npz = self._cache_path + ".tmp"
             np.savez(tmp_npz,
                      domain_labels=self._domain_labels,
                      quality_scores=self._quality_scores,
                      doc_char_counts=self._doc_char_counts,
                      row_in_shard_cols_concat=row_in_shard_cols_concat,
                      row_in_shard_boundaries=row_in_shard_boundaries)
-            os.replace(tmp_npz, cache_path)
+            os.replace(tmp_npz, self._cache_path)
             schema_key = (
                 f"{self._schema.domain_col}"
                 f":{','.join(self._schema.quality_cols)}"
@@ -673,21 +378,23 @@ class ShardMetadataManager:
                 f":quality_directions={','.join(str(d) for d in self._schema.quality_directions)}"
             )
             cache_meta = {
-                "shard_basenames": current_basenames,
-                "shard_stats": current_shard_stats,
+                "shard_basenames": self._cache_basenames,
+                "shard_stats": self._cache_shard_stats,
                 "per_shard_info": self._per_shard_info,
                 "domain_label_map": self._domain_cat_map,
                 "schema_key": schema_key,
             }
-            tmp_json = shard_info_path + ".tmp"
+            tmp_json = self._shard_info_path + ".tmp"
             with open(tmp_json, "w") as f:
                 json.dump(sanitize_for_json(cache_meta), f)
-            os.replace(tmp_json, shard_info_path)
-            cache_size = os.path.getsize(cache_path) / (1024 ** 3)
-            print(f"[ShardMetadataManager] Saved metadata cache: {cache_path} "
+            os.replace(tmp_json, self._shard_info_path)
+            cache_size = os.path.getsize(self._cache_path) / (1024 ** 3)
+            print(f"[ShardMetadataManager] Saved metadata cache: {self._cache_path} "
                   f"({cache_size:.2f} GB)")
         except Exception as e:
             print(f"[ShardMetadataManager] Failed to save cache: {e}")
+
+    # ── Validation ──
 
     def _validate_first_shard(self) -> None:
         """Validate schema against first and last shard's columns and dtypes."""
@@ -950,7 +657,6 @@ class ShardMetadataManager:
 
         t0 = time.time()
 
-        # ── Pre-compute row_col_values in main process (worker can't access self) ──
         shard_task_args: Dict[int, Tuple] = {}
         for sid, (shard_path, local_rows) in shard_groups.items():
             shard_total_rows = self._per_shard_info[sid]["num_docs"]
@@ -968,14 +674,14 @@ class ShardMetadataManager:
         if n_workers <= 1:
             for sid in shard_groups:
                 args = shard_task_args[sid]
-                shard_results[sid] = _read_one_shard_texts(*args)
+                shard_results[sid] = read_one_shard_texts(*args)
         else:
             log_interval = max(1, n_shards // 20)
             done = 0
             ctx = mp.get_context("spawn")
             with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as pool:
                 future_map = {
-                    pool.submit(_read_one_shard_texts, *shard_task_args[sid]): sid
+                    pool.submit(read_one_shard_texts, *shard_task_args[sid]): sid
                     for sid in shard_groups
                 }
                 for future in as_completed(future_map):
@@ -989,7 +695,7 @@ class ShardMetadataManager:
                         print(f"[read_texts] {done}/{n_shards} shards "
                               f"({pct:.0f}%) — elapsed {elapsed:.0f}s, ETA {eta:.0f}s")
 
-        result = _assemble_texts_array(
+        result = assemble_texts_array(
             global_indices, shard_groups, shard_results, self._shard_starts
         )
 

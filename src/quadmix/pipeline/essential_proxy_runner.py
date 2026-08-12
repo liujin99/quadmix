@@ -730,7 +730,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                     self._cache_misses += len(miss_rcv)
                     miss_rcv_arr = np.array(miss_rcv, dtype=np.int64)
 
-                    from quadmix.data.metadata_manager import read_one_shard_texts_with_rows
+                    from quadmix.data.shard_io import read_one_shard_texts_with_rows
                     schema = self.metadata_manager.schema
                     text_col = schema.text_col
                     row_col = schema.row_in_shard_col if self.metadata_manager._has_row_in_shard else None
