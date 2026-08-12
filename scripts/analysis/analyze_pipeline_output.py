@@ -2039,7 +2039,7 @@ def _analyze_optimizer_domain_proportions(
         f"[Optimizer] Retraining LightGBM ({n} samples, "
         f"{(num_criteria + 4) * num_domains} features)..."
     )
-    from quadmix.pipeline.optimizer import RegressionModel
+    from quadmix.pipeline.regression_model import RegressionModel
 
     model = RegressionModel(model_type="lightgbm")
     model.fit(
