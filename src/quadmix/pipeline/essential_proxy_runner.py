@@ -50,6 +50,7 @@ from quadmix.pipeline.parallel_dispatch import (
     _worker_dynamic_loop,
     _tokenize_shard_parallel,
 )
+from quadmix.pipeline.token_cache import TokenCache
 
 from collections import namedtuple
 
@@ -303,10 +304,11 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         self._cache_hits = 0
         self._cache_misses = 0
 
-        self._memory_cache: Dict[int, dict] = {}
-        self._memory_cache_bytes: int = 0
-        self._memory_cache_lru: List[int] = []
-        self._memory_cache_lock = threading.Lock()
+        self._token_cache = TokenCache(
+            token_cache_dir=self.token_cache_dir,
+            block_size=self.block_size,
+            memory_cache_max_gb=self.memory_cache_max_gb,
+        )
 
     def _tokenize_texts(self, texts: List[str]) -> torch.Tensor:
         """Tokenize a list of texts into [M, block_size] int64 tensor."""
@@ -321,159 +323,6 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             )
             all_ids.append(enc["input_ids"])
         return torch.cat(all_ids, dim=0)
-
-    def _memory_cache_get_rows(self, sid: int) -> set:
-        """Return set of row_in_shard already in memory cache for this shard."""
-        with self._memory_cache_lock:
-            if sid not in self._memory_cache:
-                return set()
-            if sid in self._memory_cache_lru:
-                self._memory_cache_lru.remove(sid)
-                self._memory_cache_lru.append(sid)
-            return set(int(r) for r in self._memory_cache[sid]["rows"])
-
-    def _memory_cache_add_rows(self, sid: int, new_rows: np.ndarray, new_tokens: np.ndarray,
-                                skip_eviction: bool = False):
-        """Add new rows to memory cache. LRU eviction when over limit."""
-        with self._memory_cache_lock:
-            old_bytes = 0
-            if sid in self._memory_cache:
-                old_data = self._memory_cache[sid]
-                old_bytes = old_data["rows"].nbytes + old_data["tokens"].nbytes
-
-            if sid not in self._memory_cache:
-                self._memory_cache[sid] = {
-                    "rows": np.array([], dtype=np.int64),
-                    "tokens": np.zeros((0, new_tokens.shape[1]), dtype=np.int32),
-                }
-
-            old = self._memory_cache[sid]
-            old_rows = old["rows"]
-            old_tokens = old["tokens"]
-
-            combined_rows = np.concatenate([old_rows, new_rows])
-            combined_tokens = np.concatenate([old_tokens, new_tokens])
-
-            reversed_rows = combined_rows[::-1]
-            _, inverse_rev = np.unique(reversed_rows, return_index=True)
-            keep_indices = len(combined_rows) - 1 - inverse_rev
-            keep_rows = combined_rows[keep_indices]
-            keep_tokens = combined_tokens[keep_indices]
-
-            sort_order = np.argsort(keep_rows)
-            unique_rows = keep_rows[sort_order].astype(np.int64)
-            final_tokens = keep_tokens[sort_order]
-
-            new_bytes = unique_rows.nbytes + final_tokens.nbytes
-            self._memory_cache[sid] = {"rows": unique_rows, "tokens": final_tokens}
-
-            self._memory_cache_bytes += new_bytes - old_bytes
-            if sid in self._memory_cache_lru:
-                self._memory_cache_lru.remove(sid)
-            self._memory_cache_lru.append(sid)
-
-            if skip_eviction:
-                return
-
-            max_bytes = int(self.memory_cache_max_gb * 1024 ** 3)
-            while self._memory_cache_bytes > max_bytes and self._memory_cache_lru:
-                victim_sid = self._memory_cache_lru.pop(0)
-                if victim_sid in self._memory_cache:
-                    victim = self._memory_cache.pop(victim_sid)
-                    self._memory_cache_bytes -= (victim["rows"].nbytes + victim["tokens"].nbytes)
-
-    def _memory_cache_query(self, sid: int, requested_rows: List[int]) -> Tuple[np.ndarray, List[int], List[int]]:
-        """Query memory cache for requested rows."""
-        with self._memory_cache_lock:
-            if sid not in self._memory_cache:
-                return np.zeros((0, self.block_size), dtype=np.int32), [], requested_rows
-            cache_data = self._memory_cache[sid]
-            cache_rows_set = set(int(r) for r in cache_data["rows"])
-            hit_rows_set = [r for r in requested_rows if int(r) in cache_rows_set]
-            miss_rows = [r for r in requested_rows if int(r) not in cache_rows_set]
-
-            if not hit_rows_set:
-                return np.zeros((0, self.block_size), dtype=np.int32), [], miss_rows
-
-            cache_rows_arr = cache_data["rows"]
-            cache_tokens = cache_data["tokens"]
-
-            sorted_hit_rows = sorted(hit_rows_set)
-            positions = np.searchsorted(cache_rows_arr, sorted_hit_rows)
-
-            valid_mask = positions < len(cache_rows_arr)
-            assert valid_mask.all(), f"Some hit rows not in cache: {sorted_hit_rows}"
-
-            tokens = cache_tokens[positions].copy()
-            return tokens, sorted_hit_rows, miss_rows
-
-    def _get_shard_token_path(self, shard_idx: int) -> str:
-        """Path to disk cache for a shard's selected tokens (npz, mmap-compatible)."""
-        return os.path.join(
-            self.token_cache_dir,
-            f"shard_{shard_idx:05d}_bs{self.block_size}.npz",
-        )
-
-    def _cached_shard_rows(self, sid: int) -> set:
-        """Return set of row_in_shard already cached for this shard."""
-        cache_path = self._get_shard_token_path(sid)
-        if not os.path.exists(cache_path):
-            return set()
-        with np.load(cache_path) as data:
-            rows = set(data['rows'].tolist())
-        return rows
-
-    def _cache_add_rows(self, sid: int, new_rows: np.ndarray, new_tokens: torch.Tensor):
-        """Add new rows to shard cache (immediate write with file lock)."""
-        import fcntl
-
-        cache_path = self._get_shard_token_path(sid)
-        cache_dir = os.path.dirname(cache_path)
-        os.makedirs(cache_dir, exist_ok=True)
-
-        new_np = new_tokens.numpy().astype(np.int32)
-
-        cache_no_ext = cache_path[:-4]
-        temp_path = cache_no_ext + f".tmp.{int(time.time() * 1000000)}"
-        actual_temp = temp_path + ".npz"
-
-        lock_path = cache_path + ".lock"
-        os.makedirs(os.path.dirname(lock_path), exist_ok=True)
-
-        with open(lock_path, 'w') as lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-            try:
-                if os.path.exists(cache_path):
-                    with np.load(cache_path) as old:
-                        old_rows = old['rows'].copy()
-                        old_tokens = old['tokens'].copy()
-                else:
-                    old_rows = np.array([], dtype=np.int64)
-                    old_tokens = np.zeros((0, new_np.shape[1]), dtype=np.int32)
-
-                combined_rows = np.concatenate([old_rows, new_rows])
-                combined_tokens = np.concatenate([old_tokens, new_np])
-
-                row_to_idx = {int(r): i for i, r in enumerate(combined_rows)}
-                unique_rows = np.array(sorted(row_to_idx.keys()), dtype=np.int64)
-                final_tokens = combined_tokens[[row_to_idx[int(r)] for r in unique_rows]]
-
-                np.savez(temp_path, tokens=final_tokens, rows=unique_rows)
-                os.replace(actual_temp, cache_path)
-            finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-                if os.path.exists(actual_temp):
-                    try:
-                        os.remove(actual_temp)
-                    except OSError:
-                        pass
-
-    def _get_exp_token_path(self, exp_id: int) -> str:
-        """Path to temporary token file for a single experiment."""
-        return os.path.join(
-            self.token_cache_dir,
-            f"exp_{exp_id:04d}_tokens.npy"
-        )
 
     def _pack_exp_tokens_by_shard(
             self,
@@ -505,26 +354,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             local_rows = group_global - mgr._shard_starts[sid]
             row_col_vals = mgr.local_to_row_col(sid, local_rows)
 
-            with self._memory_cache_lock:
-                cache = self._memory_cache.get(sid)
-                if cache is None:
-                    raise RuntimeError(
-                        f"[Pack] exp {exp_id} shard {sid}: not in memory cache. "
-                        f"This should not happen after tokenize_all_needed."
-                    )
-                cache_rows = cache["rows"]
-                cache_tokens = cache["tokens"]
-                positions = np.searchsorted(cache_rows, row_col_vals)
-                positions = np.clip(positions, 0, len(cache_rows) - 1)
-                matched = cache_rows[positions] == row_col_vals
-                if not matched.all():
-                    n_missing = int((~matched).sum())
-                    raise RuntimeError(
-                        f"[Pack] exp {exp_id} shard {sid}: {n_missing}/{len(row_col_vals)} "
-                        f"documents not found in tokenized cache. "
-                        f"Check for shard tokenization failures."
-                    )
-                result[group_pos] = cache_tokens[positions]
+            result[group_pos] = self._token_cache.get_shard_tokens(sid, row_col_vals)
 
         return result
 
@@ -565,11 +395,11 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             row_col_vals = mgr.local_to_row_col(sid, all_needed_arr)
             row_col_int = set(int(v) for v in row_col_vals)
 
-            memory_cached = self._memory_cache_get_rows(sid)
+            memory_cached = self._token_cache.get_rows(sid)
             hit_in_memory = [v for v in row_col_int if v in memory_cached]
 
             remaining = [v for v in row_col_int if v not in memory_cached]
-            disk_cached = self._cached_shard_rows(sid)
+            disk_cached = self._token_cache.cached_shard_rows(sid)
             hit_in_disk = [v for v in remaining if v in disk_cached]
 
             miss_row_col = [v for v in remaining if v not in disk_cached]
@@ -582,7 +412,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 total_miss_rows += len(miss_row_col)
 
             if hit_in_disk:
-                cache_path = self._get_shard_token_path(sid)
+                cache_path = self._token_cache.get_shard_token_path(sid)
                 with np.load(cache_path) as data:
                     disk_rows = data['rows']
                     disk_tokens = data['tokens']
@@ -591,7 +421,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                     positions = np.array([row_to_pos[int(r)] for r in hit_in_disk], dtype=np.int64)
                     hit_tokens = disk_tokens[positions]
 
-                self._memory_cache_add_rows(sid, np.array(hit_in_disk, dtype=np.int64), hit_tokens)
+                self._token_cache.add_rows(sid, np.array(hit_in_disk, dtype=np.int64), hit_tokens)
 
         if total_miss_rows == 0:
             print(f"[BatchTokenize] All {n_shards} shards fully cached, 0 miss rows")
@@ -616,12 +446,12 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             )
 
             for sid, parsed_rows, miss_tokens, io_time, tokenize_time, total_time in parallel_results:
-                self._memory_cache_add_rows(sid, parsed_rows, miss_tokens)
+                self._token_cache.add_rows(sid, parsed_rows, miss_tokens)
 
                 if async_write_queue is not None:
                     async_write_queue.put((sid, parsed_rows, miss_tokens))
                 else:
-                    self._cache_add_rows(sid, parsed_rows, torch.from_numpy(miss_tokens))
+                    self._token_cache.add_to_disk(sid, parsed_rows, torch.from_numpy(miss_tokens))
 
                 print(
                     f"  [Shard {sid}] {len(parsed_rows):,} docs (IO {io_time:.1f}s, tok {tokenize_time:.1f}s, total {total_time:.1f}s)")
@@ -649,7 +479,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                 shm.close()
                 exp_token_paths[exp_id] = f"shm://{shm.name}"
             else:
-                exp_token_path = self._get_exp_token_path(exp_id)
+                exp_token_path = self._token_cache.get_exp_token_path(exp_id)
                 np.save(exp_token_path, result)
                 exp_token_paths[exp_id] = exp_token_path
 
@@ -683,7 +513,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             return result
 
         if exp_id is not None:
-            exp_token_path = self._get_exp_token_path(exp_id)
+            exp_token_path = self._token_cache.get_exp_token_path(exp_id)
             if os.path.exists(exp_token_path):
                 print(f"  [TokenLoad] WARNING: exp {exp_id:04d} fallback to temp file, "
                       f"this should not happen after tokenize_all_needed")
@@ -700,7 +530,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
         all_tokens = []
         for sid, (shard_path, local_rows) in shard_groups.items():
-            cache_path = self._get_shard_token_path(sid)
+            cache_path = self._token_cache.get_shard_token_path(sid)
 
             row_col_vals = mgr.local_to_row_col(sid, local_rows)
             row_col_int = [int(v) for v in row_col_vals]
@@ -747,7 +577,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                           f"(hit {len(hit_rcv):,} from cache)...")
 
                     miss_tokens_full = self._tokenize_texts(selected_texts)
-                    self._cache_add_rows(sid, parsed_rows, miss_tokens_full)
+                    self._token_cache.add_to_disk(sid, parsed_rows, miss_tokens_full)
 
                     row_to_pos_new = {int(r): i for i, r in enumerate(parsed_rows)}
                     positions = np.array(
@@ -789,7 +619,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                       f"tokenizing {len(selected_texts):,} docs...")
 
                 tokenized = self._tokenize_texts(selected_texts)
-                self._cache_add_rows(sid, parsed_rows, tokenized)
+                self._token_cache.add_to_disk(sid, parsed_rows, tokenized)
 
                 row_to_pos = {int(r): i for i, r in enumerate(parsed_rows)}
                 positions = np.array(
@@ -1713,14 +1543,14 @@ class EssentialWebProxyRunner(BaseProxyRunner):
             from concurrent.futures import ThreadPoolExecutor
 
             def _load_disk_cache(sid):
-                return sid, self._cached_shard_rows(sid)
+                return sid, self._token_cache.cached_shard_rows(sid)
 
             with ThreadPoolExecutor(max_workers=min(32, len(shard_groups))) as pool:
                 disk_cache_map = dict(pool.map(_load_disk_cache, shard_groups.keys()))
 
             for sid, (shard_path, local_rows) in shard_groups.items():
                 cached_rows = disk_cache_map[sid]
-                memory_cached = self._memory_cache_get_rows(sid)
+                memory_cached = self._token_cache.get_rows(sid)
 
                 row_col_vals = mgr.local_to_row_col(sid, local_rows)
 
@@ -1763,29 +1593,13 @@ class EssentialWebProxyRunner(BaseProxyRunner):
 
             with PerfTimer.section("cache_results", "tokenize_all"):
                 for sid, parsed_rows, miss_tokens, io_time, tokenize_time, total_time in parallel_results:
-                    with self._memory_cache_lock:
-                        if sid in self._memory_cache:
-                            old = self._memory_cache[sid]
-                            combined_rows = np.concatenate([old["rows"], parsed_rows])
-                            combined_tokens = np.concatenate([old["tokens"], miss_tokens])
-                            sort_order = np.argsort(combined_rows)
-                            self._memory_cache[sid] = {
-                                "rows": combined_rows[sort_order],
-                                "tokens": combined_tokens[sort_order],
-                            }
-                            self._memory_cache_bytes += parsed_rows.nbytes + miss_tokens.nbytes
-                        else:
-                            self._memory_cache[sid] = {"rows": parsed_rows, "tokens": miss_tokens}
-                            self._memory_cache_bytes += parsed_rows.nbytes + miss_tokens.nbytes
-                        if sid in self._memory_cache_lru:
-                            self._memory_cache_lru.remove(sid)
-                        self._memory_cache_lru.append(sid)
+                    self._token_cache.bulk_add(sid, parsed_rows, miss_tokens)
                     total_tokenized += len(parsed_rows)
         else:
             print(f"[TokenizeAll] All {len(shard_groups)} shards fully cached, 0 miss rows")
 
         elapsed = time.time() - t0
-        cache_gb = self._memory_cache_bytes / (1024 ** 3)
+        cache_gb = self._token_cache.cache_gb
         print(f"[TokenizeAll] Done: {total_tokenized:,} new docs tokenized, "
               f"{total_cached:,} from cache ({elapsed:.1f}s), memory cache: {cache_gb:.1f} GB")
         print(f"[TokenizeAll] All {len(all_selected)} experiments ready "
@@ -1936,7 +1750,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                     if item is None:
                         break
                     sid, rows, tokens = item
-                    self._cache_add_rows(sid, rows, torch.from_numpy(tokens))
+                    self._token_cache.add_to_disk(sid, rows, torch.from_numpy(tokens))
                     write_count += 1
                 except thread_queue.Empty:
                     continue
