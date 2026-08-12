@@ -80,6 +80,8 @@ from quadmix.pipeline.report import (
     str_has_cjk,
 )
 from quadmix.sampling.batch_sampler import resolve_parquet_source
+from analysis._common.tokenize_helpers import init_tok_worker, tokenize_lens, tokenize_batch, resolve_tokenizer_path
+from analysis._common.stats_helpers import spearman, spearman_rho_vs_fixed
 
 
 # ── CLI ──────────────────────────────────────────────────────────
@@ -191,69 +193,6 @@ def resolve_schema_path(schema_arg):
         os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     )
     return os.path.join(project_root, schema_arg)
-
-
-# ── Tokenizer worker (for token-length & crop analysis) ─────────
-
-
-_ENC = None
-_BOS_ID = None
-_TOK_THREADS = 1
-
-
-def _init_tok_worker(tokenizer_path, tok_threads):
-    global _ENC, _BOS_ID, _TOK_THREADS
-    _TOK_THREADS = tok_threads
-    if not tokenizer_path:
-        return
-    pkl = tokenizer_path if os.path.isfile(tokenizer_path) \
-        else os.path.join(tokenizer_path, "tokenizer.pkl")
-    with open(pkl, "rb") as f:
-        _ENC = pickle.load(f)
-    _BOS_ID = _ENC.encode_single_token("<|bos|>")
-
-
-def _tokenize_lens(texts):
-    """Return numpy int64 array of token lengths (incl. +1 BOS the dataloader prepends)."""
-    if _ENC is None:
-        return None
-    n = len(texts)
-    out = np.empty(n, dtype=np.int64)
-    bs = 256
-    for s in range(0, n, bs):
-        chunk = [t or "" for t in texts[s:s + bs]]
-        try:
-            encs = _ENC.encode_ordinary_batch(chunk, num_threads=_TOK_THREADS)
-        except (AttributeError, TypeError):
-            encs = [_ENC.encode_ordinary(t) for t in chunk]
-        for j, ids in enumerate(encs):
-            out[s + j] = len(ids) + 1
-    return out
-
-
-def _tokenize_batch(task):
-    """Worker: tokenize a batch of texts, return (batch_idx, token_lengths)."""
-    idx, texts = task
-    return idx, _tokenize_lens(texts)
-
-
-def _resolve_tokenizer_path(args):
-    """Resolve tokenizer path: --tokenizer arg, then $NANOCHAT_MODEL_DIR/tokenizer."""
-    if args.tokenizer:
-        pkl = args.tokenizer if os.path.isfile(args.tokenizer) \
-            else os.path.join(args.tokenizer, "tokenizer.pkl")
-        if os.path.isfile(pkl):
-            return args.tokenizer
-        print(f"  [warn] --tokenizer points to {args.tokenizer} but no tokenizer.pkl found")
-        return None
-    model_dir = os.environ.get(
-        "NANOCHAT_MODEL_DIR", "/home/ma-user/work/nanochat_model_dir")
-    default_tok = os.path.join(model_dir, "tokenizer")
-    default_pkl = os.path.join(default_tok, "tokenizer.pkl")
-    if os.path.isfile(default_pkl):
-        print(f"  [info] tokenizer auto-detected: {default_pkl}")
-        return default_tok
-    return None
 
 
 # ── Packing simulation (BOS-bestfit, mirrors nanochat dataloader) ─
@@ -384,10 +323,10 @@ def _tokenize_sampled_docs(sampled_df, tokenizer_path, sample_size,
         for i in range(0, len(texts_all), batch_size)
     ]
     parts = []
-    with Pool(num_workers, initializer=_init_tok_worker,
+    with Pool(num_workers, initializer=init_tok_worker,
               initargs=(tokenizer_path, tok_threads)) as pool:
         for idx, lens in tqdm(
-            pool.imap_unordered(_tokenize_batch, tasks, chunksize=1),
+            pool.imap_unordered(tokenize_batch, tasks, chunksize=1),
             total=len(tasks), desc="  tokenize", leave=False,
         ):
             parts.append((idx, lens))
@@ -488,10 +427,10 @@ def _tokenize_from_parquet_shards(parquet_path, tokenizer_path, sample_size,
         for i in range(0, len(texts_arr), batch_size)
     ]
     parts = []
-    with Pool(num_workers, initializer=_init_tok_worker,
+    with Pool(num_workers, initializer=init_tok_worker,
               initargs=(tokenizer_path, tok_threads)) as pool:
         for idx, lens in tqdm(
-            pool.imap_unordered(_tokenize_batch, tasks, chunksize=1),
+            pool.imap_unordered(tokenize_batch, tasks, chunksize=1),
             total=len(tasks), desc="  tokenize", leave=False,
         ):
             parts.append((idx, lens))
@@ -1601,59 +1540,6 @@ def write_analysis_summary(
 # ── Proxy val_loss hard-vs-easy analysis ──────────────────────────
 
 
-def _spearman(x, y):
-    x = np.asarray(x, dtype=np.float64)
-    y = np.asarray(y, dtype=np.float64)
-    n = len(x)
-    if n < 2:
-        return 0.0
-    rx = np.argsort(np.argsort(x)).astype(np.float64)
-    ry = np.argsort(np.argsort(y)).astype(np.float64)
-    rx_m = rx - rx.mean()
-    ry_m = ry - ry.mean()
-    den = np.sqrt(np.sum(rx_m ** 2) * np.sum(ry_m ** 2))
-    return float(np.sum(rx_m * ry_m) / den) if den > 0 else 0.0
-
-
-def _spearman_rho_vs_fixed(quality_scores, y, n_criteria, n_jobs):
-    """Spearman ρ of each quality criterion vs a FIXED y (e.g. char_counts).
-
-    Optimized over a per-criterion _spearman loop:
-      - the rank of y is computed ONCE (not N_criteria times),
-      - each x is ranked with a single argsort + scatter (not double argsort),
-      - the N_criteria columns are ranked in parallel via threads.
-    """
-    y = np.asarray(y, dtype=np.float64)
-    n = len(y)
-    if n < 2:
-        return np.zeros(n_criteria, dtype=np.float64)
-    order_y = np.argsort(y, kind="quicksort")
-    ry = np.empty(n, dtype=np.float64)
-    ry[order_y] = np.arange(n, dtype=np.float64)
-    ry_m = ry - ry.mean()
-    ry_ss = float(np.sum(ry_m ** 2))
-
-    def _rho_col(k):
-        x = np.asarray(quality_scores[:, k], dtype=np.float64)
-        if len(x) < 2:
-            return 0.0
-        order_x = np.argsort(x, kind="quicksort")
-        rx = np.empty(n, dtype=np.float64)
-        rx[order_x] = np.arange(n, dtype=np.float64)
-        rx_m = rx - rx.mean()
-        den = (float(np.sum(rx_m ** 2)) * ry_ss) ** 0.5
-        return float(np.sum(rx_m * ry_m) / den) if den > 0 else 0.0
-
-    effective = n_jobs if n_jobs != -1 else (os.cpu_count() or 1)
-    if effective > 1 and n_criteria > 1:
-        from joblib import Parallel, delayed
-        results = Parallel(n_jobs=min(effective, n_criteria), prefer="threads")(
-            delayed(_rho_col)(k) for k in range(n_criteria)
-        )
-        return np.array(results, dtype=np.float64)
-    return np.array([_rho_col(k) for k in range(n_criteria)], dtype=np.float64)
-
-
 def _domain_block(symbol, name, hard_v, easy_v, mid_v, domain_short, M):
     """Build a per-domain hard/easy/mid comparison table (list of lines)."""
     out = [
@@ -1846,18 +1732,18 @@ def _analyze_proxy_val_loss(exp_dir, domain_names, quality_names, extreme_count)
     lines.append("-" * 70)
     lines.append("Spearman Correlation: val_loss vs each parameter (|rho| sorted desc)")
     lines.append("-" * 70)
-    sp_rows = [("lambda-entropy (diversity)", _spearman(val_losses, lam_entropy))]
+    sp_rows = [("lambda-entropy (diversity)", spearman(val_losses, lam_entropy))]
     for m in range(M):
-        sp_rows.append((f"eta[{domain_short[m]}]", _spearman(val_losses, eta[:, m])))
-        sp_rows.append((f"lambda[{domain_short[m]}]", _spearman(val_losses, lam[:, m])))
-        sp_rows.append((f"omega[{domain_short[m]}]", _spearman(val_losses, omega[:, m])))
-        sp_rows.append((f"epsilon[{domain_short[m]}]", _spearman(val_losses, eps[:, m])))
+        sp_rows.append((f"eta[{domain_short[m]}]", spearman(val_losses, eta[:, m])))
+        sp_rows.append((f"lambda[{domain_short[m]}]", spearman(val_losses, lam[:, m])))
+        sp_rows.append((f"omega[{domain_short[m]}]", spearman(val_losses, omega[:, m])))
+        sp_rows.append((f"epsilon[{domain_short[m]}]", spearman(val_losses, eps[:, m])))
         if noise_criterion:
             sp_rows.append(
-                (f"alpha_noise[{domain_short[m]}]", _spearman(val_losses, alpha_noise[:, m]))
+                (f"alpha_noise[{domain_short[m]}]", spearman(val_losses, alpha_noise[:, m]))
             )
     for j, t in enumerate(tasks):
-        sp_rows.append((f"task:{t}", _spearman(val_losses, per_task[:, j])))
+        sp_rows.append((f"task:{t}", spearman(val_losses, per_task[:, j])))
     sp_rows.sort(key=lambda r: -abs(r[1]))
     lines.append(f"  {'Param':<30s} {'rho':>8s}")
     lines.append(f"  {'-' * 40}")
@@ -2060,7 +1946,7 @@ def _analyze_optimizer_domain_proportions(
             domain_proportions[:, m] * 100, val_losses,
             alpha=0.4, s=12, c="#5B9BD5",
         )
-        rho_m = _spearman(domain_proportions[:, m], val_losses)
+        rho_m = spearman(domain_proportions[:, m], val_losses)
         ax.set_xlabel(f"{domain_short[m]} proportion (%)")
         ax.set_ylabel("val_loss")
         ax.set_title(f"{domain_short[m]}: ρ={rho_m:+.4f}")
@@ -2097,7 +1983,7 @@ def _analyze_optimizer_domain_proportions(
     lines.append(f"  {'-' * 60}")
     for m in range(num_domains):
         props_m = domain_proportions[:, m] * 100
-        rho = _spearman(domain_proportions[:, m], val_losses)
+        rho = spearman(domain_proportions[:, m], val_losses)
         lines.append(
             f"  {domain_short[m]:<15s} {props_m.mean():>8.2f} "
             f"{props_m.std():>8.2f} {props_m.min():>8.2f} "
@@ -2185,7 +2071,7 @@ def _analyze_optimizer_domain_proportions(
             break
 
     if math_idx is not None:
-        rho_math = _spearman(domain_proportions[:, math_idx], val_losses)
+        rho_math = spearman(domain_proportions[:, math_idx], val_losses)
         easy_math = domain_proportions[easy_idx, math_idx].mean() * 100
         hard_math = domain_proportions[hard_idx, math_idx].mean() * 100
         lines.append(
@@ -2373,9 +2259,9 @@ def _analyze_diversity(
     n_uniques = np.array([r["n_unique"] for r in records])
     densities = np.array([r["doc_density"] for r in records])
 
-    rho_vd = _spearman(val_losses, div_scores)
-    rho_vn = _spearman(val_losses, n_uniques)
-    rho_density = _spearman(val_losses, densities)
+    rho_vd = spearman(val_losses, div_scores)
+    rho_vn = spearman(val_losses, n_uniques)
+    rho_density = spearman(val_losses, densities)
 
     order = np.argsort(val_losses)
     pareto_idx = []
@@ -2786,7 +2672,7 @@ def main():
     quality_scores = mgr.quality_scores
     N_criteria = params.num_criteria
     print(f"       Computing quality-length ρ ({N_criteria} criteria)...", flush=True)
-    quality_length_rhos = _spearman_rho_vs_fixed(
+    quality_length_rhos = spearman_rho_vs_fixed(
         quality_scores, char_counts, N_criteria, args.n_jobs
     )
     print(f"       Quality-length ρ: {quality_length_rhos}")
@@ -2795,7 +2681,7 @@ def main():
     crop_stats = None
     tok_lens = None
     baseline_tok_lens = None
-    tokenizer_path = _resolve_tokenizer_path(args)
+    tokenizer_path = resolve_tokenizer_path(args)
     if tokenizer_path:
         num_workers = args.num_workers or min(32, os.cpu_count() or 1)
         domain_col = None

@@ -84,14 +84,11 @@ except ImportError:
 
 from quadmix.pipeline.report import setup_style, save_fig
 from quadmix.sampling.batch_sampler import resolve_parquet_source
+from analysis._common.tokenize_helpers import init_tok_worker, tokenize_lens
+from analysis._common.stats_helpers import spearman
 
 
 _COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
-
-# worker globals for tokenization
-_ENC = None
-_BOS_ID = None
-_TOK_THREADS = 1
 
 
 # ── per-document metrics ──────────────────────────────────────────
@@ -119,39 +116,6 @@ def _doc_metrics(text):
     toks = text.split()
     div = len(set(toks)) / len(toks) if toks else 0.0
     return n, ent, rep, div
-
-
-# ── tokenizer worker init ─────────────────────────────────────────
-
-
-def _init_tok_worker(tokenizer_path, tok_threads):
-    global _ENC, _BOS_ID, _TOK_THREADS
-    _TOK_THREADS = tok_threads
-    if not tokenizer_path:
-        return
-    pkl = tokenizer_path if os.path.isfile(tokenizer_path) \
-        else os.path.join(tokenizer_path, "tokenizer.pkl")
-    with open(pkl, "rb") as f:
-        _ENC = pickle.load(f)
-    _BOS_ID = _ENC.encode_single_token("<|bos|>")
-
-
-def _tokenize_lens(texts):
-    """Return numpy int64 array of token lengths (incl. +1 BOS the dataloader prepends)."""
-    if _ENC is None:
-        return None
-    n = len(texts)
-    out = np.empty(n, dtype=np.int64)
-    bs = 256
-    for s in range(0, n, bs):
-        chunk = [t or "" for t in texts[s:s + bs]]
-        try:
-            encs = _ENC.encode_ordinary_batch(chunk, num_threads=_TOK_THREADS)
-        except (AttributeError, TypeError):
-            encs = [_ENC.encode_ordinary(t) for t in chunk]
-        for j, ids in enumerate(encs):
-            out[s + j] = len(ids) + 1  # +1 for BOS prepended by the dataloader
-    return out
 
 
 # ── shard worker ──────────────────────────────────────────────────
@@ -183,7 +147,7 @@ def _scan_shard(task):
     if has_domain and "domain" in table.column_names:
         dom_labels = table["domain"].to_pylist()
         dom = Counter(dom_labels)
-    tok_lens = _tokenize_lens(texts) if do_tok else None
+    tok_lens = tokenize_lens(texts) if do_tok else None
 
     text_hashes = [hashlib.sha1((t or "").encode("utf-8")).hexdigest() for t in texts]
 
@@ -210,7 +174,7 @@ def _scan_sampled_batch(task):
     process via ``ParquetFile.iter_batches`` and dispatched to a Pool worker.
     The worker extracts metadata arrays and (optionally) tokenizes text,
     using the global ``_ENC`` / ``_TOK_THREADS`` initialized by
-    ``_init_tok_worker``.
+    ``init_tok_worker``.
     """
     idx, batch, do_tok, domain_col, quality_cols = task
     col_names = set(batch.schema.names)
@@ -230,7 +194,7 @@ def _scan_sampled_batch(task):
     if do_tok and "text" in col_names:
         if texts is None:
             texts = batch.column("text").to_pylist()
-        tok_lens = _tokenize_lens(texts)
+        tok_lens = tokenize_lens(texts)
 
     dom_labels = None
     dom = Counter()
@@ -278,7 +242,7 @@ def _scan_sampled_arm(parquet_path, quality_cols, domain_names, do_tok=False,
     ``ParquetFile.iter_batches`` and dispatches each batch to a Pool worker
     (``_scan_sampled_batch``) for metadata extraction + tokenization.  This
     replaces the old single-threaded ``pq.read_table`` + ``to_pylist`` +
-    ``_tokenize_lens`` pipeline that bottlenecked on 1 core regardless of
+    ``tokenize_lens`` pipeline that bottlenecked on 1 core regardless of
     ``--num-workers``.
 
     ent/rep/div are left empty so the text-only histograms simply skip this arm
@@ -335,7 +299,7 @@ def _scan_sampled_arm(parquet_path, quality_cols, domain_names, do_tok=False,
     L, TOK, DOM = [], [], Counter()
     dom_labels_all, doc_ids_all, extra_arrays = [], [], {}
 
-    with Pool(num_workers, initializer=_init_tok_worker,
+    with Pool(num_workers, initializer=init_tok_worker,
               initargs=(tokenizer_path, tok_threads)) as pool:
         for result in tqdm(
             pool.imap_unordered(_scan_sampled_batch, tasks, chunksize=1),
@@ -615,20 +579,6 @@ def _fig_length_by_domain(per_arm, domain_names, out_dir,
 # ── quality-length correlation ───────────────────────────────────
 
 
-def _spearman(x, y):
-    x = np.asarray(x, dtype=np.float64)
-    y = np.asarray(y, dtype=np.float64)
-    n = len(x)
-    if n < 2:
-        return 0.0
-    rx = np.argsort(np.argsort(x)).astype(np.float64)
-    ry = np.argsort(np.argsort(y)).astype(np.float64)
-    rx_m = rx - rx.mean()
-    ry_m = ry - ry.mean()
-    den = np.sqrt(np.sum(rx_m ** 2) * np.sum(ry_m ** 2))
-    return float(np.sum(rx_m * ry_m) / den) if den > 0 else 0.0
-
-
 def _quality_length_correlation(per_arm, quality_cols, out_dir):
     length_key = "char_count"
     if not any(length_key in per_arm[a] for a in per_arm):
@@ -662,7 +612,7 @@ def _quality_length_correlation(per_arm, quality_cols, out_dir):
         row_str = f"  {arm_label:>16s}"
         for sk in signal_keys:
             if sk in a and len(a[sk]) == len(length):
-                rho = _spearman(a[sk], length)
+                rho = spearman(a[sk], length)
                 row.append(rho)
                 row_str += f"  {rho:>18.4f}"
             else:
@@ -767,7 +717,7 @@ def _within_stratum_quality_length_correlation(per_arm, quality_cols, out_dir, n
         lines.append("  Global ρ:")
         global_rhos = {}
         for sk in avail:
-            g = _spearman(a[sk], length)
+            g = spearman(a[sk], length)
             global_rhos[sk] = g
             lines.append(f"    {sk:20s}: {g:+.4f}")
         lines.append("")
@@ -778,7 +728,7 @@ def _within_stratum_quality_length_correlation(per_arm, quality_cols, out_dir, n
             mask = strata_masks[k]
             row = f"    Q{k+1} ({int(mask.sum()):>8,}):"
             for sk in global_rhos:
-                w = _spearman(a[sk][mask], length[mask])
+                w = spearman(a[sk][mask], length[mask])
                 within_rhos[sk].append(w)
                 row += f"  {sk[:8]}={w:+.3f}"
             lines.append(row)
@@ -822,12 +772,12 @@ def _within_stratum_quality_length_correlation(per_arm, quality_cols, out_dir, n
                 d_row = f"    {d:>12s} (n={d_n:,}):"
                 for sk in global_rhos:
                     d_q = a[sk][dmask]
-                    d_g = _spearman(d_q, d_length)
+                    d_g = spearman(d_q, d_length)
                     d_w = []
                     for k in range(K):
                         m = d_strata[k]
                         if m.sum() > 5:
-                            d_w.append(_spearman(d_q[m], d_length[m]))
+                            d_w.append(spearman(d_q[m], d_length[m]))
                     d_w_avg = float(np.mean(d_w)) if d_w else 0.0
                     d_r = (1 - abs(d_w_avg) / abs(d_g)) * 100 if abs(d_g) > 1e-8 else 0.0
                     d_row += f"  {sk[:8]}: g={d_g:+.3f} w={d_w_avg:+.3f} r={d_r:.0f}%"
@@ -1366,7 +1316,7 @@ def main():
         text_hashes_all = []
         doc_ids_all = []
         extra_arrays = {}
-        with Pool(num_workers, initializer=_init_tok_worker,
+        with Pool(num_workers, initializer=init_tok_worker,
                   initargs=(tokenizer_path, args.tokenizer_threads)) as pool:
             for result in tqdm(
                 pool.imap_unordered(_scan_shard, tasks, chunksize=1),
