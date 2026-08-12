@@ -57,12 +57,12 @@ def _process_shard_full(
     """
     io_t0 = time.time()
 
-    from quadmix.data.metadata_manager import _read_one_shard_texts_with_rows
+    from quadmix.data.metadata_manager import read_one_shard_texts_with_rows
 
     row_col = row_in_shard_col if has_row_in_shard else None
     row_col_values = np.array(miss_rows, dtype=np.int64) if has_row_in_shard else None
 
-    texts, parsed_rows = _read_one_shard_texts_with_rows(
+    texts, parsed_rows = read_one_shard_texts_with_rows(
         shard_path, text_col, row_col, row_col_values,
         has_row_in_shard, is_row_col_sequential, shard_total_rows,
     )

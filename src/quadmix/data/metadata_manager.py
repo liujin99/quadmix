@@ -223,7 +223,7 @@ def _read_one_shard_texts(
     return [chunk_map.get(int(rv), "") for rv in row_col_values]
 
 
-def _read_one_shard_texts_with_rows(
+def read_one_shard_texts_with_rows(
     shard_path: str,
     text_col: str,
     row_col: Optional[str],

@@ -82,7 +82,7 @@ except ImportError:
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "src"),
     )
 
-from quadmix.pipeline.report import _setup_style, _save_fig
+from quadmix.pipeline.report import setup_style, save_fig
 from quadmix.sampling.batch_sampler import resolve_parquet_source
 
 
@@ -479,7 +479,7 @@ def _fig_hist(per_arm, key, xlabel, fname, out_dir, logx=False, vline=None):
     ax.set_ylabel("density")
     ax.set_title(xlabel)
     ax.legend(fontsize=9)
-    _save_fig(fig, out_dir, fname)
+    save_fig(fig, out_dir, fname)
 
 
 def _fig_int_hist(per_arm, key, xlabel, fname, out_dir, xmax=None):
@@ -511,7 +511,7 @@ def _fig_int_hist(per_arm, key, xlabel, fname, out_dir, xmax=None):
     ax.set_ylabel("fraction of rows")
     ax.set_title(xlabel)
     ax.legend(fontsize=9)
-    _save_fig(fig, out_dir, fname)
+    save_fig(fig, out_dir, fname)
 
 
 def _normalize_domain(dom, domain_names):
@@ -563,7 +563,7 @@ def _fig_domain(per_arm, out_dir):
     ax.set_ylabel("fraction of docs")
     ax.set_title("Domain distribution by arm")
     ax.legend(fontsize=9)
-    _save_fig(fig, out_dir, "fig_arm_domain.png")
+    save_fig(fig, out_dir, "fig_arm_domain.png")
 
 
 # ── length by domain ──────────────────────────────────────────────
@@ -609,7 +609,7 @@ def _fig_length_by_domain(per_arm, domain_names, out_dir,
         ax.tick_params(axis='x', rotation=30)
     fig.suptitle(f"{field} by domain" if field != "len" else "Document length by domain",
                 fontsize=13)
-    _save_fig(fig, out_dir, filename)
+    save_fig(fig, out_dir, filename)
 
 
 # ── quality-length correlation ───────────────────────────────────
@@ -698,7 +698,7 @@ def _quality_length_correlation(per_arm, quality_cols, out_dir):
             for j in range(n_sigs):
                 if not np.isnan(data[i, j]):
                     ax.text(j, i, f"{data[i, j]:.2f}", ha='center', va='center', fontsize=8)
-        _save_fig(fig, out_dir, "fig_quality_length_corr.png")
+        save_fig(fig, out_dir, "fig_quality_length_corr.png")
 
 
 # ── within-stratum quality-length correlation ────────────────────
@@ -883,7 +883,7 @@ def _fig_within_stratum_rho(fig_data, out_dir):
     fig.suptitle("Global vs Within-Stratum ρ (quality vs length)",
                  fontsize=12, fontweight="bold", y=1.02)
     fig.tight_layout()
-    _save_fig(fig, out_dir, "fig_within_stratum_rho.png")
+    save_fig(fig, out_dir, "fig_within_stratum_rho.png")
 
 
 # ── quality signal histograms ────────────────────────────────────
@@ -917,7 +917,7 @@ def _fig_quality_hist(per_arm, quality_cols, out_dir):
         ax.set_ylabel("density")
         ax.set_title(sk)
         ax.legend(fontsize=9)
-        _save_fig(fig, out_dir, f"fig_arm_{sk}.png")
+        save_fig(fig, out_dir, f"fig_arm_{sk}.png")
 
 
 # ── duplicate detection (report only, no dedup) ───────────────────
@@ -1056,7 +1056,7 @@ def _fig_duplicates(per_arm, out_dir):
     ax2.set_axisbelow(True)
 
     fig.suptitle("Duplicate Detection", fontsize=13)
-    _save_fig(fig, out_dir, "fig_duplicates.png")
+    save_fig(fig, out_dir, "fig_duplicates.png")
 
 
 def _detect_duplicates(per_arm, domain_names, out_dir):
@@ -1152,7 +1152,7 @@ def _fig_loss_curves(log_dir, out_dir):
     ax.set_title("Training loss curves by arm")
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3)
-    _save_fig(fig, out_dir, "fig_loss_curves.png")
+    save_fig(fig, out_dir, "fig_loss_curves.png")
     return curves
 
 
@@ -1439,7 +1439,7 @@ def main():
             print(f"  [warn] --sampled-parquet not found: {sp}")
 
     print("\n=== Generating figures ===")
-    _setup_style()
+    setup_style()
     _fig_hist(per_arm, "len", "Document length (chars)", "fig_arm_length.png", out_dir, logx=True)
     _fig_hist(per_arm, "ent", "Char entropy (bits)", "fig_arm_entropy.png", out_dir)
     _fig_hist(per_arm, "rep", "Single-char repetition fraction", "fig_arm_repetition.png", out_dir)

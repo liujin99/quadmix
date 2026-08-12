@@ -49,7 +49,6 @@ from quadmix.pipeline.shared_memory import SharedArrayInfo, ndarray_to_shared, s
 from quadmix.pipeline.parallel_dispatch import (
     _worker_dynamic_loop,
     _tokenize_shard_parallel,
-    _tokenize_chunk_to_array,
 )
 
 from collections import namedtuple
@@ -487,7 +486,7 @@ class EssentialWebProxyRunner(BaseProxyRunner):
         Replaces the previous global searchsorted + fancy-index approach.
         Uses stable argsort to restore the original selected_idx ordering after
         grouping by shard.  parsed_rows in _memory_cache are already sorted
-        ascending + unique (guaranteed by _read_one_shard_texts_with_rows), so
+        ascending + unique (guaranteed by read_one_shard_texts_with_rows), so
         searchsorted on cache["rows"] yields exact positions.
         """
         shard_ids = np.searchsorted(mgr._shard_starts, selected_idx, side="right") - 1
@@ -731,13 +730,13 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                     self._cache_misses += len(miss_rcv)
                     miss_rcv_arr = np.array(miss_rcv, dtype=np.int64)
 
-                    from quadmix.data.metadata_manager import _read_one_shard_texts_with_rows
+                    from quadmix.data.metadata_manager import read_one_shard_texts_with_rows
                     schema = self.metadata_manager.schema
                     text_col = schema.text_col
                     row_col = schema.row_in_shard_col if self.metadata_manager._has_row_in_shard else None
                     shard_total_rows = mgr._per_shard_info[sid]["num_docs"]
 
-                    selected_texts, parsed_rows = _read_one_shard_texts_with_rows(
+                    selected_texts, parsed_rows = read_one_shard_texts_with_rows(
                         shard_path, text_col, row_col, miss_rcv_arr,
                         self.metadata_manager._has_row_in_shard,
                         mgr._is_row_col_sequential, shard_total_rows,
@@ -773,14 +772,14 @@ class EssentialWebProxyRunner(BaseProxyRunner):
                     shard_tokens = hit_tokens
             else:
                 self._cache_misses += len(local_rows)
-                from quadmix.data.metadata_manager import _read_one_shard_texts_with_rows
+                from quadmix.data.metadata_manager import read_one_shard_texts_with_rows
                 schema = self.metadata_manager.schema
                 text_col = schema.text_col
                 row_col = schema.row_in_shard_col if self.metadata_manager._has_row_in_shard else None
                 row_col_arr = np.array(row_col_int, dtype=np.int64) if row_col is not None else None
                 shard_total_rows = mgr._per_shard_info[sid]["num_docs"]
 
-                selected_texts, parsed_rows = _read_one_shard_texts_with_rows(
+                selected_texts, parsed_rows = read_one_shard_texts_with_rows(
                     shard_path, text_col, row_col, row_col_arr,
                     self.metadata_manager._has_row_in_shard,
                     mgr._is_row_col_sequential, shard_total_rows,

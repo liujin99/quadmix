@@ -41,7 +41,7 @@ import matplotlib.pyplot as plt
 
 from quadmix.data.dataset_schema import DatasetSchema
 from quadmix.data.metadata_manager import ShardMetadataManager
-from quadmix.pipeline.report import _setup_style, _save_fig
+from quadmix.pipeline.report import setup_style, save_fig
 
 
 # ── CLI ──────────────────────────────────────────────────────────
@@ -229,7 +229,7 @@ def plot_within_stratum_rho(
     )
     fig.tight_layout()
 
-    return _save_fig(fig, output_dir, "fig_within_stratum_rho.png")
+    return save_fig(fig, output_dir, "fig_within_stratum_rho.png")
 
 
 # ── Main ─────────────────────────────────────────────────────────
@@ -428,7 +428,7 @@ def main():
 
     # ── Figure ──
     print("\nGenerating figure...")
-    _setup_style()
+    setup_style()
     fig_name = plot_within_stratum_rho(
         global_rhos, within_rhos, quality_names, K,
         stratum_bounds, args.exp_dir,

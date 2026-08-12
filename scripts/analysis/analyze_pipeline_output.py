@@ -74,10 +74,10 @@ from quadmix.data.dataset_schema import DatasetSchema
 from quadmix.data.metadata_manager import ShardMetadataManager
 from quadmix.pipeline import report as _report_mod
 from quadmix.pipeline.report import (
-    _setup_style,
-    _save_fig,
-    _get_domain_short,
-    _str_has_cjk,
+    setup_style,
+    save_fig,
+    get_domain_short,
+    str_has_cjk,
 )
 from quadmix.sampling.batch_sampler import resolve_parquet_source
 
@@ -520,7 +520,7 @@ def plot_quality_score_dist(
 ):
     """Figure 1: full corpus q̄ distribution by domain (overlaid)."""
     colors = _get_colors(num_domains)
-    domain_short = _get_domain_short(num_domains, domain_names)
+    domain_short = get_domain_short(num_domains, domain_names)
     top_domains = _get_top_domains(domain_counts)
 
     fig, ax = plt.subplots(figsize=(10, 5))
@@ -562,7 +562,7 @@ def plot_quality_score_dist(
     ax.grid(alpha=0.3, linestyle="--")
     ax.set_axisbelow(True)
     plt.tight_layout()
-    return _save_fig(fig, output_dir, "fig_quality_score_dist.png")
+    return save_fig(fig, output_dir, "fig_quality_score_dist.png")
 
 
 def plot_quality_rank_dist(
@@ -577,7 +577,7 @@ def plot_quality_rank_dist(
 ):
     """Figure 2: full corpus r̄ (solid) vs selected r̄ (dashed) by domain."""
     colors = _get_colors(num_domains)
-    domain_short = _get_domain_short(num_domains, domain_names)
+    domain_short = get_domain_short(num_domains, domain_names)
     top_domains = _get_top_domains(domain_counts)
 
     fig, ax = plt.subplots(figsize=(10, 5))
@@ -623,7 +623,7 @@ def plot_quality_rank_dist(
     ax.set_axisbelow(True)
     ax.set_xlim(0, 1)
     plt.tight_layout()
-    return _save_fig(fig, output_dir, "fig_quality_rank_dist.png")
+    return save_fig(fig, output_dir, "fig_quality_rank_dist.png")
 
 
 def plot_duplication_analysis(
@@ -639,7 +639,7 @@ def plot_duplication_analysis(
     Top subplot: per-domain stacked bars (unique vs duplicate docs).
     Bottom subplot: sampling-value distribution in 4 buckets.
     """
-    domain_short = _get_domain_short(num_domains, domain_names)
+    domain_short = get_domain_short(num_domains, domain_names)
 
     use_horizontal = num_domains > 10
     if use_horizontal:
@@ -741,7 +741,7 @@ def plot_duplication_analysis(
         ax2.set_title("Sampling Value Distribution (not available)")
 
     plt.tight_layout()
-    return _save_fig(fig, output_dir, "fig_duplication_analysis.png")
+    return save_fig(fig, output_dir, "fig_duplication_analysis.png")
 
 
 # ── Quality-length decomposition figure ───────────────────────────
@@ -763,7 +763,7 @@ def plot_quality_length_decomposition(
     """
     N = params.num_criteria
     dw = params.merge_config.domain_weights
-    domain_short = _get_domain_short(num_domains, domain_names)
+    domain_short = get_domain_short(num_domains, domain_names)
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
 
@@ -834,7 +834,7 @@ def plot_quality_length_decomposition(
     ax2.set_axisbelow(True)
 
     plt.tight_layout()
-    return _save_fig(fig, output_dir, "fig_quality_length_decomposition.png")
+    return save_fig(fig, output_dir, "fig_quality_length_decomposition.png")
 
 
 # ── Token length & crop analysis figures ──────────────────────────
@@ -852,7 +852,7 @@ def plot_token_length_dist(tok_lens, seq_len, domain_labels,
         print("  [skip] fig_token_length_dist: no token length data")
         return None
     colors = _get_colors(num_domains)
-    domain_short = _get_domain_short(num_domains, domain_names)
+    domain_short = get_domain_short(num_domains, domain_names)
 
     fig, ax = plt.subplots(figsize=(10, 5))
 
@@ -893,7 +893,7 @@ def plot_token_length_dist(tok_lens, seq_len, domain_labels,
     ax.grid(alpha=0.3, linestyle="--")
     ax.set_axisbelow(True)
     plt.tight_layout()
-    return _save_fig(fig, output_dir, "fig_token_length_dist.png")
+    return save_fig(fig, output_dir, "fig_token_length_dist.png")
 
 
 def plot_crop_analysis(crop_stats, output_dir):
@@ -933,7 +933,7 @@ def plot_crop_analysis(crop_stats, output_dir):
     ax2.set_axisbelow(True)
 
     plt.tight_layout()
-    return _save_fig(fig, output_dir, "fig_crop_analysis.png")
+    return save_fig(fig, output_dir, "fig_crop_analysis.png")
 
 
 def plot_packing_boundaries(boundaries, output_dir, seq_len=2048):
@@ -959,7 +959,7 @@ def plot_packing_boundaries(boundaries, output_dir, seq_len=2048):
     ax.grid(axis="y", alpha=0.3, linestyle="--")
     ax.set_axisbelow(True)
     plt.tight_layout()
-    return _save_fig(fig, output_dir, "fig_packing_boundaries.png")
+    return save_fig(fig, output_dir, "fig_packing_boundaries.png")
 
 
 # ── Summary writer ───────────────────────────────────────────────
@@ -1014,7 +1014,7 @@ def write_analysis_summary(
     lines.append(f"Quality criteria: {params.num_criteria} ({quality_names})")
     lines.append("")
 
-    domain_short = _get_domain_short(num_domains, domain_names)
+    domain_short = get_domain_short(num_domains, domain_names)
 
     lines.append("Quality Weights (α):")
     dw = params.merge_config.domain_weights
@@ -1558,7 +1558,7 @@ def write_analysis_summary(
 
     # ── CJK Font Note ──
     if not _report_mod._CJK_FONT_AVAILABLE and domain_names is not None:
-        has_cjk = any(_str_has_cjk(n) for n in domain_names[:num_domains])
+        has_cjk = any(str_has_cjk(n) for n in domain_names[:num_domains])
         if has_cjk:
             lines.append("-" * 70)
             lines.append("Font Note")
@@ -1721,7 +1721,7 @@ def _analyze_proxy_val_loss(exp_dir, domain_names, quality_names, extreme_count)
 
     domain_keys = sorted(records[0]["sampling_params"].keys())
     M = len(domain_keys)
-    domain_short = _get_domain_short(M, domain_keys)
+    domain_short = get_domain_short(M, domain_keys)
 
     noise_criterion = None
     sample_qw = records[0]["quality_weights"][domain_keys[0]]
@@ -2025,7 +2025,7 @@ def _analyze_optimizer_domain_proportions(
         [r["domain_props"] for r in records]
     )  # (n, M)
 
-    domain_short = _get_domain_short(num_domains, list(domain_names))
+    domain_short = get_domain_short(num_domains, list(domain_names))
 
     # ── Retrain LightGBM ──
     params_list = []
@@ -2068,7 +2068,7 @@ def _analyze_optimizer_domain_proportions(
         "Domain proportion vs val_loss (proxy experiments)", fontsize=13
     )
     fig.tight_layout()
-    _save_fig(fig, exp_dir, "fig_optimizer_domain_vs_loss.png")
+    save_fig(fig, exp_dir, "fig_optimizer_domain_vs_loss.png")
 
     # ── Easy vs hard groups ──
     order = np.argsort(val_losses)
@@ -2665,7 +2665,7 @@ def _analyze_diversity(
     ax.grid(alpha=0.3, linestyle="--")
     ax.set_axisbelow(True)
     plt.tight_layout()
-    _save_fig(fig, exp_dir, "fig_diversity_tradeoff.png")
+    save_fig(fig, exp_dir, "fig_diversity_tradeoff.png")
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
     lam_arr = np.array([lr["lambda"] for lr in lambda_results])
@@ -2689,7 +2689,7 @@ def _analyze_diversity(
     ax2.set_axisbelow(True)
 
     plt.tight_layout()
-    _save_fig(fig, exp_dir, "fig_diversity_lambda_sweep.png")
+    save_fig(fig, exp_dir, "fig_diversity_lambda_sweep.png")
 
     print(f"  [Diversity] Spearman(val_loss, diversity) = {rho_vd:+.4f}")
     print(f"  [Diversity] Pareto frontier: {len(pareto_idx)} points")
@@ -2860,7 +2860,7 @@ def main():
 
     # ── Generate figures ──
     print(f"\nGenerating outputs in: {args.exp_dir}")
-    _setup_style()
+    setup_style()
     fig_score = plot_quality_score_dist(
         merged_scores, domain_indices, domain_counts,
         domain_names, num_domains, args.exp_dir,

@@ -29,7 +29,7 @@ _CJK_FONT_AVAILABLE = False
 _CJK_FONT_PATH = None
 
 
-def _str_has_cjk(s):
+def str_has_cjk(s):
     return any(unicodedata.category(c) == 'Lo' for c in str(s))
 
 
@@ -42,10 +42,10 @@ def _get_bundled_font_path():
     return None
 
 
-def _get_domain_short(num_domains, domain_names=None):
+def get_domain_short(num_domains, domain_names=None):
     if domain_names is not None:
         names = [str(n) for n in domain_names[:num_domains]]
-        if not _CJK_FONT_AVAILABLE and any(_str_has_cjk(n) for n in names):
+        if not _CJK_FONT_AVAILABLE and any(str_has_cjk(n) for n in names):
             names = [f"D{i}" for i in range(len(names))]
         if num_domains > len(domain_names):
             names += [f"D{i}" for i in range(len(domain_names), num_domains)]
@@ -61,7 +61,7 @@ def _get_domain_display(num_domains, domain_names=None):
         if num_domains > len(domain_names):
             names += [f"domain_{i}" for i in range(len(domain_names), num_domains)]
         return names
-    return _get_domain_short(num_domains, domain_names)
+    return get_domain_short(num_domains, domain_names)
 
 
 _DEFAULT_QUALITY_NAMES = ["DCLM", "FineWeb-Edu", "English", "Math (Gen)", "Math (OpenWeb)"]
@@ -117,7 +117,7 @@ def _find_cjk_font():
     return None
 
 
-def _setup_style():
+def setup_style():
     global _CJK_FONT_AVAILABLE
     cjk_font = _find_cjk_font()
     if cjk_font is not None:
@@ -139,7 +139,7 @@ def _setup_style():
     })
 
 
-def _save_fig(fig, output_dir, filename):
+def save_fig(fig, output_dir, filename):
     path = os.path.join(output_dir, filename)
     fig.savefig(path, facecolor="white")
     plt.close(fig)
@@ -150,8 +150,8 @@ def _save_fig(fig, output_dir, filename):
 # ── Figure 1 ──
 
 def _make_fig1(orig_dist, opt_dist, output_dir, num_domains=22, domain_names=None):
-    _setup_style()
-    domain_short = _get_domain_short(num_domains, domain_names)
+    setup_style()
+    domain_short = get_domain_short(num_domains, domain_names)
     fig, ax = plt.subplots(figsize=(8, 4.5))
     m = len(orig_dist)
     x = np.arange(m)
@@ -175,15 +175,15 @@ def _make_fig1(orig_dist, opt_dist, output_dir, num_domains=22, domain_names=Non
                 ax.text(bar.get_x() + bar.get_width() / 2, h + 0.5,
                         f"{h:.1f}%", ha="center", va="bottom", fontsize=6, color=color)
     plt.tight_layout()
-    return _save_fig(fig, output_dir, "fig1_domain_distribution.png")
+    return save_fig(fig, output_dir, "fig1_domain_distribution.png")
 
 
 # ── Figure 2 ──
 
 def _make_fig2(domain_weights, num_domains, num_criteria, output_dir,
                domain_names=None, quality_names=None):
-    _setup_style()
-    domain_short = _get_domain_short(num_domains, domain_names)
+    setup_style()
+    domain_short = get_domain_short(num_domains, domain_names)
     q_names = quality_names if quality_names is not None else _DEFAULT_QUALITY_NAMES
     q_short = _get_quality_short(quality_names, num_criteria)
     data = np.zeros((num_domains, num_criteria))
@@ -222,7 +222,7 @@ def _make_fig2(domain_weights, num_domains, num_criteria, output_dir,
                         ha="center", va="center", fontsize=7,
                         fontweight="bold", color="white")
     plt.tight_layout()
-    return _save_fig(fig, output_dir, "fig2_quality_weights.png")
+    return save_fig(fig, output_dir, "fig2_quality_weights.png")
 
 
 # ── Table ──
@@ -631,9 +631,9 @@ def generate_report(
     ]
 
     if not _CJK_FONT_AVAILABLE and domain_names is not None:
-        has_cjk = any(_str_has_cjk(n) for n in domain_names[:num_domains])
+        has_cjk = any(str_has_cjk(n) for n in domain_names[:num_domains])
         if has_cjk:
-            domain_short = _get_domain_short(num_domains, domain_names)
+            domain_short = get_domain_short(num_domains, domain_names)
             domain_disp = _get_domain_display(num_domains, domain_names)
             pairs = []
             for i in range(min(num_domains, len(domain_short), len(domain_disp))):
